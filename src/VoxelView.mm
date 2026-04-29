@@ -59,6 +59,22 @@
 
     ImGui::StyleColorsDark();
 
+    // Load San Francisco from /System (Apple's license forbids bundling SF).
+    // Render at 2x and scale down for crisp glyphs on Retina.
+    {
+        const char* sf_path = "/System/Library/Fonts/SFNS.ttf";
+        const float font_size_pt = 13.0f;
+        const float oversample = 2.0f;
+        ImFont* font = io.Fonts->AddFontFromFileTTF(sf_path, font_size_pt * oversample);
+        if (font == nullptr) {
+            fprintf(stderr,
+                    "MacVoxel: failed to load %s, falling back to ImGui default\n",
+                    sf_path);
+            io.Fonts->AddFontDefault();
+        }
+        io.FontGlobalScale = 1.0f / oversample;
+    }
+
     ImGui_ImplMetal_Init(device);
     ImGui_ImplOSX_Init(self);
     _imguiAlive = YES;
