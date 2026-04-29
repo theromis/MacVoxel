@@ -3,8 +3,15 @@
 #import <Metal/Metal.h>
 #import <cstdio>
 
+#include "imgui.h"
+#include "imgui_impl_metal.h"
+#include "imgui_impl_osx.h"
+
+#include "ui/HelloPanel.h"
+
 @implementation VoxelView {
     id<MTLCommandQueue> _commandQueue;
+    BOOL _imguiAlive;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -21,19 +28,54 @@
 
     _commandQueue = [device newCommandQueue];
 
-    // Surface configuration. ImGui's Metal backend expects BGRA8Unorm.
     self.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
     self.depthStencilPixelFormat = MTLPixelFormatInvalid;
     self.sampleCount = 1;
     self.clearColor = MTLClearColorMake(0.118, 0.118, 0.18, 1.0);  // ~ #1e1e2e
 
-    // Drive frame production from CADisplayLink-driven MTKView ticks.
     self.preferredFramesPerSecond = 60;
     self.paused = NO;
     self.enableSetNeedsDisplay = NO;
 
     self.delegate = self;
+
+    [self setupImGuiWithDevice:device];
     return self;
+}
+
+// ---------------------------------------------------------------------------
+// ImGui lifecycle
+// ---------------------------------------------------------------------------
+
+- (void)setupImGuiWithDevice:(id<MTLDevice>)device {
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    // Multi-viewport is intentionally off for Phase 0 — single-window shell only.
+    io.IniFilename = nullptr;  // no imgui.ini file in CWD
+
+    ImGui::StyleColorsDark();
+
+    ImGui_ImplMetal_Init(device);
+    ImGui_ImplOSX_Init(self);
+    _imguiAlive = YES;
+}
+
+- (void)shutdownImGui {
+    if (!_imguiAlive) {
+        return;
+    }
+    _imguiAlive = NO;
+    ImGui_ImplMetal_Shutdown();
+    ImGui_ImplOSX_Shutdown();
+    ImGui::DestroyContext();
+}
+
+- (void)dealloc {
+    [self shutdownImGui];
 }
 
 // ---------------------------------------------------------------------------
@@ -41,7 +83,7 @@
 // ---------------------------------------------------------------------------
 
 - (void)mtkView:(MTKView*)__unused view drawableSizeWillChange:(CGSize)__unused size {
-    // No-op for Phase 0 — ImGui will read the framebuffer scale during draw.
+    // No-op; ImGui reads DisplaySize each frame.
 }
 
 - (void)drawInMTKView:(MTKView*)view {
@@ -51,15 +93,46 @@
         return;
     }
 
+    // Update ImGui display metrics each frame (handles resize and screen changes).
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize.x = static_cast<float>(view.bounds.size.width);
+    io.DisplaySize.y = static_cast<float>(view.bounds.size.height);
+
+    CGFloat scale = view.window.screen.backingScaleFactor;
+    if (scale <= 0.0) {
+        scale = NSScreen.mainScreen.backingScaleFactor;
+    }
+    io.DisplayFramebufferScale = ImVec2(static_cast<float>(scale), static_cast<float>(scale));
+
+    ImGui_ImplMetal_NewFrame(pass);
+    ImGui_ImplOSX_NewFrame(self);
+    ImGui::NewFrame();
+
+    macvoxel::DrawHelloPanel();
+
+    ImGui::Render();
+
     id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
     cmd.label = @"MacVoxel Frame";
 
     id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:pass];
-    enc.label = @"MacVoxel Clear";
+    enc.label = @"MacVoxel ImGui";
+    [enc pushDebugGroup:@"Dear ImGui rendering"];
+    ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmd, enc);
+    [enc popDebugGroup];
     [enc endEncoding];
 
     [cmd presentDrawable:drawable];
     [cmd commit];
+}
+
+// ---------------------------------------------------------------------------
+// First responder — without this, the view never receives keyboard events
+// and ImGui's text input / shortcuts go nowhere.
+// ---------------------------------------------------------------------------
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
 }
 
 @end

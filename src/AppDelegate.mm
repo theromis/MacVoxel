@@ -3,6 +3,8 @@
 
 #import <cstdio>
 
+#include "ui/HelloPanel.h"
+
 @implementation AppDelegate
 
 // ---------------------------------------------------------------------------
@@ -17,6 +19,14 @@
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)__unused sender {
     return YES;
+}
+
+- (void)applicationWillTerminate:(NSNotification*)__unused notification {
+    // Tear down ImGui while the view (and its Metal device) is still alive.
+    VoxelView* view = (VoxelView*)self.window.contentView;
+    if ([view isKindOfClass:[VoxelView class]]) {
+        [view shutdownImGui];
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -141,8 +151,17 @@
 - (NSMenuItem*)buildViewMenuItem {
     NSMenuItem* item = [[NSMenuItem alloc] init];
     NSMenu* menu = [[NSMenu alloc] initWithTitle:@"View"];
+
+    [menu addItemWithTitle:@"Show ImGui Demo"
+                    action:@selector(toggleImGuiDemo:)
+             keyEquivalent:@"d"];
+
     [item setSubmenu:menu];
     return item;
+}
+
+- (IBAction)toggleImGuiDemo:(id)__unused sender {
+    macvoxel::ToggleImGuiDemoWindow();
 }
 
 - (NSMenuItem*)buildWindowMenuItem {
