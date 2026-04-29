@@ -1,4 +1,5 @@
 #import "AppDelegate.h"
+#import "VoxelView.h"
 
 #import <cstdio>
 
@@ -33,6 +34,10 @@
                                                   defer:NO];
     [self.window setTitle:@"MacVoxel"];
     [self.window setReleasedWhenClosed:NO];
+
+    VoxelView* view = [[VoxelView alloc] initWithFrame:frame];
+    [self.window setContentView:view];
+    [self.window makeFirstResponder:view];
     [self.window center];
     [self.window makeKeyAndOrderFront:nil];
 }
