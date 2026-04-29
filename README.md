@@ -3,8 +3,8 @@
 A native macOS voxel editor in the spirit of MagicaVoxel. AppKit shell, Metal-backed
 content view, Dear ImGui for all in-window UI.
 
-This is the **Phase 0 shell** — window, menu bar, Metal clear, ImGui Hello panel. See
-`PLAN.md` for the full roadmap.
+Current state: **Phase 1** — single textured cube with orbit/pan/zoom camera, on top
+of the Phase 0 AppKit + Metal + ImGui shell. See `PLAN.md` for the full roadmap.
 
 ## Build
 
@@ -30,12 +30,22 @@ CMake's default Makefile generator.
 ## What you should see
 
 - Window titled **MacVoxel**, 1280×800, dark slate-blue (`#1e1e2e`) interior.
+- A grey-checker textured cube centered in the view, with depth-tested,
+  back-face-culled rendering and a hard-coded directional light.
 - Menu bar: **MacVoxel · File · Edit · View · Window**. File and Edit items are
   stubbed for Phase 0; they log to stderr when clicked.
 - A "Hello, MacVoxel" ImGui panel with slider, color picker, click-counter, and
-  frame-time readout.
+  frame-time readout, drawn on top of the cube.
 - **⌘D** toggles the full ImGui demo window (also under View → Show ImGui Demo).
 - **⌘Q** or closing the window quits cleanly.
+
+### Camera controls
+
+- **Option + drag** — orbit (drag-the-world: scene follows the cursor).
+- **Option + Shift + drag** — pan.
+- **Two-finger scroll** or **pinch** — zoom.
+- Dragging inside an ImGui window never moves the camera — the
+  `ImGui::GetIO().WantCaptureMouse` gate suppresses scene input there.
 
 The UI font is San Francisco, loaded at runtime from `/System/Library/Fonts/SFNS.ttf`.
 Apple's license forbids bundling SF, so it is not committed; macOS 13+ ships it at
