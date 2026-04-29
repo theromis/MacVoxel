@@ -1,0 +1,29 @@
+build/
+build-*/
+.DS_Store
+
+# Xcode user files (in case anyone opens via -G Xcode)
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+xcuserdata/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+Makefile
+*.cmake
+!cmake/*.cmake
+
+# Compile commands / IDE
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+.clangd/
+
+# Editor backups
+*.swp
+*~
