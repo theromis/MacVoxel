@@ -62,8 +62,10 @@ simd::float4x4 Camera::ProjectionMatrix(float aspect) const {
 }
 
 void Camera::Orbit(float dx_points, float dy_points) {
-    yaw += deg_to_rad(dx_points * kOrbitDegPerPx);
-    pitch += deg_to_rad(dy_points * kOrbitDegPerPx);
+    // Drag-the-world: cursor drags the scene, so the camera moves opposite
+    // to the cursor delta. yaw/pitch decrease as the user drags right/up.
+    yaw -= deg_to_rad(dx_points * kOrbitDegPerPx);
+    pitch -= deg_to_rad(dy_points * kOrbitDegPerPx);
     pitch = std::clamp(pitch, -kPitchLimit, kPitchLimit);
 }
 

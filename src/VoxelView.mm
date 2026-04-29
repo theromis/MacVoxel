@@ -12,10 +12,16 @@
 #include "Camera.h"
 #include "ui/HelloPanel.h"
 
+namespace {
+enum class DragMode { None, Orbit, Pan };
+}
+
 @implementation VoxelView {
     id<MTLCommandQueue> _commandQueue;
     CubeRenderer* _cube;
     macvoxel::Camera _camera;
+    DragMode _dragMode;
+    NSPoint _lastDragLocation;
     BOOL _imguiAlive;
 }
 
@@ -171,6 +177,80 @@
 
 - (BOOL)acceptsFirstResponder {
     return YES;
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent*)__unused event {
+    return YES;
+}
+
+// ---------------------------------------------------------------------------
+// Camera input — gated on ImGui's WantCaptureMouse so dragging inside an
+// ImGui window never moves the scene camera.
+//
+// Mapping:
+//   Option + drag         -> Orbit
+//   Option + Shift + drag -> Pan
+//   Scroll / pinch        -> Zoom
+//
+// Bare left-drag is intentionally unbound; reserved for the future
+// voxel-placement tool (Phase 5+).
+// ---------------------------------------------------------------------------
+
+- (void)mouseDown:(NSEvent*)event {
+    if (ImGui::GetIO().WantCaptureMouse) {
+        _dragMode = DragMode::None;
+        return;
+    }
+    const NSEventModifierFlags m = event.modifierFlags;
+    const BOOL hasOption = (m & NSEventModifierFlagOption) != 0;
+    const BOOL hasShift = (m & NSEventModifierFlagShift) != 0;
+    if (hasOption && hasShift) {
+        _dragMode = DragMode::Pan;
+    } else if (hasOption) {
+        _dragMode = DragMode::Orbit;
+    } else {
+        _dragMode = DragMode::None;
+    }
+    _lastDragLocation = event.locationInWindow;
+}
+
+- (void)mouseDragged:(NSEvent*)event {
+    if (_dragMode == DragMode::None) {
+        return;
+    }
+    const NSPoint p = event.locationInWindow;
+    const float dx = static_cast<float>(p.x - _lastDragLocation.x);
+    const float dy = static_cast<float>(p.y - _lastDragLocation.y);
+    _lastDragLocation = p;
+
+    switch (_dragMode) {
+        case DragMode::Orbit: _camera.Orbit(dx, dy); break;
+        case DragMode::Pan:   _camera.Pan(dx, dy);   break;
+        case DragMode::None:  break;
+    }
+}
+
+- (void)mouseUp:(NSEvent*)__unused event {
+    _dragMode = DragMode::None;
+}
+
+- (void)scrollWheel:(NSEvent*)event {
+    if (ImGui::GetIO().WantCaptureMouse) {
+        return;
+    }
+    // scrollingDeltaY is preferred over deltaY for trackpads; positive when
+    // the user scrolls upward in macOS natural-scroll mode.
+    const float ticks = static_cast<float>(event.scrollingDeltaY) * 0.1f;
+    _camera.Zoom(ticks);
+}
+
+- (void)magnifyWithEvent:(NSEvent*)event {
+    if (ImGui::GetIO().WantCaptureMouse) {
+        return;
+    }
+    // event.magnification is in [-1, 1] per gesture frame; scale so a typical
+    // pinch sweep is comparable to a few scroll ticks.
+    _camera.Zoom(static_cast<float>(event.magnification) * 8.0f);
 }
 
 @end
