@@ -52,12 +52,14 @@ set(APP_SOURCES
     src/main.mm
     src/AppDelegate.mm
     src/VoxelView.mm
+    src/Camera.cpp
     src/ui/HelloPanel.cpp
 )
 
 # Source files referenced in CMakeLists must exist for configure to succeed.
 # Step 2 only ships main.mm; touch placeholders so later steps can fill them in.
-foreach(_src IN ITEMS src/AppDelegate.mm src/VoxelView.mm src/ui/HelloPanel.cpp)
+foreach(_src IN ITEMS src/AppDelegate.mm src/VoxelView.mm src/Camera.cpp
+                       src/ui/HelloPanel.cpp)
     if(NOT EXISTS "${CMAKE_SOURCE_DIR}/${_src}")
         file(WRITE "${CMAKE_SOURCE_DIR}/${_src}" "// placeholder - filled in by a later step\n")
     endif()
