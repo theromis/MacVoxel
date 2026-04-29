@@ -1,5 +1,7 @@
 #import "VoxelView.h"
 
+#import "CubeRenderer.h"
+
 #import <Metal/Metal.h>
 #import <cstdio>
 
@@ -7,10 +9,13 @@
 #include "imgui_impl_metal.h"
 #include "imgui_impl_osx.h"
 
+#include "Camera.h"
 #include "ui/HelloPanel.h"
 
 @implementation VoxelView {
     id<MTLCommandQueue> _commandQueue;
+    CubeRenderer* _cube;
+    macvoxel::Camera _camera;
     BOOL _imguiAlive;
 }
 
@@ -29,15 +34,23 @@
     _commandQueue = [device newCommandQueue];
 
     self.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
-    self.depthStencilPixelFormat = MTLPixelFormatInvalid;
+    self.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
     self.sampleCount = 1;
     self.clearColor = MTLClearColorMake(0.118, 0.118, 0.18, 1.0);  // ~ #1e1e2e
+    self.clearDepth = 1.0;
 
     self.preferredFramesPerSecond = 60;
     self.paused = NO;
     self.enableSetNeedsDisplay = NO;
 
     self.delegate = self;
+
+    _cube = [[CubeRenderer alloc] initWithDevice:device
+                                     colorFormat:self.colorPixelFormat
+                                     depthFormat:self.depthStencilPixelFormat];
+    if (_cube == nil) {
+        return nil;
+    }
 
     [self setupImGuiWithDevice:device];
     return self;
@@ -128,11 +141,20 @@
 
     ImGui::Render();
 
+    // Aspect from drawableSize (pixels) is robust against mid-frame resizes.
+    const CGSize ds = view.drawableSize;
+    const float aspect = ds.height > 0 ? static_cast<float>(ds.width / ds.height) : 1.0f;
+    const simd::float4x4 viewMat = _camera.ViewMatrix();
+    const simd::float4x4 projMat = _camera.ProjectionMatrix(aspect);
+
     id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
     cmd.label = @"MacVoxel Frame";
 
     id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:pass];
-    enc.label = @"MacVoxel ImGui";
+    enc.label = @"MacVoxel Pass";
+
+    [_cube encodeWithEncoder:enc view:viewMat projection:projMat];
+
     [enc pushDebugGroup:@"Dear ImGui rendering"];
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmd, enc);
     [enc popDebugGroup];

@@ -53,6 +53,7 @@ set(APP_SOURCES
     src/AppDelegate.mm
     src/VoxelView.mm
     src/Camera.cpp
+    src/CubeRenderer.mm
     src/ui/HelloPanel.cpp
 )
 
