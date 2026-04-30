@@ -88,4 +88,19 @@ void Camera::Zoom(float ticks) {
     distance = std::clamp(distance, kDistanceMin, kDistanceMax);
 }
 
+void Camera::Frame(float extent) {
+    target = simd::float3{0.0f, 0.0f, 0.0f};
+    yaw = 0.5236f;    // 30°
+    pitch = 0.4363f;  // 25°
+    if (extent <= 0.0f) {
+        distance = 5.0f;
+        return;
+    }
+    // Bounding sphere of a cube of side `extent` has radius sqrt(3)/2 * extent.
+    constexpr float kSqrt3Over2 = 0.8660254f;
+    const float radius = kSqrt3Over2 * extent;
+    const float fit = radius / std::sin(fov_y * 0.5f);
+    distance = std::clamp(fit, kDistanceMin, kDistanceMax);
+}
+
 }  // namespace macvoxel

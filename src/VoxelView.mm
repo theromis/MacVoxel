@@ -5,6 +5,7 @@
 
 #import <Metal/Metal.h>
 #import <cstdio>
+#include <algorithm>
 
 #include "imgui.h"
 #include "imgui_impl_metal.h"
@@ -22,6 +23,7 @@ enum class DragMode { None, Orbit, Pan };
     id<MTLCommandQueue> _commandQueue;
     VoxelRenderer* _voxelRenderer;
     macvoxel::Camera _camera;
+    uint64_t _lastDocVersion;
     DragMode _dragMode;
     NSPoint _lastDragLocation;
     BOOL _imguiAlive;
@@ -148,6 +150,12 @@ enum class DragMode { None, Orbit, Pan };
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
     if (doc != nullptr) {
+        if (doc->version != _lastDocVersion) {
+            _lastDocVersion = doc->version;
+            const macvoxel::Dims d = doc->grid.dims();
+            const uint32_t maxDim = std::max({d.x, d.y, d.z});
+            _camera.Frame(static_cast<float>(maxDim));
+        }
         macvoxel::DrawModelPanel(*doc);
     }
 

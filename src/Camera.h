@@ -23,6 +23,11 @@ public:
     void Orbit(float dx_points, float dy_points);
     void Pan(float dx_points, float dy_points);
     void Zoom(float ticks);
+
+    // Reset orientation and pick a distance that fits a cube of side
+    // `extent` centered at the origin in the current FOV. Called when a
+    // new document is loaded.
+    void Frame(float extent);
 };
 
 }  // namespace macvoxel
