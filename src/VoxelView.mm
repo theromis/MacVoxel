@@ -1,5 +1,6 @@
 #import "VoxelView.h"
 
+#import "AppDelegate.h"
 #import "CubeRenderer.h"
 
 #import <Metal/Metal.h>
@@ -10,7 +11,8 @@
 #include "imgui_impl_osx.h"
 
 #include "Camera.h"
-#include "ui/HelloPanel.h"
+#include "Document.h"
+#include "ui/ModelPanel.h"
 
 namespace {
 enum class DragMode { None, Orbit, Pan };
@@ -143,7 +145,11 @@ enum class DragMode { None, Orbit, Pan };
     ImGui_ImplOSX_NewFrame(self);
     ImGui::NewFrame();
 
-    macvoxel::DrawHelloPanel();
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc != nullptr) {
+        macvoxel::DrawModelPanel(*doc);
+    }
 
     ImGui::Render();
 

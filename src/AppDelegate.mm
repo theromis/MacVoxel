@@ -7,7 +7,7 @@
 
 #include "Document.h"
 #include "VoxFile.h"
-#include "ui/HelloPanel.h"
+#include "ui/ModelPanel.h"
 
 @implementation AppDelegate {
     std::unique_ptr<macvoxel::Document> _doc;
