@@ -59,7 +59,9 @@ set(APP_SOURCES
     src/VoxFile.cpp
     src/MeshBuilder.cpp
     src/Raycast.cpp
+    src/ToolState.cpp
     src/ui/ModelPanel.cpp
+    src/ui/ToolPanel.cpp
 )
 
 # Source files referenced in CMakeLists must exist for configure to succeed.

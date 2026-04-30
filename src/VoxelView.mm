@@ -14,7 +14,9 @@
 #include "Camera.h"
 #include "Document.h"
 #include "Raycast.h"
+#include "ToolState.h"
 #include "ui/ModelPanel.h"
+#include "ui/ToolPanel.h"
 
 namespace {
 enum class DragMode { None, Orbit, Pan };
@@ -25,7 +27,6 @@ enum class EditAction { Place, Erase };
     id<MTLCommandQueue> _commandQueue;
     VoxelRenderer* _voxelRenderer;
     macvoxel::Camera _camera;
-    uint64_t _lastDocVersion;
     DragMode _dragMode;
     NSPoint _lastDragLocation;
     BOOL _imguiAlive;
@@ -119,6 +120,15 @@ enum class EditAction { Place, Erase };
     [self shutdownImGui];
 }
 
+- (void)frameCameraToDocument {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return;
+    const macvoxel::Bounds3 b = doc->grid.Bounds();
+    const int32_t maxExtent = std::max({b.size_x(), b.size_y(), b.size_z()});
+    _camera.Frame(static_cast<float>(maxExtent));
+}
+
 // ---------------------------------------------------------------------------
 // MTKViewDelegate
 // ---------------------------------------------------------------------------
@@ -152,17 +162,12 @@ enum class EditAction { Place, Erase };
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
     if (doc != nullptr) {
-        if (doc->version != _lastDocVersion) {
-            _lastDocVersion = doc->version;
-            const macvoxel::Bounds3 b = doc->grid.Bounds();
-            const int32_t maxExtent = std::max({b.size_x(), b.size_y(), b.size_z()});
-            _camera.Frame(static_cast<float>(maxExtent));
-        }
         macvoxel::RenderStats stats;
         stats.vertex_count = [_voxelRenderer lastVertexCount];
         stats.index_count = [_voxelRenderer lastIndexCount];
         stats.quad_count = [_voxelRenderer lastQuadCount];
         macvoxel::DrawModelPanel(*doc, stats);
+        macvoxel::DrawToolPanel();
     }
 
     ImGui::Render();
@@ -330,24 +335,73 @@ enum class EditAction { Place, Erase };
     const simd::float3 ray_origin_grid{oc.x, -oc.z, oc.y};
     const simd::float3 ray_dir_grid{ray_dir_world.x, -ray_dir_world.z, ray_dir_world.y};
 
+    macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    const int radius = std::max(1, tool.brush_radius);
+    const int span = radius - 1;
+
+    // Cmd+click forces erase regardless of selected tool — quick override
+    // matching the Phase 5.1 behavior. Otherwise the tool drives.
+    const macvoxel::ToolKind effective = action == EditAction::Erase
+                                             ? macvoxel::ToolKind::Erase
+                                             : tool.tool;
+
     macvoxel::RayHit hit;
-    if (!macvoxel::Raycast(doc->grid, ray_origin_grid, ray_dir_grid, 4096.0f, &hit)) {
-        return;
+    const bool hit_voxel = macvoxel::Raycast(doc->grid, ray_origin_grid,
+                                             ray_dir_grid, 4096.0f, &hit);
+
+    int target_x = 0;
+    int target_y = 0;
+    int target_z = 0;
+    if (hit_voxel) {
+        target_x = hit.x;
+        target_y = hit.y;
+        target_z = hit.z;
+        if (effective == macvoxel::ToolKind::Place) {
+            if (hit.axis < 0) return;  // ray started inside a voxel — no neighbor
+            if (hit.axis == 0) target_x += hit.sign;
+            else if (hit.axis == 1) target_y += hit.sign;
+            else if (hit.axis == 2) target_z += hit.sign;
+        }
+    } else {
+        // Empty-space click. Place falls back to the implicit ground plane
+        // (grid z=0, matching MagicaVoxel's convention). Erase/Paint need a
+        // real voxel to act on, so they no-op here.
+        if (effective != macvoxel::ToolKind::Place) return;
+        if (std::abs(ray_dir_grid.z) < 1e-6f) return;
+        const float t = -ray_origin_grid.z / ray_dir_grid.z;
+        if (t < 0.0f || t > 4096.0f) return;
+        const float hx = ray_origin_grid.x + t * ray_dir_grid.x;
+        const float hy = ray_origin_grid.y + t * ray_dir_grid.y;
+        target_x = static_cast<int>(std::floor(hx));
+        target_y = static_cast<int>(std::floor(hy));
+        target_z = 0;
     }
 
-    if (action == EditAction::Place) {
-        if (hit.axis < 0) return;  // started inside a voxel — no neighbor face
-        int dx = 0, dy = 0, dz = 0;
-        if (hit.axis == 0) dx = hit.sign;
-        else if (hit.axis == 1) dy = hit.sign;
-        else if (hit.axis == 2) dz = hit.sign;
-        // Phase 5.1: hardcoded palette index 1 ("white") until ToolPanel lands.
-        doc->grid.Set(hit.x + dx, hit.y + dy, hit.z + dz, 1);
-        ++doc->version;
-    } else {
-        doc->grid.Set(hit.x, hit.y, hit.z, 0);
-        ++doc->version;
+    auto apply = [&](int x, int y, int z) {
+        switch (effective) {
+            case macvoxel::ToolKind::Place:
+                doc->grid.Set(x, y, z, tool.palette_idx);
+                break;
+            case macvoxel::ToolKind::Erase:
+                doc->grid.Set(x, y, z, 0);
+                break;
+            case macvoxel::ToolKind::Paint:
+                if (doc->grid.Get(x, y, z) != 0) {
+                    doc->grid.Set(x, y, z, tool.palette_idx);
+                }
+                break;
+        }
+    };
+
+    for (int dz = -span; dz <= span; ++dz) {
+        for (int dy = -span; dy <= span; ++dy) {
+            for (int dx = -span; dx <= span; ++dx) {
+                apply(target_x + dx, target_y + dy, target_z + dz);
+            }
+        }
     }
+
+    ++doc->version;
 }
 
 @end

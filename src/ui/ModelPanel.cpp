@@ -1,6 +1,7 @@
 #include "ModelPanel.h"
 
 #include "Document.h"
+#include "ToolState.h"
 
 #include "imgui.h"
 
@@ -55,10 +56,17 @@ void DrawModelPanel(const Document& doc, const RenderStats& stats) {
     ImGui::TextUnformatted("Palette");
     ImGui::Indent();
     {
+        ToolState& tool = CurrentTool();
         const float swatch = 16.0f;
         const float spacing = 1.0f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const float total = 16.0f * (swatch + spacing) - spacing;
+        // Reserve the area first so ImGui knows we're consuming it for input.
+        ImGui::InvisibleButton("palette_grid", ImVec2(total, total));
+        const bool grid_hovered = ImGui::IsItemHovered();
+        const bool grid_clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
         for (int i = 0; i < 256; ++i) {
             const int col = i % 16;
             const int row = i / 16;
@@ -66,16 +74,20 @@ void DrawModelPanel(const Document& doc, const RenderStats& stats) {
                            origin.y + row * (swatch + spacing)};
             const ImVec2 b{a.x + swatch, a.y + swatch};
             const Color c = doc.palette.Get(static_cast<uint8_t>(i));
-            // Skip the transparent slot's checkerboard; just render with its
-            // current color (alpha is honored by ImGui).
             dl->AddRectFilled(a, b, ColorToImU32(c));
-            if (ImGui::IsMouseHoveringRect(a, b)) {
+
+            const bool inside = mouse.x >= a.x && mouse.x < b.x &&
+                                mouse.y >= a.y && mouse.y < b.y;
+            if (grid_hovered && inside) {
                 ImGui::SetTooltip("idx %d  RGBA(%u, %u, %u, %u)", i,
                                   c.r, c.g, c.b, c.a);
+                if (grid_clicked) tool.palette_idx = static_cast<uint8_t>(i);
+            }
+            if (i == tool.palette_idx) {
+                // Highlight selected swatch with a contrasting border.
+                dl->AddRect(a, b, IM_COL32(255, 255, 255, 255), 0.0f, 0, 2.0f);
             }
         }
-        const float total = 16.0f * (swatch + spacing) - spacing;
-        ImGui::Dummy(ImVec2(total, total));
     }
     ImGui::Unindent();
 

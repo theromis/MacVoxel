@@ -29,7 +29,15 @@
     [self buildMainMenu];
     [self buildMainWindow];
     [self updateWindowTitle];
+    [self frameCameraIfPossible];
     [NSApp activateIgnoringOtherApps:YES];
+}
+
+- (void)frameCameraIfPossible {
+    VoxelView* view = (VoxelView*)self.window.contentView;
+    if ([view isKindOfClass:[VoxelView class]]) {
+        [view frameCameraToDocument];
+    }
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)__unused sender {
@@ -232,6 +240,7 @@
     _doc->path.clear();
     ++_doc->version;
     [self updateWindowTitle];
+    [self frameCameraIfPossible];
 }
 
 - (IBAction)openDocument:(id)__unused sender {
@@ -255,6 +264,7 @@
     fresh.version = _doc->version + 1;
     *_doc = std::move(fresh);
     [self updateWindowTitle];
+    [self frameCameraIfPossible];
 }
 
 - (IBAction)saveDocument:(id)sender {

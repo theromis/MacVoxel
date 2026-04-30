@@ -8,4 +8,9 @@
 // still alive — typically from -[NSApplicationDelegate applicationWillTerminate:].
 - (void)shutdownImGui;
 
+// Reset the camera to fit the current document's bounds. Called when the
+// document is intentionally replaced (New, Open) — not on edits, which
+// would visually yank the camera out from under the user.
+- (void)frameCameraToDocument;
+
 @end
