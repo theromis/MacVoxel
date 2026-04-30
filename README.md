@@ -3,8 +3,9 @@
 A native macOS voxel editor in the spirit of MagicaVoxel. AppKit shell, Metal-backed
 content view, Dear ImGui for all in-window UI.
 
-Current state: **Phase 1** — single textured cube with orbit/pan/zoom camera, on top
-of the Phase 0 AppKit + Metal + ImGui shell. See `PLAN.md` for the full roadmap.
+Current state: **Phase 3** — voxels render as one instanced cube per filled cell, with
+MagicaVoxel `.vox` import/export, orbit/pan/zoom camera, and a debug Model panel. See
+`PLAN.md` for the full roadmap.
 
 ## Build
 
@@ -30,12 +31,15 @@ CMake's default Makefile generator.
 ## What you should see
 
 - Window titled **MacVoxel**, 1280×800, dark slate-blue (`#1e1e2e`) interior.
-- A grey-checker textured cube centered in the view, with depth-tested,
-  back-face-culled rendering and a hard-coded directional light.
-- Menu bar: **MacVoxel · File · Edit · View · Window**. File and Edit items are
-  stubbed for Phase 0; they log to stderr when clicked.
-- A "Hello, MacVoxel" ImGui panel with slider, color picker, click-counter, and
-  frame-time readout, drawn on top of the cube.
+- On launch: a 16×16×16 grid containing a single voxel — proof of life until
+  you open a real model.
+- **File → Open** (⌘O) loads a MagicaVoxel `.vox` file. The camera auto-frames
+  the model and the **Model** panel updates with dimensions, voxel count,
+  palette swatches, and frame timing. **File → Save / Save As** (⌘S / ⇧⌘S)
+  writes a single-model `.vox`.
+- Each voxel is rendered as a back-face-culled, depth-tested instanced cube
+  with a hard-coded directional light. There is no interior-face culling yet —
+  Phase 4 (greedy meshing) is the optimization step.
 - **⌘D** toggles the full ImGui demo window (also under View → Show ImGui Demo).
 - **⌘Q** or closing the window quits cleanly.
 

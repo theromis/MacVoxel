@@ -71,6 +71,20 @@ void DrawModelPanel(const Document& doc) {
     ImGui::Unindent();
 
     ImGui::Spacing();
+    ImGui::TextUnformatted("Render");
+    ImGui::Indent();
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        // 12 triangles per voxel cube (no interior-face culling — that's
+        // Phase 4's job).
+        const size_t tris = filled * 12;
+        ImGui::Text("%.1f FPS  (%.2f ms/frame)", io.Framerate,
+                    io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f);
+        ImGui::Text("triangles  %zu", tris);
+    }
+    ImGui::Unindent();
+
+    ImGui::Spacing();
     ImGui::Separator();
     ImGui::Checkbox("Show ImGui demo (⌘D)", &g_show_demo);
 
