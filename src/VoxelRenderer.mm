@@ -15,10 +15,16 @@ struct CubeVertex {
 };
 static_assert(sizeof(CubeVertex) == 24, "CubeVertex layout must match shader");
 
+struct Instance {
+    int16_t x;
+    int16_t y;
+    int16_t z;
+    int16_t palette_w;  // low 8 bits = palette index
+};
+static_assert(sizeof(Instance) == 8, "Instance layout must match shader");
+
 constexpr float H = 0.5f;
 
-// 24-vertex unit cube centered at origin, half-extent 0.5, distinct normals
-// per face. CCW winding when viewed from outside.
 const std::array<CubeVertex, 24> kCubeVertices = {{
     // +X
     {{ H, -H,  H}, {1, 0, 0}},
@@ -30,12 +36,12 @@ const std::array<CubeVertex, 24> kCubeVertices = {{
     {{-H, -H,  H}, {-1, 0, 0}},
     {{-H,  H,  H}, {-1, 0, 0}},
     {{-H,  H, -H}, {-1, 0, 0}},
-    // +Y (top)
+    // +Y
     {{-H,  H,  H}, {0, 1, 0}},
     {{ H,  H,  H}, {0, 1, 0}},
     {{ H,  H, -H}, {0, 1, 0}},
     {{-H,  H, -H}, {0, 1, 0}},
-    // -Y (bottom)
+    // -Y
     {{-H, -H, -H}, {0, -1, 0}},
     {{ H, -H, -H}, {0, -1, 0}},
     {{ H, -H,  H}, {0, -1, 0}},
@@ -76,7 +82,7 @@ using namespace metal;
 struct VertexIn {
     float3 position [[attribute(0)]];
     float3 normal   [[attribute(1)]];
-    uchar4 voxel    [[attribute(2)]];  // (x, y, z, palette_idx) in grid space
+    short4 voxel    [[attribute(2)]];  // (gx, gy, gz, palette) in grid space
 };
 
 struct Uniforms {
@@ -96,9 +102,9 @@ struct V2F {
 vertex V2F voxel_vertex(VertexIn in [[stage_in]],
                         constant Uniforms& u [[buffer(2)]],
                         constant float4* palette [[buffer(3)]]) {
-    // .vox source coordinates are Z-up; we render in a Y-up world. Swap
-    // grid Y and Z when computing world position so the model stands up
-    // correctly under our orbit camera.
+    // .vox source is Z-up; we render Y-up, so swap grid Y and Z when
+    // computing world position. Center subtraction puts the model AABB at
+    // the world origin so the camera target stays at (0,0,0).
     float gx = float(in.voxel.x);
     float gy = float(in.voxel.y);
     float gz = float(in.voxel.z);
@@ -112,7 +118,8 @@ vertex V2F voxel_vertex(VertexIn in [[stage_in]],
     V2F out;
     out.clip_pos = u.vp * float4(world, 1.0);
     out.normal = in.normal;
-    out.color = palette[in.voxel.w].rgb;
+    int idx = int(in.voxel.w) & 0xff;
+    out.color = palette[idx].rgb;
     return out;
 }
 
@@ -186,12 +193,12 @@ fragment float4 voxel_fragment(V2F in [[stage_in]],
     vd.attributes[1].format = MTLVertexFormatFloat3;
     vd.attributes[1].offset = offsetof(CubeVertex, normal);
     vd.attributes[1].bufferIndex = 0;
-    vd.attributes[2].format = MTLVertexFormatUChar4;
+    vd.attributes[2].format = MTLVertexFormatShort4;
     vd.attributes[2].offset = 0;
     vd.attributes[2].bufferIndex = 1;
     vd.layouts[0].stride = sizeof(CubeVertex);
     vd.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
-    vd.layouts[1].stride = 4;
+    vd.layouts[1].stride = sizeof(Instance);
     vd.layouts[1].stepFunction = MTLVertexStepFunctionPerInstance;
 
     MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
@@ -234,35 +241,54 @@ fragment float4 voxel_fragment(V2F in [[stage_in]],
 // ---------------------------------------------------------------------------
 
 - (void)rebuildFromDocument:(const macvoxel::Document*)doc {
-    const macvoxel::Dims d = doc->grid.dims();
+    const macvoxel::Bounds3 b = doc->grid.Bounds();
 
-    // Center: half the model extent, with grid Y/Z swapped to match the
-    // shader's Y-up world.
-    _center = simd::float3{
-        static_cast<float>(d.x) * 0.5f,
-        static_cast<float>(d.z) * 0.5f,
-        static_cast<float>(d.y) * 0.5f,
-    };
+    // Center: midpoint of bounds. Y/Z swapped so the renderer's Y-up world
+    // matches the .vox Z-up source data.
+    const float cx = b.empty() ? 0.0f
+                               : (static_cast<float>(b.min_x) +
+                                  static_cast<float>(b.max_x) + 1.0f) * 0.5f;
+    const float cy = b.empty() ? 0.0f
+                               : (static_cast<float>(b.min_z) +
+                                  static_cast<float>(b.max_z) + 1.0f) * 0.5f;
+    const float cz = b.empty() ? 0.0f
+                               : (static_cast<float>(b.min_y) +
+                                  static_cast<float>(b.max_y) + 1.0f) * 0.5f;
+    _center = simd::float3{cx, cy, cz};
 
-    // Instance buffer: one uchar4 per filled voxel.
-    std::vector<uint8_t> bytes;
-    bytes.reserve(static_cast<size_t>(doc->grid.FilledCount()) * 4u);
-    for (uint32_t z = 0; z < d.z; ++z) {
-        for (uint32_t y = 0; y < d.y; ++y) {
-            for (uint32_t x = 0; x < d.x; ++x) {
-                const uint8_t v = doc->grid.Get(x, y, z);
-                if (v == 0) continue;
-                bytes.push_back(static_cast<uint8_t>(x));
-                bytes.push_back(static_cast<uint8_t>(y));
-                bytes.push_back(static_cast<uint8_t>(z));
-                bytes.push_back(v);
+    // Instance buffer: one Instance per filled cell. Walk chunks (only the
+    // ones that exist), then walk filled cells within each chunk. This
+    // visits 16^3 cells per non-empty chunk worst case — fine for the
+    // chunk densities we see in real .vox scenes.
+    std::vector<Instance> instances;
+    instances.reserve(doc->grid.FilledCount());
+    using VG = macvoxel::VoxelGrid;
+    for (const auto& [coord, chunk] : doc->grid.chunks()) {
+        if (chunk->filled_count == 0) continue;
+        const int32_t bx = coord.x * static_cast<int32_t>(VG::kChunkSize);
+        const int32_t by = coord.y * static_cast<int32_t>(VG::kChunkSize);
+        const int32_t bz = coord.z * static_cast<int32_t>(VG::kChunkSize);
+        for (uint32_t lz = 0; lz < VG::kChunkSize; ++lz) {
+            for (uint32_t ly = 0; ly < VG::kChunkSize; ++ly) {
+                for (uint32_t lx = 0; lx < VG::kChunkSize; ++lx) {
+                    const size_t li = lx + ly * VG::kChunkSize +
+                                      lz * VG::kChunkSize * VG::kChunkSize;
+                    const uint8_t v = chunk->cells[li];
+                    if (v == 0) continue;
+                    Instance inst;
+                    inst.x = static_cast<int16_t>(bx + static_cast<int32_t>(lx));
+                    inst.y = static_cast<int16_t>(by + static_cast<int32_t>(ly));
+                    inst.z = static_cast<int16_t>(bz + static_cast<int32_t>(lz));
+                    inst.palette_w = static_cast<int16_t>(v);
+                    instances.push_back(inst);
+                }
             }
         }
     }
-    _instanceCount = static_cast<uint32_t>(bytes.size() / 4);
+    _instanceCount = static_cast<uint32_t>(instances.size());
     if (_instanceCount > 0) {
-        _instanceBuffer = [_device newBufferWithBytes:bytes.data()
-                                               length:bytes.size()
+        _instanceBuffer = [_device newBufferWithBytes:instances.data()
+                                               length:instances.size() * sizeof(Instance)
                                               options:MTLResourceStorageModeShared];
         _instanceBuffer.label = @"VoxelInstances";
     } else {

@@ -1,48 +1,64 @@
 #include "VoxelGrid.h"
 
+#include <algorithm>
+
 namespace macvoxel {
 
-VoxelGrid::VoxelGrid(Dims d) : dims_(d), cells_(d.volume(), uint8_t{0}) {}
-
-uint8_t VoxelGrid::Get(uint32_t x, uint32_t y, uint32_t z) const {
-    if (x >= dims_.x || y >= dims_.y || z >= dims_.z) {
-        return 0;
-    }
-    const size_t i =
-        static_cast<size_t>(x) +
-        static_cast<size_t>(y) * dims_.x +
-        static_cast<size_t>(z) * dims_.x * dims_.y;
-    return cells_[i];
+uint8_t VoxelGrid::Get(int32_t x, int32_t y, int32_t z) const {
+    const ChunkCoord cc = ToChunkCoord(x, y, z);
+    auto it = chunks_.find(cc);
+    if (it == chunks_.end()) return 0;
+    return it->second->cells[LocalIndex(x, y, z)];
 }
 
-void VoxelGrid::Set(uint32_t x, uint32_t y, uint32_t z, uint8_t value) {
-    if (x >= dims_.x || y >= dims_.y || z >= dims_.z) {
-        return;
+void VoxelGrid::Set(int32_t x, int32_t y, int32_t z, uint8_t value) {
+    const ChunkCoord cc = ToChunkCoord(x, y, z);
+    const size_t li = LocalIndex(x, y, z);
+
+    auto it = chunks_.find(cc);
+    if (it == chunks_.end()) {
+        if (value == 0) return;  // erase on empty chunk: no-op
+        auto chunk = std::make_unique<Chunk>();
+        chunk->coord = cc;
+        Chunk* raw = chunk.get();
+        chunks_.emplace(cc, std::move(chunk));
+        it = chunks_.find(cc);
+        (void)raw;
     }
-    const size_t i =
-        static_cast<size_t>(x) +
-        static_cast<size_t>(y) * dims_.x +
-        static_cast<size_t>(z) * dims_.x * dims_.y;
-    cells_[i] = value;
+    Chunk* chunk = it->second.get();
+    const uint8_t prev = chunk->cells[li];
+    if (prev == value) return;
+    chunk->cells[li] = value;
+
+    if (prev == 0 && value != 0) {
+        ++chunk->filled_count;
+        ++total_filled_;
+        if (bounds_.empty()) {
+            bounds_.min_x = bounds_.max_x = x;
+            bounds_.min_y = bounds_.max_y = y;
+            bounds_.min_z = bounds_.max_z = z;
+        } else {
+            bounds_.min_x = std::min(bounds_.min_x, x);
+            bounds_.min_y = std::min(bounds_.min_y, y);
+            bounds_.min_z = std::min(bounds_.min_z, z);
+            bounds_.max_x = std::max(bounds_.max_x, x);
+            bounds_.max_y = std::max(bounds_.max_y, y);
+            bounds_.max_z = std::max(bounds_.max_z, z);
+        }
+    } else if (prev != 0 && value == 0) {
+        --chunk->filled_count;
+        --total_filled_;
+        if (chunk->filled_count == 0) {
+            chunks_.erase(it);
+        }
+        // bounds_ left as a loose over-estimate; safe for renderer framing.
+    }
 }
 
 void VoxelGrid::Clear() {
-    std::fill(cells_.begin(), cells_.end(), uint8_t{0});
-}
-
-void VoxelGrid::Resize(Dims d) {
-    dims_ = d;
-    cells_.assign(d.volume(), uint8_t{0});
-}
-
-size_t VoxelGrid::FilledCount() const {
-    size_t n = 0;
-    for (uint8_t v : cells_) {
-        if (v != 0) {
-            ++n;
-        }
-    }
-    return n;
+    chunks_.clear();
+    total_filled_ = 0;
+    bounds_ = Bounds3{};
 }
 
 }  // namespace macvoxel

@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -17,7 +19,7 @@ namespace macvoxel {
 namespace {
 
 constexpr uint32_t kVoxVersion = 150;
-constexpr uint32_t kMergedAxisCap = 1024;  // refuse pathological scenes
+constexpr int32_t kInt16RenderCap = 32000;  // leaves headroom under 32767
 
 bool ChunkIdEquals(const char id[4], const char* tag) {
     return id[0] == tag[0] && id[1] == tag[1] && id[2] == tag[2] && id[3] == tag[3];
@@ -46,7 +48,6 @@ public:
     }
     const uint8_t* PeekPtr() const { return buf_ + pos_; }
 
-    // .vox STRING: int32 byte_count, then bytes.
     bool ReadString(std::string* out) {
         int32_t n = 0;
         if (!ReadI32(&n) || n < 0) return false;
@@ -56,7 +57,6 @@ public:
         return true;
     }
 
-    // .vox DICT: int32 num_pairs, then pairs of (STRING key, STRING value).
     bool ReadDict(std::map<std::string, std::string>* out) {
         int32_t n = 0;
         if (!ReadI32(&n) || n < 0) return false;
@@ -93,15 +93,10 @@ void SetError(std::string* out_error, const std::string& msg) {
 
 // ---------------------------------------------------------------------------
 // Rotation byte decoding
-//
-// Bits 0-1 : column index of the nonzero in row 0
-// Bits 2-3 : column index of the nonzero in row 1
-// Row 2's column is the remaining one (it's a permutation matrix with signs).
-// Bits 4,5,6 : signs of rows 0, 1, 2 (1 = negative)
 // ---------------------------------------------------------------------------
 
 struct Mat3i {
-    int m[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};  // identity
+    int m[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
 };
 
 constexpr Mat3i kIdentity{};
@@ -110,9 +105,7 @@ Mat3i DecodeRotation(uint8_t rot) {
     const int c0 = rot & 0x3;
     const int c1 = (rot >> 2) & 0x3;
     const int c2 = 3 - c0 - c1;
-    if (c0 == c1 || c2 < 0 || c2 > 2) {
-        return kIdentity;  // malformed; fall back
-    }
+    if (c0 == c1 || c2 < 0 || c2 > 2) return kIdentity;
     const int s0 = (rot & (1 << 4)) ? -1 : 1;
     const int s1 = (rot & (1 << 5)) ? -1 : 1;
     const int s2 = (rot & (1 << 6)) ? -1 : 1;
@@ -140,11 +133,11 @@ Mat3i Mul(const Mat3i& a, const Mat3i& b) {
 struct Vec3i { int x = 0, y = 0, z = 0; };
 
 Vec3i Apply(const Mat3i& m, Vec3i v) {
-    Vec3i out;
-    out.x = m.m[0][0] * v.x + m.m[0][1] * v.y + m.m[0][2] * v.z;
-    out.y = m.m[1][0] * v.x + m.m[1][1] * v.y + m.m[1][2] * v.z;
-    out.z = m.m[2][0] * v.x + m.m[2][1] * v.y + m.m[2][2] * v.z;
-    return out;
+    return Vec3i{
+        m.m[0][0] * v.x + m.m[0][1] * v.y + m.m[0][2] * v.z,
+        m.m[1][0] * v.x + m.m[1][1] * v.y + m.m[1][2] * v.z,
+        m.m[2][0] * v.x + m.m[2][1] * v.y + m.m[2][2] * v.z,
+    };
 }
 
 bool ParseTranslation(const std::string& s, Vec3i* out) {
@@ -155,8 +148,10 @@ bool ParseTranslation(const std::string& s, Vec3i* out) {
 // Intermediate parse structures
 // ---------------------------------------------------------------------------
 
+struct ModelDims { uint32_t x = 0, y = 0, z = 0; };
+
 struct ParsedModel {
-    Dims dims{};
+    ModelDims dims{};
     std::vector<uint8_t> voxels;  // 4 bytes per voxel: x, y, z, color
 };
 
@@ -165,13 +160,10 @@ enum class NodeKind { Transform, Group, Shape };
 struct ParsedNode {
     NodeKind kind = NodeKind::Transform;
     int32_t id = -1;
-    // Transform:
     int32_t child = -1;
     Vec3i translation{};
-    uint8_t rotation = 4;  // identity
-    // Group:
+    uint8_t rotation = 4;
     std::vector<int32_t> children;
-    // Shape:
     std::vector<int32_t> model_ids;
 };
 
@@ -197,8 +189,8 @@ bool ParseTransformNode(Reader& r, ParsedNode* node) {
             if (it != frame.end()) ParseTranslation(it->second, &node->translation);
             it = frame.find("_r");
             if (it != frame.end()) {
-                node->rotation = static_cast<uint8_t>(std::strtol(it->second.c_str(),
-                                                                  nullptr, 10));
+                node->rotation =
+                    static_cast<uint8_t>(std::strtol(it->second.c_str(), nullptr, 10));
             }
         }
     }
@@ -235,10 +227,6 @@ bool ParseShapeNode(Reader& r, ParsedNode* node) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Scene graph walk
-// ---------------------------------------------------------------------------
-
 void WalkNode(const std::map<int32_t, ParsedNode>& nodes,
               int32_t node_id,
               const Vec3i& accum_t,
@@ -249,7 +237,6 @@ void WalkNode(const std::map<int32_t, ParsedNode>& nodes,
     const ParsedNode& n = it->second;
     switch (n.kind) {
         case NodeKind::Transform: {
-            // Apply parent rotation to this node's translation, then add.
             const Vec3i rt = Apply(accum_r, n.translation);
             Vec3i t = accum_t;
             t.x += rt.x;
@@ -323,7 +310,7 @@ bool LoadVox(const std::string& path,
     Reader children(r.PeekPtr(), main_children);
 
     std::vector<ParsedModel> models;
-    Dims pending_size{};
+    ModelDims pending_size{};
     bool have_pending_size = false;
     Palette palette;
     bool rgba_seen = false;
@@ -350,7 +337,7 @@ bool LoadVox(const std::string& path,
                 return false;
             }
             Reader cr(content_ptr, content_size);
-            Dims d{};
+            ModelDims d{};
             cr.ReadU32(&d.x);
             cr.ReadU32(&d.y);
             cr.ReadU32(&d.z);
@@ -425,92 +412,27 @@ bool LoadVox(const std::string& path,
         return false;
     }
 
-    // ----- Determine placements -----
     std::vector<PlacedShape> placements;
     if (!nodes.empty()) {
-        // Walk from node 0 (the convention). Some files don't place node 0
-        // first by ID — fall back to lowest-numbered node otherwise.
         int32_t root = nodes.count(0) ? 0 : nodes.begin()->first;
         WalkNode(nodes, root, Vec3i{}, kIdentity, &placements);
     }
     if (placements.empty()) {
-        // No scene graph (or empty walk): place model 0 corner-at-origin.
+        // No scene graph: place model 0 corner-at-origin, which we get by
+        // pre-loading the rasterizer's center pivot.
         PlacedShape ps;
         ps.model_id = 0;
-        // For corner-at-origin, translation cancels the model-center pivot
-        // applied during rasterization below.
-        const Dims d0 = models[0].dims;
+        const ModelDims d0 = models[0].dims;
         ps.translation = Vec3i{static_cast<int>(d0.x / 2),
                                static_cast<int>(d0.y / 2),
                                static_cast<int>(d0.z / 2)};
         placements.push_back(ps);
     }
 
-    // ----- Compute union AABB in world voxel coords -----
-    int min_x = INT_MAX, min_y = INT_MAX, min_z = INT_MAX;
-    int max_x = INT_MIN, max_y = INT_MIN, max_z = INT_MIN;
-    for (const PlacedShape& ps : placements) {
-        if (ps.model_id < 0 || static_cast<size_t>(ps.model_id) >= models.size()) continue;
-        const Dims md = models[static_cast<size_t>(ps.model_id)].dims;
-        // Local model corners (centered): -dims/2 .. -dims/2 + dims
-        const int hx = static_cast<int>(md.x) / 2;
-        const int hy = static_cast<int>(md.y) / 2;
-        const int hz = static_cast<int>(md.z) / 2;
-        // Eight corners of the local AABB (centered).
-        const int corners[8][3] = {
-            {-hx, -hy, -hz},
-            {static_cast<int>(md.x) - hx, -hy, -hz},
-            {-hx, static_cast<int>(md.y) - hy, -hz},
-            {static_cast<int>(md.x) - hx, static_cast<int>(md.y) - hy, -hz},
-            {-hx, -hy, static_cast<int>(md.z) - hz},
-            {static_cast<int>(md.x) - hx, -hy, static_cast<int>(md.z) - hz},
-            {-hx, static_cast<int>(md.y) - hy, static_cast<int>(md.z) - hz},
-            {static_cast<int>(md.x) - hx, static_cast<int>(md.y) - hy,
-             static_cast<int>(md.z) - hz},
-        };
-        for (auto& c : corners) {
-            const Vec3i rotated = Apply(ps.rotation, Vec3i{c[0], c[1], c[2]});
-            const int wx = rotated.x + ps.translation.x;
-            const int wy = rotated.y + ps.translation.y;
-            const int wz = rotated.z + ps.translation.z;
-            min_x = std::min(min_x, wx);
-            min_y = std::min(min_y, wy);
-            min_z = std::min(min_z, wz);
-            max_x = std::max(max_x, wx);
-            max_y = std::max(max_y, wy);
-            max_z = std::max(max_z, wz);
-        }
-    }
-
-    if (min_x == INT_MAX) {
-        SetError(out_error, "no shape placements produced any geometry");
-        return false;
-    }
-
-    const int64_t span_x = static_cast<int64_t>(max_x) - min_x;
-    const int64_t span_y = static_cast<int64_t>(max_y) - min_y;
-    const int64_t span_z = static_cast<int64_t>(max_z) - min_z;
-    if (span_x > kMergedAxisCap || span_y > kMergedAxisCap || span_z > kMergedAxisCap) {
-        char buf[160];
-        std::snprintf(buf, sizeof(buf),
-                      "merged scene exceeds %u^3 cell cap (would be %lldx%lldx%lld)",
-                      kMergedAxisCap, (long long)span_x, (long long)span_y, (long long)span_z);
-        SetError(out_error, buf);
-        return false;
-    }
-
-    Dims merged_dims;
-    merged_dims.x = static_cast<uint32_t>(span_x);
-    merged_dims.y = static_cast<uint32_t>(span_y);
-    merged_dims.z = static_cast<uint32_t>(span_z);
-    if (merged_dims.x == 0 || merged_dims.y == 0 || merged_dims.z == 0) {
-        SetError(out_error, "merged scene is zero-volume");
-        return false;
-    }
-
-    VoxelGrid grid(merged_dims);
-
-    // ----- Rasterize all placements -----
+    // Rasterize directly into a fresh chunked grid. Chunks materialize on
+    // demand; empty regions cost nothing.
+    VoxelGrid grid;
+    int32_t min_w = INT_MAX, max_w = INT_MIN;
     for (const PlacedShape& ps : placements) {
         if (ps.model_id < 0 || static_cast<size_t>(ps.model_id) >= models.size()) continue;
         const ParsedModel& m = models[static_cast<size_t>(ps.model_id)];
@@ -523,21 +445,31 @@ bool LoadVox(const std::string& path,
             const int ly = static_cast<int>(m.voxels[i * 4 + 1]) - hy;
             const int lz = static_cast<int>(m.voxels[i * 4 + 2]) - hz;
             const uint8_t ci = m.voxels[i * 4 + 3];
-
             const Vec3i rotated = Apply(ps.rotation, Vec3i{lx, ly, lz});
-            const int wx = rotated.x + ps.translation.x - min_x;
-            const int wy = rotated.y + ps.translation.y - min_y;
-            const int wz = rotated.z + ps.translation.z - min_z;
-            if (wx < 0 || wy < 0 || wz < 0) continue;
-            grid.Set(static_cast<uint32_t>(wx),
-                     static_cast<uint32_t>(wy),
-                     static_cast<uint32_t>(wz), ci);
+            const int wx = rotated.x + ps.translation.x;
+            const int wy = rotated.y + ps.translation.y;
+            const int wz = rotated.z + ps.translation.z;
+            min_w = std::min({min_w, wx, wy, wz});
+            max_w = std::max({max_w, wx, wy, wz});
+            grid.Set(wx, wy, wz, ci);
         }
     }
 
-    if (!rgba_seen) {
-        palette.ResetToDefault();
+    // Render-side limitation: the per-instance attribute is int16. Refuse
+    // scenes that would overflow it. Kept loose (kInt16RenderCap < INT16_MAX)
+    // so the renderer never sees a corner case.
+    if (grid.FilledCount() > 0 &&
+        (min_w < -kInt16RenderCap || max_w > kInt16RenderCap)) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+                      "scene exceeds renderer's int16 coordinate range "
+                      "(world coords span [%d, %d])",
+                      min_w, max_w);
+        SetError(out_error, buf);
+        return false;
     }
+
+    if (!rgba_seen) palette.ResetToDefault();
 
     *out_grid = std::move(grid);
     *out_palette = palette;
@@ -571,27 +503,43 @@ bool SaveVox(const std::string& path,
              const VoxelGrid& grid,
              const Palette& palette,
              std::string* out_error) {
-    if (grid.dims().empty()) {
+    if (grid.empty()) {
         SetError(out_error, "cannot save an empty grid");
         return false;
     }
-
-    const Dims d = grid.dims();
-    if (d.x > 256 || d.y > 256 || d.z > 256) {
-        SetError(out_error, "dimensions exceed .vox single-model limit of 256 per axis");
+    const Bounds3 b = grid.Bounds();
+    if (b.size_x() > 256 || b.size_y() > 256 || b.size_z() > 256) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+                      "scene exceeds .vox single-model limit of 256 per axis "
+                      "(bounds %dx%dx%d)",
+                      b.size_x(), b.size_y(), b.size_z());
+        SetError(out_error, buf);
         return false;
     }
 
+    // Iterate chunks to harvest filled cells, shifting world coords to
+    // origin so the saved single-model file starts at (0, 0, 0).
     std::vector<uint8_t> xyzi_voxels;
-    xyzi_voxels.reserve(grid.size());
-    for (uint32_t z = 0; z < d.z; ++z) {
-        for (uint32_t y = 0; y < d.y; ++y) {
-            for (uint32_t x = 0; x < d.x; ++x) {
-                const uint8_t v = grid.Get(x, y, z);
-                if (v != 0) {
-                    xyzi_voxels.push_back(static_cast<uint8_t>(x));
-                    xyzi_voxels.push_back(static_cast<uint8_t>(y));
-                    xyzi_voxels.push_back(static_cast<uint8_t>(z));
+    xyzi_voxels.reserve(grid.FilledCount() * 4);
+    for (const auto& [coord, chunk] : grid.chunks()) {
+        if (chunk->filled_count == 0) continue;
+        const int32_t base_x = coord.x * static_cast<int32_t>(VoxelGrid::kChunkSize);
+        const int32_t base_y = coord.y * static_cast<int32_t>(VoxelGrid::kChunkSize);
+        const int32_t base_z = coord.z * static_cast<int32_t>(VoxelGrid::kChunkSize);
+        for (uint32_t lz = 0; lz < VoxelGrid::kChunkSize; ++lz) {
+            for (uint32_t ly = 0; ly < VoxelGrid::kChunkSize; ++ly) {
+                for (uint32_t lx = 0; lx < VoxelGrid::kChunkSize; ++lx) {
+                    const size_t li = lx + ly * VoxelGrid::kChunkSize +
+                                      lz * VoxelGrid::kChunkSize * VoxelGrid::kChunkSize;
+                    const uint8_t v = chunk->cells[li];
+                    if (v == 0) continue;
+                    const int32_t sx = base_x + static_cast<int32_t>(lx) - b.min_x;
+                    const int32_t sy = base_y + static_cast<int32_t>(ly) - b.min_y;
+                    const int32_t sz = base_z + static_cast<int32_t>(lz) - b.min_z;
+                    xyzi_voxels.push_back(static_cast<uint8_t>(sx));
+                    xyzi_voxels.push_back(static_cast<uint8_t>(sy));
+                    xyzi_voxels.push_back(static_cast<uint8_t>(sz));
                     xyzi_voxels.push_back(v);
                 }
             }
@@ -604,9 +552,9 @@ bool SaveVox(const std::string& path,
     AppendId(&children, "SIZE");
     AppendU32(&children, 12);
     AppendU32(&children, 0);
-    AppendU32(&children, d.x);
-    AppendU32(&children, d.y);
-    AppendU32(&children, d.z);
+    AppendU32(&children, static_cast<uint32_t>(b.size_x()));
+    AppendU32(&children, static_cast<uint32_t>(b.size_y()));
+    AppendU32(&children, static_cast<uint32_t>(b.size_z()));
 
     AppendId(&children, "XYZI");
     AppendU32(&children, 4 + 4 * num_voxels);

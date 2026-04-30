@@ -31,15 +31,24 @@ void DrawModelPanel(const Document& doc) {
 
     ImGui::TextUnformatted("Grid");
     ImGui::Indent();
-    const Dims d = doc.grid.dims();
-    const size_t volume = d.volume();
+    const Bounds3 b = doc.grid.Bounds();
     const size_t filled = doc.grid.FilledCount();
-    const float pct = volume > 0 ? 100.0f * static_cast<float>(filled) /
-                                   static_cast<float>(volume)
-                                 : 0.0f;
-    ImGui::Text("dims    %u × %u × %u", d.x, d.y, d.z);
-    ImGui::Text("cells   %zu", volume);
-    ImGui::Text("filled  %zu  (%.2f%%)", filled, pct);
+    if (b.empty()) {
+        ImGui::TextDisabled("(empty)");
+    } else {
+        ImGui::Text("bounds  X[%d, %d]  Y[%d, %d]  Z[%d, %d]",
+                    b.min_x, b.max_x, b.min_y, b.max_y, b.min_z, b.max_z);
+        ImGui::Text("extent  %d × %d × %d",
+                    b.size_x(), b.size_y(), b.size_z());
+        const size_t bbox_cells = static_cast<size_t>(b.size_x()) *
+                                  static_cast<size_t>(b.size_y()) *
+                                  static_cast<size_t>(b.size_z());
+        const float density = bbox_cells > 0
+                                  ? 100.0f * static_cast<float>(filled) /
+                                        static_cast<float>(bbox_cells)
+                                  : 0.0f;
+        ImGui::Text("filled  %zu  (%.3f%% of bbox)", filled, density);
+    }
     ImGui::Unindent();
     ImGui::Spacing();
 

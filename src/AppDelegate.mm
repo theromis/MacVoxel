@@ -23,7 +23,6 @@
 
 - (void)applicationDidFinishLaunching:(NSNotification*)__unused notification {
     _doc = std::make_unique<macvoxel::Document>();
-    _doc->grid.Resize({16, 16, 16});
     _doc->grid.Set(0, 0, 0, 1);  // single voxel so the panel has something to count
     _doc->version = 1;
 
@@ -227,7 +226,7 @@
 }
 
 - (IBAction)newDocument:(id)__unused sender {
-    _doc->grid.Resize({16, 16, 16});
+    _doc->grid.Clear();
     _doc->grid.Set(0, 0, 0, 1);
     _doc->palette.ResetToDefault();
     _doc->path.clear();

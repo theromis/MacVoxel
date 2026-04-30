@@ -152,9 +152,9 @@ enum class DragMode { None, Orbit, Pan };
     if (doc != nullptr) {
         if (doc->version != _lastDocVersion) {
             _lastDocVersion = doc->version;
-            const macvoxel::Dims d = doc->grid.dims();
-            const uint32_t maxDim = std::max({d.x, d.y, d.z});
-            _camera.Frame(static_cast<float>(maxDim));
+            const macvoxel::Bounds3 b = doc->grid.Bounds();
+            const int32_t maxExtent = std::max({b.size_x(), b.size_y(), b.size_z()});
+            _camera.Frame(static_cast<float>(maxExtent));
         }
         macvoxel::DrawModelPanel(*doc);
     }
