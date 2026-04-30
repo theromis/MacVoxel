@@ -156,7 +156,11 @@ enum class DragMode { None, Orbit, Pan };
             const int32_t maxExtent = std::max({b.size_x(), b.size_y(), b.size_z()});
             _camera.Frame(static_cast<float>(maxExtent));
         }
-        macvoxel::DrawModelPanel(*doc);
+        macvoxel::RenderStats stats;
+        stats.vertex_count = [_voxelRenderer lastVertexCount];
+        stats.index_count = [_voxelRenderer lastIndexCount];
+        stats.quad_count = [_voxelRenderer lastQuadCount];
+        macvoxel::DrawModelPanel(*doc, stats);
     }
 
     ImGui::Render();

@@ -53,17 +53,20 @@ constant float3 kNormals[6] = {
 vertex V2F mesh_vertex(VertexIn in [[stage_in]],
                        constant Uniforms& u [[buffer(2)]],
                        constant float4* palette [[buffer(3)]]) {
-    // .vox source is Z-up; we render Y-up. Apply the same Y/Z swap to
-    // both vertex position and normal.
+    // .vox source is Z-up; we render Y-up. Use a +90° rotation around X
+    // (proper rotation, preserves chirality so the mesher's CCW-from-outside
+    // winding survives into world space) instead of a Y/Z swap, which would
+    // be a reflection and invert the geometric normal relative to the
+    // stored normal — that's the "inside-out lighting" symptom.
     float gx = float(in.grid_pos.x);
     float gy = float(in.grid_pos.y);
     float gz = float(in.grid_pos.z);
-    float3 world_pos = float3(gx, gz, gy) - u.center;
+    float3 world_pos = float3(gx, gz, -gy) - u.center;
 
     uint normal_idx = uint(in.packed.x);
     uint palette_idx = uint(in.packed.y);
     float3 gn = kNormals[normal_idx];
-    float3 world_normal = float3(gn.x, gn.z, gn.y);
+    float3 world_normal = float3(gn.x, gn.z, -gn.y);
 
     V2F out;
     out.clip_pos = u.vp * float4(world_pos, 1.0);
@@ -174,6 +177,9 @@ fragment float4 mesh_fragment(V2F in [[stage_in]],
 
 - (void)rebuildFromDocument:(const macvoxel::Document*)doc {
     const macvoxel::Bounds3 b = doc->grid.Bounds();
+    // Center of the bounds in world space, where the shader rotation
+    //   world = (grid.x, grid.z, -grid.y) - center
+    // means world.z's center comes from the negated grid.y midpoint.
     const float cx = b.empty() ? 0.0f
                                : (static_cast<float>(b.min_x) +
                                   static_cast<float>(b.max_x) + 1.0f) * 0.5f;
@@ -181,8 +187,8 @@ fragment float4 mesh_fragment(V2F in [[stage_in]],
                                : (static_cast<float>(b.min_z) +
                                   static_cast<float>(b.max_z) + 1.0f) * 0.5f;
     const float cz = b.empty() ? 0.0f
-                               : (static_cast<float>(b.min_y) +
-                                  static_cast<float>(b.max_y) + 1.0f) * 0.5f;
+                               : -(static_cast<float>(b.min_y) +
+                                   static_cast<float>(b.max_y) + 1.0f) * 0.5f;
     _center = simd::float3{cx, cy, cz};
 
     std::vector<macvoxel::MeshVertex> vertices;

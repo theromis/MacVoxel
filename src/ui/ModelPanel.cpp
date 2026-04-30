@@ -15,7 +15,7 @@ ImU32 ColorToImU32(Color c) {
 
 }  // namespace
 
-void DrawModelPanel(const Document& doc) {
+void DrawModelPanel(const Document& doc, const RenderStats& stats) {
     ImGui::SetNextWindowSize(ImVec2(360, 480), ImGuiCond_FirstUseEver);
     ImGui::Begin("Model");
 
@@ -84,12 +84,17 @@ void DrawModelPanel(const Document& doc) {
     ImGui::Indent();
     {
         const ImGuiIO& io = ImGui::GetIO();
-        // 12 triangles per voxel cube (no interior-face culling — that's
-        // Phase 4's job).
-        const size_t tris = filled * 12;
+        const uint32_t tris = stats.index_count / 3;
+        const float ratio = filled > 0
+                                ? static_cast<float>(stats.quad_count) /
+                                      static_cast<float>(filled * 6)
+                                : 0.0f;
         ImGui::Text("%.1f FPS  (%.2f ms/frame)", io.Framerate,
                     io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f);
-        ImGui::Text("triangles  %zu", tris);
+        ImGui::Text("quads      %u", stats.quad_count);
+        ImGui::Text("triangles  %u", tris);
+        ImGui::Text("vertices   %u", stats.vertex_count);
+        ImGui::Text("face ratio %.3f  (quads / 6 * filled)", ratio);
     }
     ImGui::Unindent();
 
