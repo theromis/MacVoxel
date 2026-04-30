@@ -1,7 +1,7 @@
 #import "VoxelView.h"
 
 #import "AppDelegate.h"
-#import "CubeRenderer.h"
+#import "VoxelRenderer.h"
 
 #import <Metal/Metal.h>
 #import <cstdio>
@@ -20,7 +20,7 @@ enum class DragMode { None, Orbit, Pan };
 
 @implementation VoxelView {
     id<MTLCommandQueue> _commandQueue;
-    CubeRenderer* _cube;
+    VoxelRenderer* _voxelRenderer;
     macvoxel::Camera _camera;
     DragMode _dragMode;
     NSPoint _lastDragLocation;
@@ -53,10 +53,10 @@ enum class DragMode { None, Orbit, Pan };
 
     self.delegate = self;
 
-    _cube = [[CubeRenderer alloc] initWithDevice:device
-                                     colorFormat:self.colorPixelFormat
-                                     depthFormat:self.depthStencilPixelFormat];
-    if (_cube == nil) {
+    _voxelRenderer = [[VoxelRenderer alloc] initWithDevice:device
+                                               colorFormat:self.colorPixelFormat
+                                               depthFormat:self.depthStencilPixelFormat];
+    if (_voxelRenderer == nil) {
         return nil;
     }
 
@@ -165,7 +165,10 @@ enum class DragMode { None, Orbit, Pan };
     id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:pass];
     enc.label = @"MacVoxel Pass";
 
-    [_cube encodeWithEncoder:enc view:viewMat projection:projMat];
+    [_voxelRenderer encodeWithEncoder:enc
+                                 view:viewMat
+                           projection:projMat
+                             document:doc];
 
     [enc pushDebugGroup:@"Dear ImGui rendering"];
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmd, enc);

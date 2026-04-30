@@ -25,6 +25,7 @@
     _doc = std::make_unique<macvoxel::Document>();
     _doc->grid.Resize({16, 16, 16});
     _doc->grid.Set(0, 0, 0, 1);  // single voxel so the panel has something to count
+    _doc->version = 1;
 
     [self buildMainMenu];
     [self buildMainWindow];
@@ -230,6 +231,7 @@
     _doc->grid.Set(0, 0, 0, 1);
     _doc->palette.ResetToDefault();
     _doc->path.clear();
+    ++_doc->version;
     [self updateWindowTitle];
 }
 
@@ -251,6 +253,7 @@
         return;
     }
     fresh.path = path;
+    fresh.version = _doc->version + 1;
     *_doc = std::move(fresh);
     [self updateWindowTitle];
 }

@@ -53,7 +53,7 @@ set(APP_SOURCES
     src/AppDelegate.mm
     src/VoxelView.mm
     src/Camera.cpp
-    src/CubeRenderer.mm
+    src/VoxelRenderer.mm
     src/VoxelGrid.cpp
     src/Palette.cpp
     src/VoxFile.cpp
