@@ -6,66 +6,9 @@
 #include <vector>
 
 #include "Document.h"
+#include "MeshBuilder.h"
 
 namespace {
-
-struct CubeVertex {
-    float position[3];
-    float normal[3];
-};
-static_assert(sizeof(CubeVertex) == 24, "CubeVertex layout must match shader");
-
-struct Instance {
-    int16_t x;
-    int16_t y;
-    int16_t z;
-    int16_t palette_w;  // low 8 bits = palette index
-};
-static_assert(sizeof(Instance) == 8, "Instance layout must match shader");
-
-constexpr float H = 0.5f;
-
-const std::array<CubeVertex, 24> kCubeVertices = {{
-    // +X
-    {{ H, -H,  H}, {1, 0, 0}},
-    {{ H, -H, -H}, {1, 0, 0}},
-    {{ H,  H, -H}, {1, 0, 0}},
-    {{ H,  H,  H}, {1, 0, 0}},
-    // -X
-    {{-H, -H, -H}, {-1, 0, 0}},
-    {{-H, -H,  H}, {-1, 0, 0}},
-    {{-H,  H,  H}, {-1, 0, 0}},
-    {{-H,  H, -H}, {-1, 0, 0}},
-    // +Y
-    {{-H,  H,  H}, {0, 1, 0}},
-    {{ H,  H,  H}, {0, 1, 0}},
-    {{ H,  H, -H}, {0, 1, 0}},
-    {{-H,  H, -H}, {0, 1, 0}},
-    // -Y
-    {{-H, -H, -H}, {0, -1, 0}},
-    {{ H, -H, -H}, {0, -1, 0}},
-    {{ H, -H,  H}, {0, -1, 0}},
-    {{-H, -H,  H}, {0, -1, 0}},
-    // +Z
-    {{-H, -H,  H}, {0, 0, 1}},
-    {{ H, -H,  H}, {0, 0, 1}},
-    {{ H,  H,  H}, {0, 0, 1}},
-    {{-H,  H,  H}, {0, 0, 1}},
-    // -Z
-    {{ H, -H, -H}, {0, 0, -1}},
-    {{-H, -H, -H}, {0, 0, -1}},
-    {{-H,  H, -H}, {0, 0, -1}},
-    {{ H,  H, -H}, {0, 0, -1}},
-}};
-
-const std::array<uint16_t, 36> kCubeIndices = {{
-     0,  1,  2,    0,  2,  3,
-     4,  5,  6,    4,  6,  7,
-     8,  9, 10,    8, 10, 11,
-    12, 13, 14,   12, 14, 15,
-    16, 17, 18,   16, 18, 19,
-    20, 21, 22,   20, 22, 23,
-}};
 
 struct Uniforms {
     simd::float4x4 vp;
@@ -80,9 +23,8 @@ NSString* const kShaderSource = @R"MSL(
 using namespace metal;
 
 struct VertexIn {
-    float3 position [[attribute(0)]];
-    float3 normal   [[attribute(1)]];
-    short4 voxel    [[attribute(2)]];  // (gx, gy, gz, palette) in grid space
+    short3 grid_pos [[attribute(0)]];
+    uchar2 packed   [[attribute(1)]];  // .x = normal_idx, .y = palette_idx
 };
 
 struct Uniforms {
@@ -99,32 +41,39 @@ struct V2F {
     float3 color;
 };
 
-vertex V2F voxel_vertex(VertexIn in [[stage_in]],
-                        constant Uniforms& u [[buffer(2)]],
-                        constant float4* palette [[buffer(3)]]) {
-    // .vox source is Z-up; we render Y-up, so swap grid Y and Z when
-    // computing world position. Center subtraction puts the model AABB at
-    // the world origin so the camera target stays at (0,0,0).
-    float gx = float(in.voxel.x);
-    float gy = float(in.voxel.y);
-    float gz = float(in.voxel.z);
+constant float3 kNormals[6] = {
+    float3( 1.0,  0.0,  0.0),  // 0:+X
+    float3(-1.0,  0.0,  0.0),  // 1:-X
+    float3( 0.0,  1.0,  0.0),  // 2:+Y in .vox grid space
+    float3( 0.0, -1.0,  0.0),  // 3:-Y
+    float3( 0.0,  0.0,  1.0),  // 4:+Z (vertical in .vox)
+    float3( 0.0,  0.0, -1.0),  // 5:-Z
+};
 
-    float3 world = float3(
-        gx + in.position.x + 0.5 - u.center.x,
-        gz + in.position.y + 0.5 - u.center.y,
-        gy + in.position.z + 0.5 - u.center.z
-    );
+vertex V2F mesh_vertex(VertexIn in [[stage_in]],
+                       constant Uniforms& u [[buffer(2)]],
+                       constant float4* palette [[buffer(3)]]) {
+    // .vox source is Z-up; we render Y-up. Apply the same Y/Z swap to
+    // both vertex position and normal.
+    float gx = float(in.grid_pos.x);
+    float gy = float(in.grid_pos.y);
+    float gz = float(in.grid_pos.z);
+    float3 world_pos = float3(gx, gz, gy) - u.center;
+
+    uint normal_idx = uint(in.packed.x);
+    uint palette_idx = uint(in.packed.y);
+    float3 gn = kNormals[normal_idx];
+    float3 world_normal = float3(gn.x, gn.z, gn.y);
 
     V2F out;
-    out.clip_pos = u.vp * float4(world, 1.0);
-    out.normal = in.normal;
-    int idx = int(in.voxel.w) & 0xff;
-    out.color = palette[idx].rgb;
+    out.clip_pos = u.vp * float4(world_pos, 1.0);
+    out.normal = world_normal;
+    out.color = palette[palette_idx].rgb;
     return out;
 }
 
-fragment float4 voxel_fragment(V2F in [[stage_in]],
-                               constant Uniforms& u [[buffer(2)]]) {
+fragment float4 mesh_fragment(V2F in [[stage_in]],
+                              constant Uniforms& u [[buffer(2)]]) {
     float3 n = normalize(in.normal);
     float ndl = max(dot(n, u.light_dir), 0.0);
     float lambert = 0.3 + 0.7 * ndl;
@@ -140,12 +89,12 @@ fragment float4 voxel_fragment(V2F in [[stage_in]],
     id<MTLDepthStencilState> _depthState;
     id<MTLBuffer> _vertexBuffer;
     id<MTLBuffer> _indexBuffer;
-    id<MTLBuffer> _instanceBuffer;
     id<MTLBuffer> _paletteBuffer;
 
     uint64_t _cachedVersion;
     BOOL _cacheValid;
-    uint32_t _instanceCount;
+    uint32_t _vertexCount;
+    uint32_t _indexCount;
     simd::float3 _center;
 }
 
@@ -160,13 +109,12 @@ fragment float4 voxel_fragment(V2F in [[stage_in]],
         return nil;
     }
     [self buildDepthState];
-    [self buildCubeBuffers];
     return self;
 }
 
-- (uint32_t)lastInstanceCount {
-    return _instanceCount;
-}
+- (uint32_t)lastVertexCount { return _vertexCount; }
+- (uint32_t)lastIndexCount { return _indexCount; }
+- (uint32_t)lastQuadCount { return _indexCount / 6; }
 
 // ---------------------------------------------------------------------------
 // Static setup
@@ -179,30 +127,25 @@ fragment float4 voxel_fragment(V2F in [[stage_in]],
                                                    options:nil
                                                      error:&error];
     if (library == nil) {
-        fprintf(stderr, "MacVoxel: failed to compile voxel shaders: %s\n",
+        fprintf(stderr, "MacVoxel: failed to compile mesh shaders: %s\n",
                 [[error localizedDescription] UTF8String]);
         return NO;
     }
-    id<MTLFunction> vfn = [library newFunctionWithName:@"voxel_vertex"];
-    id<MTLFunction> ffn = [library newFunctionWithName:@"voxel_fragment"];
+    id<MTLFunction> vfn = [library newFunctionWithName:@"mesh_vertex"];
+    id<MTLFunction> ffn = [library newFunctionWithName:@"mesh_fragment"];
 
     MTLVertexDescriptor* vd = [[MTLVertexDescriptor alloc] init];
-    vd.attributes[0].format = MTLVertexFormatFloat3;
-    vd.attributes[0].offset = offsetof(CubeVertex, position);
+    vd.attributes[0].format = MTLVertexFormatShort3;
+    vd.attributes[0].offset = 0;
     vd.attributes[0].bufferIndex = 0;
-    vd.attributes[1].format = MTLVertexFormatFloat3;
-    vd.attributes[1].offset = offsetof(CubeVertex, normal);
+    vd.attributes[1].format = MTLVertexFormatUChar2;
+    vd.attributes[1].offset = 6;
     vd.attributes[1].bufferIndex = 0;
-    vd.attributes[2].format = MTLVertexFormatShort4;
-    vd.attributes[2].offset = 0;
-    vd.attributes[2].bufferIndex = 1;
-    vd.layouts[0].stride = sizeof(CubeVertex);
+    vd.layouts[0].stride = sizeof(macvoxel::MeshVertex);
     vd.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
-    vd.layouts[1].stride = sizeof(Instance);
-    vd.layouts[1].stepFunction = MTLVertexStepFunctionPerInstance;
 
     MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
-    desc.label = @"MacVoxel Voxels";
+    desc.label = @"MacVoxel Mesh";
     desc.vertexFunction = vfn;
     desc.fragmentFunction = ffn;
     desc.vertexDescriptor = vd;
@@ -211,7 +154,7 @@ fragment float4 voxel_fragment(V2F in [[stage_in]],
 
     _pipeline = [_device newRenderPipelineStateWithDescriptor:desc error:&error];
     if (_pipeline == nil) {
-        fprintf(stderr, "MacVoxel: failed to build voxel pipeline: %s\n",
+        fprintf(stderr, "MacVoxel: failed to build mesh pipeline: %s\n",
                 [[error localizedDescription] UTF8String]);
         return NO;
     }
@@ -225,26 +168,12 @@ fragment float4 voxel_fragment(V2F in [[stage_in]],
     _depthState = [_device newDepthStencilStateWithDescriptor:dsd];
 }
 
-- (void)buildCubeBuffers {
-    _vertexBuffer = [_device newBufferWithBytes:kCubeVertices.data()
-                                         length:sizeof(kCubeVertices)
-                                        options:MTLResourceStorageModeShared];
-    _vertexBuffer.label = @"VoxelCubeVertices";
-    _indexBuffer = [_device newBufferWithBytes:kCubeIndices.data()
-                                        length:sizeof(kCubeIndices)
-                                       options:MTLResourceStorageModeShared];
-    _indexBuffer.label = @"VoxelCubeIndices";
-}
-
 // ---------------------------------------------------------------------------
 // Document-driven cache
 // ---------------------------------------------------------------------------
 
 - (void)rebuildFromDocument:(const macvoxel::Document*)doc {
     const macvoxel::Bounds3 b = doc->grid.Bounds();
-
-    // Center: midpoint of bounds. Y/Z swapped so the renderer's Y-up world
-    // matches the .vox Z-up source data.
     const float cx = b.empty() ? 0.0f
                                : (static_cast<float>(b.min_x) +
                                   static_cast<float>(b.max_x) + 1.0f) * 0.5f;
@@ -256,43 +185,35 @@ fragment float4 voxel_fragment(V2F in [[stage_in]],
                                   static_cast<float>(b.max_y) + 1.0f) * 0.5f;
     _center = simd::float3{cx, cy, cz};
 
-    // Instance buffer: one Instance per filled cell. Walk chunks (only the
-    // ones that exist), then walk filled cells within each chunk. This
-    // visits 16^3 cells per non-empty chunk worst case — fine for the
-    // chunk densities we see in real .vox scenes.
-    std::vector<Instance> instances;
-    instances.reserve(doc->grid.FilledCount());
-    using VG = macvoxel::VoxelGrid;
+    std::vector<macvoxel::MeshVertex> vertices;
+    std::vector<uint32_t> indices;
+    // Reasonable starting capacity — typical voxel scenes after greedy
+    // meshing average a few hundred quads per non-empty chunk.
+    vertices.reserve(doc->grid.chunks().size() * 256);
+    indices.reserve(doc->grid.chunks().size() * 384);
+
     for (const auto& [coord, chunk] : doc->grid.chunks()) {
         if (chunk->filled_count == 0) continue;
-        const int32_t bx = coord.x * static_cast<int32_t>(VG::kChunkSize);
-        const int32_t by = coord.y * static_cast<int32_t>(VG::kChunkSize);
-        const int32_t bz = coord.z * static_cast<int32_t>(VG::kChunkSize);
-        for (uint32_t lz = 0; lz < VG::kChunkSize; ++lz) {
-            for (uint32_t ly = 0; ly < VG::kChunkSize; ++ly) {
-                for (uint32_t lx = 0; lx < VG::kChunkSize; ++lx) {
-                    const size_t li = lx + ly * VG::kChunkSize +
-                                      lz * VG::kChunkSize * VG::kChunkSize;
-                    const uint8_t v = chunk->cells[li];
-                    if (v == 0) continue;
-                    Instance inst;
-                    inst.x = static_cast<int16_t>(bx + static_cast<int32_t>(lx));
-                    inst.y = static_cast<int16_t>(by + static_cast<int32_t>(ly));
-                    inst.z = static_cast<int16_t>(bz + static_cast<int32_t>(lz));
-                    inst.palette_w = static_cast<int16_t>(v);
-                    instances.push_back(inst);
-                }
-            }
-        }
+        macvoxel::GreedyMeshChunk(doc->grid, coord, *chunk, &vertices, &indices);
     }
-    _instanceCount = static_cast<uint32_t>(instances.size());
-    if (_instanceCount > 0) {
-        _instanceBuffer = [_device newBufferWithBytes:instances.data()
-                                               length:instances.size() * sizeof(Instance)
-                                              options:MTLResourceStorageModeShared];
-        _instanceBuffer.label = @"VoxelInstances";
+
+    _vertexCount = static_cast<uint32_t>(vertices.size());
+    _indexCount = static_cast<uint32_t>(indices.size());
+
+    if (_vertexCount > 0) {
+        _vertexBuffer =
+            [_device newBufferWithBytes:vertices.data()
+                                 length:vertices.size() * sizeof(macvoxel::MeshVertex)
+                                options:MTLResourceStorageModeShared];
+        _vertexBuffer.label = @"VoxelMeshVertices";
+        _indexBuffer =
+            [_device newBufferWithBytes:indices.data()
+                                 length:indices.size() * sizeof(uint32_t)
+                                options:MTLResourceStorageModeShared];
+        _indexBuffer.label = @"VoxelMeshIndices";
     } else {
-        _instanceBuffer = nil;
+        _vertexBuffer = nil;
+        _indexBuffer = nil;
     }
 
     // Palette buffer: 256 float4 RGBA in [0, 1].
@@ -324,7 +245,7 @@ fragment float4 voxel_fragment(V2F in [[stage_in]],
     if (!_cacheValid || _cachedVersion != doc->version) {
         [self rebuildFromDocument:doc];
     }
-    if (_instanceCount == 0) return;
+    if (_indexCount == 0) return;
 
     Uniforms u;
     u.vp = projection * view;
@@ -339,16 +260,14 @@ fragment float4 voxel_fragment(V2F in [[stage_in]],
     [encoder setCullMode:MTLCullModeBack];
     [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
     [encoder setVertexBuffer:_vertexBuffer offset:0 atIndex:0];
-    [encoder setVertexBuffer:_instanceBuffer offset:0 atIndex:1];
     [encoder setVertexBytes:&u length:sizeof(u) atIndex:2];
     [encoder setVertexBuffer:_paletteBuffer offset:0 atIndex:3];
     [encoder setFragmentBytes:&u length:sizeof(u) atIndex:2];
     [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                        indexCount:kCubeIndices.size()
-                         indexType:MTLIndexTypeUInt16
+                        indexCount:_indexCount
+                         indexType:MTLIndexTypeUInt32
                        indexBuffer:_indexBuffer
-                 indexBufferOffset:0
-                     instanceCount:_instanceCount];
+                 indexBufferOffset:0];
     [encoder popDebugGroup];
 }
 
