@@ -58,6 +58,7 @@ set(APP_SOURCES
     src/Palette.cpp
     src/VoxFile.cpp
     src/MeshBuilder.cpp
+    src/Raycast.cpp
     src/ui/ModelPanel.cpp
 )
 

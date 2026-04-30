@@ -13,10 +13,12 @@
 
 #include "Camera.h"
 #include "Document.h"
+#include "Raycast.h"
 #include "ui/ModelPanel.h"
 
 namespace {
 enum class DragMode { None, Orbit, Pan };
+enum class EditAction { Place, Erase };
 }
 
 @implementation VoxelView {
@@ -205,16 +207,15 @@ enum class DragMode { None, Orbit, Pan };
 }
 
 // ---------------------------------------------------------------------------
-// Camera input — gated on ImGui's WantCaptureMouse so dragging inside an
-// ImGui window never moves the scene camera.
+// Mouse input — gated on ImGui's WantCaptureMouse so dragging inside an
+// ImGui window never moves the camera or edits the scene.
 //
 // Mapping:
-//   Option + drag         -> Orbit
-//   Option + Shift + drag -> Pan
-//   Scroll / pinch        -> Zoom
-//
-// Bare left-drag is intentionally unbound; reserved for the future
-// voxel-placement tool (Phase 5+).
+//   Option + drag           -> Orbit
+//   Option + Shift + drag   -> Pan
+//   Scroll / pinch          -> Zoom
+//   Bare left-click         -> Place voxel adjacent to picked face
+//   Cmd  + left-click       -> Erase picked voxel
 // ---------------------------------------------------------------------------
 
 - (void)mouseDown:(NSEvent*)event {
@@ -225,14 +226,18 @@ enum class DragMode { None, Orbit, Pan };
     const NSEventModifierFlags m = event.modifierFlags;
     const BOOL hasOption = (m & NSEventModifierFlagOption) != 0;
     const BOOL hasShift = (m & NSEventModifierFlagShift) != 0;
+    const BOOL hasCommand = (m & NSEventModifierFlagCommand) != 0;
     if (hasOption && hasShift) {
         _dragMode = DragMode::Pan;
+        _lastDragLocation = event.locationInWindow;
     } else if (hasOption) {
         _dragMode = DragMode::Orbit;
+        _lastDragLocation = event.locationInWindow;
     } else {
         _dragMode = DragMode::None;
+        const EditAction action = hasCommand ? EditAction::Erase : EditAction::Place;
+        [self performEditAtPoint:event.locationInWindow action:action];
     }
-    _lastDragLocation = event.locationInWindow;
 }
 
 - (void)mouseDragged:(NSEvent*)event {
@@ -272,6 +277,77 @@ enum class DragMode { None, Orbit, Pan };
     // event.magnification is in [-1, 1] per gesture frame; scale so a typical
     // pinch sweep is comparable to a few scroll ticks.
     _camera.Zoom(static_cast<float>(event.magnification) * 8.0f);
+}
+
+// ---------------------------------------------------------------------------
+// Editing — raycast a click into the grid, then place or erase.
+// ---------------------------------------------------------------------------
+
+- (void)performEditAtPoint:(NSPoint)windowPoint action:(EditAction)action {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return;
+
+    const NSPoint local = [self convertPoint:windowPoint fromView:nil];
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0.0f || h <= 0.0f) return;
+
+    // NDC: x, y in [-1, 1]. Cocoa Y-up matches Metal NDC y-up — no flip.
+    const float ndc_x = (static_cast<float>(local.x) / w) * 2.0f - 1.0f;
+    const float ndc_y = (static_cast<float>(local.y) / h) * 2.0f - 1.0f;
+
+    // World-space ray through this NDC point: take inverse of the view-
+    // projection matrix and unproject the near and far plane points.
+    const float aspect = w / h;
+    const simd::float4x4 vmat = _camera.ViewMatrix();
+    const simd::float4x4 pmat = _camera.ProjectionMatrix(aspect);
+    const simd::float4x4 vp = pmat * vmat;
+    const simd::float4x4 inv_vp = simd_inverse(vp);
+
+    auto unproject = [&](float z) -> simd::float3 {
+        simd::float4 clip{ndc_x, ndc_y, z, 1.0f};
+        simd::float4 wh = simd_mul(inv_vp, clip);
+        return simd::float3{wh.x / wh.w, wh.y / wh.w, wh.z / wh.w};
+    };
+    const simd::float3 near_world = unproject(0.0f);  // Metal NDC near
+    const simd::float3 far_world  = unproject(1.0f);  // Metal NDC far
+    const simd::float3 ray_dir_world = simd::normalize(far_world - near_world);
+    const simd::float3 ray_origin_world = _camera.Position();
+
+    // World -> grid: invert the renderer's transform
+    //   world = (gx, gz, -gy) - center
+    // i.e. add center, then apply R^-1 = (wx, -wz, wy).
+    const macvoxel::Bounds3 b = doc->grid.Bounds();
+    const simd::float3 center = b.empty()
+        ? simd::float3{0.0f, 0.0f, 0.0f}
+        : simd::float3{
+            (static_cast<float>(b.min_x) + static_cast<float>(b.max_x) + 1.0f) * 0.5f,
+            (static_cast<float>(b.min_z) + static_cast<float>(b.max_z) + 1.0f) * 0.5f,
+            -(static_cast<float>(b.min_y) + static_cast<float>(b.max_y) + 1.0f) * 0.5f,
+          };
+    const simd::float3 oc = ray_origin_world + center;
+    const simd::float3 ray_origin_grid{oc.x, -oc.z, oc.y};
+    const simd::float3 ray_dir_grid{ray_dir_world.x, -ray_dir_world.z, ray_dir_world.y};
+
+    macvoxel::RayHit hit;
+    if (!macvoxel::Raycast(doc->grid, ray_origin_grid, ray_dir_grid, 4096.0f, &hit)) {
+        return;
+    }
+
+    if (action == EditAction::Place) {
+        if (hit.axis < 0) return;  // started inside a voxel — no neighbor face
+        int dx = 0, dy = 0, dz = 0;
+        if (hit.axis == 0) dx = hit.sign;
+        else if (hit.axis == 1) dy = hit.sign;
+        else if (hit.axis == 2) dz = hit.sign;
+        // Phase 5.1: hardcoded palette index 1 ("white") until ToolPanel lands.
+        doc->grid.Set(hit.x + dx, hit.y + dy, hit.z + dz, 1);
+        ++doc->version;
+    } else {
+        doc->grid.Set(hit.x, hit.y, hit.z, 0);
+        ++doc->version;
+    }
 }
 
 @end
