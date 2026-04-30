@@ -57,6 +57,7 @@ set(APP_SOURCES
     src/VoxelGrid.cpp
     src/Palette.cpp
     src/VoxFile.cpp
+    src/MeshBuilder.cpp
     src/ui/ModelPanel.cpp
 )
 
