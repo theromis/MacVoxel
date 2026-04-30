@@ -106,6 +106,7 @@ find_library(METAL_LIBRARY     Metal     REQUIRED)
 find_library(METALKIT_LIBRARY  MetalKit  REQUIRED)
 find_library(QUARTZCORE_LIBRARY QuartzCore REQUIRED)
 find_library(GAMECONTROLLER_LIBRARY GameController REQUIRED)
+find_library(UTI_LIBRARY UniformTypeIdentifiers REQUIRED)
 
 target_link_libraries(${APP_NAME} PRIVATE
     ${COCOA_LIBRARY}
@@ -113,6 +114,7 @@ target_link_libraries(${APP_NAME} PRIVATE
     ${METALKIT_LIBRARY}
     ${QUARTZCORE_LIBRARY}
     ${GAMECONTROLLER_LIBRARY}
+    ${UTI_LIBRARY}
 )
 
 # ARC for Obj-C++. ImGui's backends are written ARC-compatible upstream.

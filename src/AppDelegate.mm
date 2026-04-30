@@ -1,19 +1,34 @@
 #import "AppDelegate.h"
 #import "VoxelView.h"
 
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <cstdio>
+#include <memory>
 
+#include "Document.h"
+#include "VoxFile.h"
 #include "ui/HelloPanel.h"
 
-@implementation AppDelegate
+@implementation AppDelegate {
+    std::unique_ptr<macvoxel::Document> _doc;
+}
+
+- (macvoxel::Document*)document {
+    return _doc.get();
+}
 
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
 
 - (void)applicationDidFinishLaunching:(NSNotification*)__unused notification {
+    _doc = std::make_unique<macvoxel::Document>();
+    _doc->grid.Resize({16, 16, 16});
+    _doc->grid.Set(0, 0, 0, 1);  // single voxel so the panel has something to count
+
     [self buildMainMenu];
     [self buildMainWindow];
+    [self updateWindowTitle];
     [NSApp activateIgnoringOtherApps:YES];
 }
 
@@ -183,13 +198,94 @@
 }
 
 // ---------------------------------------------------------------------------
-// Stub document actions (Phase 0: log only)
+// Document actions
 // ---------------------------------------------------------------------------
 
-- (IBAction)newDocument:(id)__unused sender { fprintf(stderr, "[stub] File > New\n"); }
-- (IBAction)openDocument:(id)__unused sender { fprintf(stderr, "[stub] File > Open\n"); }
-- (IBAction)saveDocument:(id)__unused sender { fprintf(stderr, "[stub] File > Save\n"); }
-- (IBAction)saveDocumentAs:(id)__unused sender { fprintf(stderr, "[stub] File > Save As\n"); }
+- (void)updateWindowTitle {
+    if (_doc->path.empty()) {
+        [self.window setTitle:@"MacVoxel — Untitled"];
+        [self.window setRepresentedFilename:@""];
+    } else {
+        NSString* p = [NSString stringWithUTF8String:_doc->path.c_str()];
+        [self.window setTitleWithRepresentedFilename:p];
+    }
+}
+
+- (void)showAlertTitle:(NSString*)title message:(NSString*)msg {
+    NSAlert* a = [[NSAlert alloc] init];
+    a.alertStyle = NSAlertStyleWarning;
+    a.messageText = title;
+    a.informativeText = msg;
+    [a addButtonWithTitle:@"OK"];
+    [a runModal];
+}
+
+- (NSArray<UTType*>*)voxContentTypes {
+    UTType* t = [UTType typeWithFilenameExtension:@"vox"];
+    return t ? @[t] : @[];
+}
+
+- (IBAction)newDocument:(id)__unused sender {
+    _doc->grid.Resize({16, 16, 16});
+    _doc->grid.Set(0, 0, 0, 1);
+    _doc->palette.ResetToDefault();
+    _doc->path.clear();
+    [self updateWindowTitle];
+}
+
+- (IBAction)openDocument:(id)__unused sender {
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    panel.allowedContentTypes = [self voxContentTypes];
+    panel.allowsMultipleSelection = NO;
+    panel.canChooseDirectories = NO;
+    if ([panel runModal] != NSModalResponseOK) return;
+    NSURL* url = panel.URL;
+    if (url == nil) return;
+
+    const std::string path = [[url path] UTF8String];
+    macvoxel::Document fresh;
+    std::string err;
+    if (!macvoxel::LoadVox(path, &fresh.grid, &fresh.palette, &err)) {
+        [self showAlertTitle:@"Open Failed"
+                     message:[NSString stringWithUTF8String:err.c_str()]];
+        return;
+    }
+    fresh.path = path;
+    *_doc = std::move(fresh);
+    [self updateWindowTitle];
+}
+
+- (IBAction)saveDocument:(id)sender {
+    if (_doc->path.empty()) {
+        [self saveDocumentAs:sender];
+        return;
+    }
+    std::string err;
+    if (!macvoxel::SaveVox(_doc->path, _doc->grid, _doc->palette, &err)) {
+        [self showAlertTitle:@"Save Failed"
+                     message:[NSString stringWithUTF8String:err.c_str()]];
+    }
+}
+
+- (IBAction)saveDocumentAs:(id)__unused sender {
+    NSSavePanel* panel = [NSSavePanel savePanel];
+    panel.allowedContentTypes = [self voxContentTypes];
+    panel.nameFieldStringValue = @"Untitled.vox";
+    if ([panel runModal] != NSModalResponseOK) return;
+    NSURL* url = panel.URL;
+    if (url == nil) return;
+
+    const std::string path = [[url path] UTF8String];
+    std::string err;
+    if (!macvoxel::SaveVox(path, _doc->grid, _doc->palette, &err)) {
+        [self showAlertTitle:@"Save Failed"
+                     message:[NSString stringWithUTF8String:err.c_str()]];
+        return;
+    }
+    _doc->path = path;
+    [self updateWindowTitle];
+}
+
 - (IBAction)undo:(id)__unused sender { fprintf(stderr, "[stub] Edit > Undo\n"); }
 - (IBAction)redo:(id)__unused sender { fprintf(stderr, "[stub] Edit > Redo\n"); }
 
