@@ -126,7 +126,19 @@ enum class EditAction { Place, Erase };
     if (doc == nullptr) return;
     const macvoxel::Bounds3 b = doc->grid.Bounds();
     const int32_t maxExtent = std::max({b.size_x(), b.size_y(), b.size_z()});
-    _camera.Frame(static_cast<float>(maxExtent));
+    // World position of the bounds midpoint (apply the same rotation the
+    // renderer does: world = (gx, gz, -gy)).
+    simd::float3 target_world{0.0f, 0.0f, 0.0f};
+    if (!b.empty()) {
+        const float gcx = (static_cast<float>(b.min_x) +
+                           static_cast<float>(b.max_x) + 1.0f) * 0.5f;
+        const float gcy = (static_cast<float>(b.min_y) +
+                           static_cast<float>(b.max_y) + 1.0f) * 0.5f;
+        const float gcz = (static_cast<float>(b.min_z) +
+                           static_cast<float>(b.max_z) + 1.0f) * 0.5f;
+        target_world = simd::float3{gcx, gcz, -gcy};
+    }
+    _camera.Frame(target_world, static_cast<float>(maxExtent));
 }
 
 // ---------------------------------------------------------------------------
@@ -320,20 +332,15 @@ enum class EditAction { Place, Erase };
     const simd::float3 ray_dir_world = simd::normalize(far_world - near_world);
     const simd::float3 ray_origin_world = _camera.Position();
 
-    // World -> grid: invert the renderer's transform
-    //   world = (gx, gz, -gy) - center
-    // i.e. add center, then apply R^-1 = (wx, -wz, wy).
-    const macvoxel::Bounds3 b = doc->grid.Bounds();
-    const simd::float3 center = b.empty()
-        ? simd::float3{0.0f, 0.0f, 0.0f}
-        : simd::float3{
-            (static_cast<float>(b.min_x) + static_cast<float>(b.max_x) + 1.0f) * 0.5f,
-            (static_cast<float>(b.min_z) + static_cast<float>(b.max_z) + 1.0f) * 0.5f,
-            -(static_cast<float>(b.min_y) + static_cast<float>(b.max_y) + 1.0f) * 0.5f,
-          };
-    const simd::float3 oc = ray_origin_world + center;
-    const simd::float3 ray_origin_grid{oc.x, -oc.z, oc.y};
-    const simd::float3 ray_dir_grid{ray_dir_world.x, -ray_dir_world.z, ray_dir_world.y};
+    // World -> grid: invert the renderer's rotation R = (gx, gz, -gy).
+    // R^-1 (wx, wy, wz) = (wx, -wz, wy). No translation now that the
+    // renderer no longer centers the model on the world origin.
+    const simd::float3 ray_origin_grid{ray_origin_world.x,
+                                       -ray_origin_world.z,
+                                       ray_origin_world.y};
+    const simd::float3 ray_dir_grid{ray_dir_world.x,
+                                    -ray_dir_world.z,
+                                    ray_dir_world.y};
 
     macvoxel::ToolState& tool = macvoxel::CurrentTool();
     const int radius = std::max(1, tool.brush_radius);

@@ -24,10 +24,10 @@ public:
     void Pan(float dx_points, float dy_points);
     void Zoom(float ticks);
 
-    // Reset orientation and pick a distance that fits a cube of side
-    // `extent` centered at the origin in the current FOV. Called when a
-    // new document is loaded.
-    void Frame(float extent);
+    // Reset orientation, set the orbit target to `target_world`, and pick
+    // a distance that fits a cube of side `extent` around that target in
+    // the current FOV. Called when a new document is loaded.
+    void Frame(simd::float3 target_world, float extent);
 };
 
 }  // namespace macvoxel

@@ -88,8 +88,8 @@ void Camera::Zoom(float ticks) {
     distance = std::clamp(distance, kDistanceMin, kDistanceMax);
 }
 
-void Camera::Frame(float extent) {
-    target = simd::float3{0.0f, 0.0f, 0.0f};
+void Camera::Frame(simd::float3 target_world, float extent) {
+    target = target_world;
     yaw = 0.5236f;    // 30°
     pitch = 0.4363f;  // 25°
     if (extent <= 0.0f) {
