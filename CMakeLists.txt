@@ -56,6 +56,7 @@ set(APP_SOURCES
     src/CubeRenderer.mm
     src/VoxelGrid.cpp
     src/Palette.cpp
+    src/VoxFile.cpp
     src/ui/HelloPanel.cpp
 )
 
