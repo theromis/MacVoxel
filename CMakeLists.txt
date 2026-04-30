@@ -55,6 +55,7 @@ set(APP_SOURCES
     src/Camera.cpp
     src/CubeRenderer.mm
     src/VoxelGrid.cpp
+    src/Palette.cpp
     src/ui/HelloPanel.cpp
 )
 
