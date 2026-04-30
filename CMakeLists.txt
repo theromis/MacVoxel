@@ -54,6 +54,7 @@ set(APP_SOURCES
     src/VoxelView.mm
     src/Camera.cpp
     src/CubeRenderer.mm
+    src/VoxelGrid.cpp
     src/ui/HelloPanel.cpp
 )
 
