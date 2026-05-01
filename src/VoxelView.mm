@@ -1,6 +1,7 @@
 #import "VoxelView.h"
 
 #import "AppDelegate.h"
+#import "RaycastRenderer.h"
 #import "VoxelRenderer.h"
 
 #import <Metal/Metal.h>
@@ -25,7 +26,8 @@ enum class EditAction { Place, Erase };
 
 @implementation VoxelView {
     id<MTLCommandQueue> _commandQueue;
-    VoxelRenderer* _voxelRenderer;
+    VoxelRenderer* _voxelRenderer;        // mesh-based; left in place for fallback
+    RaycastRenderer* _raycastRenderer;    // primary on this branch
     macvoxel::Camera _camera;
     DragMode _dragMode;
     EditAction _paintAction;
@@ -63,6 +65,12 @@ enum class EditAction { Place, Erase };
                                                colorFormat:self.colorPixelFormat
                                                depthFormat:self.depthStencilPixelFormat];
     if (_voxelRenderer == nil) {
+        return nil;
+    }
+    _raycastRenderer = [[RaycastRenderer alloc] initWithDevice:device
+                                                   colorFormat:self.colorPixelFormat
+                                                   depthFormat:self.depthStencilPixelFormat];
+    if (_raycastRenderer == nil) {
         return nil;
     }
 
@@ -197,10 +205,11 @@ enum class EditAction { Place, Erase };
     id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:pass];
     enc.label = @"MacVoxel Pass";
 
-    [_voxelRenderer encodeWithEncoder:enc
-                                 view:viewMat
-                           projection:projMat
-                             document:doc];
+    [_raycastRenderer encodeWithEncoder:enc
+                                   view:viewMat
+                             projection:projMat
+                            cameraWorld:_camera.Position()
+                               document:doc];
 
     [enc pushDebugGroup:@"Dear ImGui rendering"];
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmd, enc);

@@ -54,6 +54,7 @@ set(APP_SOURCES
     src/VoxelView.mm
     src/Camera.cpp
     src/VoxelRenderer.mm
+    src/RaycastRenderer.mm
     src/VoxelGrid.cpp
     src/Palette.cpp
     src/VoxFile.cpp
