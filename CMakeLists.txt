@@ -66,6 +66,7 @@ set(APP_SOURCES
     src/ui/ToolPanel.cpp
     src/ui/PalettePanel.cpp
     src/ui/Fonts.cpp
+    src/ui/Theme.cpp
 )
 
 # Source files referenced in CMakeLists must exist for configure to succeed.

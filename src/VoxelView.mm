@@ -21,6 +21,7 @@
 #include "ui/Fonts.h"
 #include "ui/ModelPanel.h"
 #include "ui/PalettePanel.h"
+#include "ui/Theme.h"
 #include "ui/ToolPanel.h"
 
 namespace {
@@ -112,16 +113,7 @@ struct Vec3i { int32_t x, y, z; };
     }
     io.IniFilename = g_imgui_ini_path.empty() ? nullptr : g_imgui_ini_path.c_str();
 
-    ImGui::StyleColorsDark();
-    {
-        ImGuiStyle& style = ImGui::GetStyle();
-        style.WindowRounding   = 6.0f;
-        style.FrameRounding    = 4.0f;
-        style.GrabRounding     = 4.0f;
-        style.PopupRounding    = 4.0f;
-        style.ScrollbarRounding = 4.0f;
-        style.TabRounding      = 4.0f;
-    }
+    macvoxel::ApplyProTheme();
 
     // Load San Francisco from /System (Apple's license forbids bundling SF).
     // Render at 2x and scale down for crisp glyphs on Retina. SFNS.ttf is a
@@ -134,10 +126,14 @@ struct Vec3i { int32_t x, y, z; };
         const float header_pt = 15.0f;
 
         macvoxel::AppFonts& fonts = macvoxel::Fonts();
-        fonts.body = io.Fonts->AddFontFromFileTTF(sf_path, body_pt * oversample);
+
+        ImFontConfig body_cfg;
+        body_cfg.RasterizerMultiply = 1.18f;  // a touch heavier than regular
+        fonts.body = io.Fonts->AddFontFromFileTTF(sf_path, body_pt * oversample,
+                                                  &body_cfg);
 
         ImFontConfig header_cfg;
-        header_cfg.RasterizerMultiply = 1.35f;  // synthetic "bold" for headers
+        header_cfg.RasterizerMultiply = 1.45f;  // synthetic "bold" for headers
         fonts.header = io.Fonts->AddFontFromFileTTF(sf_path, header_pt * oversample,
                                                     &header_cfg);
 
