@@ -10,6 +10,7 @@
 #include "imgui.h"
 #include "imgui_impl_metal.h"
 #include "imgui_impl_osx.h"
+#include "imgui_internal.h"  // DockBuilder API
 
 #include "Camera.h"
 #include "Document.h"
@@ -17,8 +18,9 @@
 #include "Raycast.h"
 #include "Selection.h"
 #include "ToolState.h"
-#include "ui/MaterialPanel.h"
+#include "ui/Fonts.h"
 #include "ui/ModelPanel.h"
+#include "ui/PalettePanel.h"
 #include "ui/ToolPanel.h"
 
 namespace {
@@ -88,22 +90,63 @@ struct Vec3i { int32_t x, y, z; };
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     // Multi-viewport is intentionally off for Phase 0 — single-window shell only.
-    io.IniFilename = nullptr;  // no imgui.ini file in CWD
+
+    // Persist panel positions / collapsed state across launches via
+    // imgui.ini in ~/Library/Application Support/MacVoxel/. The string
+    // backing io.IniFilename has to outlive ImGui's use of it; static
+    // storage keeps it alive for the process lifetime.
+    static std::string g_imgui_ini_path;
+    if (g_imgui_ini_path.empty()) {
+        NSArray<NSString*>* dirs = NSSearchPathForDirectoriesInDomains(
+            NSApplicationSupportDirectory, NSUserDomainMask, YES);
+        NSString* support = dirs.firstObject;
+        if (support != nil) {
+            NSString* appDir = [support stringByAppendingPathComponent:@"MacVoxel"];
+            [[NSFileManager defaultManager] createDirectoryAtPath:appDir
+                                      withIntermediateDirectories:YES
+                                                       attributes:nil
+                                                            error:nil];
+            NSString* ini = [appDir stringByAppendingPathComponent:@"imgui.ini"];
+            g_imgui_ini_path = [ini UTF8String];
+        }
+    }
+    io.IniFilename = g_imgui_ini_path.empty() ? nullptr : g_imgui_ini_path.c_str();
 
     ImGui::StyleColorsDark();
+    {
+        ImGuiStyle& style = ImGui::GetStyle();
+        style.WindowRounding   = 6.0f;
+        style.FrameRounding    = 4.0f;
+        style.GrabRounding     = 4.0f;
+        style.PopupRounding    = 4.0f;
+        style.ScrollbarRounding = 4.0f;
+        style.TabRounding      = 4.0f;
+    }
 
     // Load San Francisco from /System (Apple's license forbids bundling SF).
-    // Render at 2x and scale down for crisp glyphs on Retina.
+    // Render at 2x and scale down for crisp glyphs on Retina. SFNS.ttf is a
+    // variable-weight font but stb_truetype loads its default cut; we fake
+    // a heavier display weight with RasterizerMultiply for section headers.
     {
         const char* sf_path = "/System/Library/Fonts/SFNS.ttf";
-        const float font_size_pt = 13.0f;
         const float oversample = 2.0f;
-        ImFont* font = io.Fonts->AddFontFromFileTTF(sf_path, font_size_pt * oversample);
-        if (font == nullptr) {
+        const float body_pt = 13.0f;
+        const float header_pt = 15.0f;
+
+        macvoxel::AppFonts& fonts = macvoxel::Fonts();
+        fonts.body = io.Fonts->AddFontFromFileTTF(sf_path, body_pt * oversample);
+
+        ImFontConfig header_cfg;
+        header_cfg.RasterizerMultiply = 1.35f;  // synthetic "bold" for headers
+        fonts.header = io.Fonts->AddFontFromFileTTF(sf_path, header_pt * oversample,
+                                                    &header_cfg);
+
+        if (fonts.body == nullptr) {
             fprintf(stderr,
                     "MacVoxel: failed to load %s, falling back to ImGui default\n",
                     sf_path);
-            io.Fonts->AddFontDefault();
+            fonts.body = io.Fonts->AddFontDefault();
+            fonts.header = fonts.body;
         }
         io.FontGlobalScale = 1.0f / oversample;
     }
@@ -125,6 +168,75 @@ struct Vec3i { int32_t x, y, z; };
 
 - (void)dealloc {
     [self shutdownImGui];
+}
+
+// ---------------------------------------------------------------------------
+// Dockspace: an invisible fullscreen host window whose central node is
+// passthrough so the ray-cast scene shows through the empty middle, and
+// whose left and right margins are docked with our panels. On first run
+// (or after the user deletes imgui.ini) we lay out a default split; on
+// subsequent runs ImGui restores whatever the user dragged into place.
+// ---------------------------------------------------------------------------
+
+- (void)setupDockspace {
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->WorkPos);
+    ImGui::SetNextWindowSize(vp->WorkSize);
+    ImGui::SetNextWindowViewport(vp->ID);
+
+    const ImGuiWindowFlags host_flags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDocking;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##DockHost", nullptr, host_flags);
+    ImGui::PopStyleVar(3);
+
+    const ImGuiID dock_id = ImGui::GetID("MacVoxelDock");
+    ImGui::DockSpace(dock_id, ImVec2(0.0f, 0.0f),
+                     ImGuiDockNodeFlags_PassthruCentralNode);
+
+    static bool layout_built = false;
+    if (!layout_built) {
+        layout_built = true;
+        ImGuiDockNode* node = ImGui::DockBuilderGetNode(dock_id);
+        // Build defaults only on the first launch ever (or after the user
+        // deletes imgui.ini). If the saved ini already split the dockspace
+        // into children, leave the user's layout alone.
+        const bool fresh = (node == nullptr) ||
+                           (node->IsLeafNode() && node->Windows.Size == 0);
+        if (fresh) {
+            ImGui::DockBuilderRemoveNode(dock_id);
+            ImGui::DockBuilderAddNode(dock_id,
+                                      ImGuiDockNodeFlags_PassthruCentralNode |
+                                          ImGuiDockNodeFlags_DockSpace);
+            ImGui::DockBuilderSetNodeSize(dock_id, vp->WorkSize);
+
+            ImGuiID center = dock_id;
+            ImGuiID left, right;
+            ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, 0.22f,
+                                        &left, &center);
+            ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.22f,
+                                        &right, &center);
+
+            // Tool on top (small), Palette below (bigger — swatch grid +
+            // material editor want the room).
+            ImGuiID left_top, left_bottom;
+            ImGui::DockBuilderSplitNode(left, ImGuiDir_Up, 0.30f,
+                                        &left_top, &left_bottom);
+
+            ImGui::DockBuilderDockWindow("Tool", left_top);
+            ImGui::DockBuilderDockWindow("Palette", left_bottom);
+            ImGui::DockBuilderDockWindow("Model", right);
+            ImGui::DockBuilderFinish(dock_id);
+        }
+    }
+
+    ImGui::End();
 }
 
 - (void)frameCameraToDocument {
@@ -178,6 +290,8 @@ struct Vec3i { int32_t x, y, z; };
     ImGui_ImplOSX_NewFrame(self);
     ImGui::NewFrame();
 
+    [self setupDockspace];
+
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
     if (doc != nullptr) {
@@ -186,7 +300,7 @@ struct Vec3i { int32_t x, y, z; };
         stats.gpu_bytes = [_raycastRenderer lastGPUBytes];
         macvoxel::DrawModelPanel(*doc, stats);
         macvoxel::DrawToolPanel();
-        macvoxel::DrawMaterialPanel(*doc);
+        macvoxel::DrawPalettePanel(*doc);
         [self drawSelectionOverlay];
     }
 

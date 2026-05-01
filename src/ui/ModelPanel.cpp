@@ -1,7 +1,7 @@
 #include "ModelPanel.h"
 
 #include "Document.h"
-#include "ToolState.h"
+#include "Fonts.h"
 
 #include "imgui.h"
 
@@ -10,17 +10,15 @@ namespace {
 
 bool g_show_demo = false;
 
-ImU32 ColorToImU32(Color c) {
-    return IM_COL32(c.r, c.g, c.b, c.a);
-}
-
 }  // namespace
 
 void DrawModelPanel(const Document& doc, const RenderStats& stats) {
-    ImGui::SetNextWindowSize(ImVec2(360, 480), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(320, 240), ImGuiCond_FirstUseEver);
     ImGui::Begin("Model");
 
+    ImGui::PushFont(Fonts().header);
     ImGui::TextUnformatted("File");
+    ImGui::PopFont();
     ImGui::Indent();
     if (doc.path.empty()) {
         ImGui::TextDisabled("(untitled)");
@@ -30,15 +28,15 @@ void DrawModelPanel(const Document& doc, const RenderStats& stats) {
     ImGui::Unindent();
     ImGui::Spacing();
 
+    ImGui::PushFont(Fonts().header);
     ImGui::TextUnformatted("Grid");
+    ImGui::PopFont();
     ImGui::Indent();
     const Bounds3 b = doc.grid.Bounds();
     const size_t filled = doc.grid.FilledCount();
     if (b.empty()) {
         ImGui::TextDisabled("(empty)");
     } else {
-        ImGui::Text("bounds  X[%d, %d]  Y[%d, %d]  Z[%d, %d]",
-                    b.min_x, b.max_x, b.min_y, b.max_y, b.min_z, b.max_z);
         ImGui::Text("extent  %d × %d × %d",
                     b.size_x(), b.size_y(), b.size_z());
         const size_t bbox_cells = static_cast<size_t>(b.size_x()) *
@@ -53,60 +51,19 @@ void DrawModelPanel(const Document& doc, const RenderStats& stats) {
     ImGui::Unindent();
     ImGui::Spacing();
 
-    ImGui::TextUnformatted("Palette");
-    ImGui::Indent();
-    {
-        ToolState& tool = CurrentTool();
-        const float swatch = 16.0f;
-        const float spacing = 1.0f;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        const ImVec2 origin = ImGui::GetCursorScreenPos();
-        const float total = 16.0f * (swatch + spacing) - spacing;
-        // Reserve the area first so ImGui knows we're consuming it for input.
-        ImGui::InvisibleButton("palette_grid", ImVec2(total, total));
-        const bool grid_hovered = ImGui::IsItemHovered();
-        const bool grid_clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
-        const ImVec2 mouse = ImGui::GetIO().MousePos;
-        for (int i = 0; i < 256; ++i) {
-            const int col = i % 16;
-            const int row = i / 16;
-            const ImVec2 a{origin.x + col * (swatch + spacing),
-                           origin.y + row * (swatch + spacing)};
-            const ImVec2 b{a.x + swatch, a.y + swatch};
-            const Color c = doc.palette.Get(static_cast<uint8_t>(i));
-            dl->AddRectFilled(a, b, ColorToImU32(c));
-
-            const bool inside = mouse.x >= a.x && mouse.x < b.x &&
-                                mouse.y >= a.y && mouse.y < b.y;
-            if (grid_hovered && inside) {
-                ImGui::SetTooltip("idx %d  RGBA(%u, %u, %u, %u)", i,
-                                  c.r, c.g, c.b, c.a);
-                if (grid_clicked) tool.palette_idx = static_cast<uint8_t>(i);
-            }
-            if (i == tool.palette_idx) {
-                // Highlight selected swatch with a contrasting border.
-                dl->AddRect(a, b, IM_COL32(255, 255, 255, 255), 0.0f, 0, 2.0f);
-            }
-        }
-    }
-    ImGui::Unindent();
-
-    ImGui::Spacing();
+    ImGui::PushFont(Fonts().header);
     ImGui::TextUnformatted("Render");
+    ImGui::PopFont();
     ImGui::Indent();
     {
         const ImGuiIO& io = ImGui::GetIO();
         ImGui::Text("%.1f FPS  (%.2f ms/frame)", io.Framerate,
                     io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f);
-        ImGui::Text("chunks     %u", stats.chunk_count);
+        ImGui::Text("chunks  %u", stats.chunk_count);
         const double mb = static_cast<double>(stats.gpu_bytes) / (1024.0 * 1024.0);
-        ImGui::Text("GPU mem    %.1f MB", mb);
+        ImGui::Text("GPU mem %.1f MB", mb);
     }
     ImGui::Unindent();
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Checkbox("Show ImGui demo (⌘D)", &g_show_demo);
 
     ImGui::End();
 
