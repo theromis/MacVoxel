@@ -5,9 +5,10 @@
 namespace macvoxel {
 
 enum class ToolKind {
-    Place,  // create voxels adjacent to the picked face
-    Erase,  // remove the picked voxel
-    Paint,  // recolor an existing voxel without changing presence
+    Place,   // create voxels adjacent to the picked face
+    Erase,   // remove the picked voxel
+    Paint,   // recolor an existing voxel without changing presence
+    Select,  // drag to define a 3D AABB selection
 };
 
 struct ToolState {

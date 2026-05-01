@@ -30,6 +30,8 @@ void DrawToolPanel() {
     tool_button("Erase", ToolKind::Erase);
     ImGui::SameLine();
     tool_button("Paint", ToolKind::Paint);
+    ImGui::SameLine();
+    tool_button("Select", ToolKind::Select);
 
     ImGui::Spacing();
 

@@ -15,13 +15,16 @@
 #include "Document.h"
 #include "EditHistory.h"
 #include "Raycast.h"
+#include "Selection.h"
 #include "ToolState.h"
 #include "ui/ModelPanel.h"
 #include "ui/ToolPanel.h"
 
 namespace {
-enum class DragMode { None, Orbit, Pan, Paint };
+enum class DragMode { None, Orbit, Pan, Paint, Select };
 enum class EditAction { Place, Erase };
+
+struct Vec3i { int32_t x, y, z; };
 }
 
 @implementation VoxelView {
@@ -30,6 +33,7 @@ enum class EditAction { Place, Erase };
     macvoxel::Camera _camera;
     DragMode _dragMode;
     EditAction _paintAction;
+    Vec3i _selectionAnchor;
     NSPoint _lastDragLocation;
     BOOL _imguiAlive;
 }
@@ -181,6 +185,7 @@ enum class EditAction { Place, Erase };
         stats.gpu_bytes = [_raycastRenderer lastGPUBytes];
         macvoxel::DrawModelPanel(*doc, stats);
         macvoxel::DrawToolPanel();
+        [self drawSelectionOverlay];
     }
 
     ImGui::Render();
@@ -252,6 +257,19 @@ enum class EditAction { Place, Erase };
     } else if (hasOption) {
         _dragMode = DragMode::Orbit;
         _lastDragLocation = event.locationInWindow;
+    } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Select) {
+        _dragMode = DragMode::Select;
+        Vec3i pick;
+        if ([self pickGridCellAtPoint:event.locationInWindow into:&pick]) {
+            _selectionAnchor = pick;
+            macvoxel::Selection& sel = macvoxel::CurrentSelection();
+            sel.box.min_x = sel.box.max_x = pick.x;
+            sel.box.min_y = sel.box.max_y = pick.y;
+            sel.box.min_z = sel.box.max_z = pick.z;
+            sel.active = true;
+        } else {
+            _dragMode = DragMode::None;
+        }
     } else {
         _dragMode = DragMode::Paint;
         _paintAction = hasCommand ? EditAction::Erase : EditAction::Place;
@@ -273,6 +291,20 @@ enum class EditAction { Place, Erase };
         case DragMode::Orbit: _camera.Orbit(dx, dy); break;
         case DragMode::Pan:   _camera.Pan(dx, dy);   break;
         case DragMode::Paint: [self performEditAtPoint:p action:_paintAction]; break;
+        case DragMode::Select: {
+            Vec3i pick;
+            if ([self pickGridCellAtPoint:p into:&pick]) {
+                macvoxel::Selection& sel = macvoxel::CurrentSelection();
+                sel.box.min_x = std::min(_selectionAnchor.x, pick.x);
+                sel.box.min_y = std::min(_selectionAnchor.y, pick.y);
+                sel.box.min_z = std::min(_selectionAnchor.z, pick.z);
+                sel.box.max_x = std::max(_selectionAnchor.x, pick.x);
+                sel.box.max_y = std::max(_selectionAnchor.y, pick.y);
+                sel.box.max_z = std::max(_selectionAnchor.z, pick.z);
+                sel.active = true;
+            }
+            break;
+        }
         case DragMode::None:  break;
     }
 }
@@ -301,6 +333,128 @@ enum class EditAction { Place, Erase };
     // event.magnification is in [-1, 1] per gesture frame; scale so a typical
     // pinch sweep is comparable to a few scroll ticks.
     _camera.Zoom(static_cast<float>(event.magnification) * 8.0f);
+}
+
+// ---------------------------------------------------------------------------
+// Picking: cast a ray from a window-space point and return the grid cell
+// the user is targeting. Falls back to the ground plane (grid z=0) when
+// the ray misses all voxels.
+// ---------------------------------------------------------------------------
+
+- (BOOL)pickGridCellAtPoint:(NSPoint)windowPoint into:(Vec3i*)outCell {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return NO;
+
+    const NSPoint local = [self convertPoint:windowPoint fromView:nil];
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0.0f || h <= 0.0f) return NO;
+
+    const float ndc_x = (static_cast<float>(local.x) / w) * 2.0f - 1.0f;
+    const float ndc_y = (static_cast<float>(local.y) / h) * 2.0f - 1.0f;
+
+    const float aspect = w / h;
+    const simd::float4x4 vmat = _camera.ViewMatrix();
+    const simd::float4x4 pmat = _camera.ProjectionMatrix(aspect);
+    const simd::float4x4 inv_vp = simd_inverse(pmat * vmat);
+    auto unproject = [&](float z) -> simd::float3 {
+        simd::float4 clip{ndc_x, ndc_y, z, 1.0f};
+        simd::float4 wh = simd_mul(inv_vp, clip);
+        return simd::float3{wh.x / wh.w, wh.y / wh.w, wh.z / wh.w};
+    };
+    const simd::float3 near_world = unproject(0.0f);
+    const simd::float3 far_world = unproject(1.0f);
+    const simd::float3 ray_dir_world = simd::normalize(far_world - near_world);
+    const simd::float3 ray_origin_world = _camera.Position();
+
+    const simd::float3 ray_origin_grid{ray_origin_world.x,
+                                       -ray_origin_world.z,
+                                       ray_origin_world.y};
+    const simd::float3 ray_dir_grid{ray_dir_world.x,
+                                    -ray_dir_world.z,
+                                    ray_dir_world.y};
+
+    macvoxel::RayHit hit;
+    if (macvoxel::Raycast(doc->grid, ray_origin_grid, ray_dir_grid, 4096.0f, &hit)) {
+        outCell->x = hit.x;
+        outCell->y = hit.y;
+        outCell->z = hit.z;
+        return YES;
+    }
+    if (std::abs(ray_dir_grid.z) < 1e-6f) return NO;
+    const float t = -ray_origin_grid.z / ray_dir_grid.z;
+    if (t < 0.0f || t > 4096.0f) return NO;
+    outCell->x = static_cast<int32_t>(std::floor(ray_origin_grid.x + t * ray_dir_grid.x));
+    outCell->y = static_cast<int32_t>(std::floor(ray_origin_grid.y + t * ray_dir_grid.y));
+    outCell->z = 0;
+    return YES;
+}
+
+// ---------------------------------------------------------------------------
+// Selection overlay: project the 8 corners of the selection AABB to screen
+// space and draw the 12 connecting edges via ImGui's background draw list,
+// so it overlays the ray-cast scene but sits underneath ImGui panels.
+// ---------------------------------------------------------------------------
+
+- (void)drawSelectionOverlay {
+    const macvoxel::Selection& sel = macvoxel::CurrentSelection();
+    if (!sel.active || sel.box.empty()) return;
+
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0.0f || h <= 0.0f) return;
+    const float aspect = w / h;
+    const simd::float4x4 vp = _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
+
+    // Selection box in grid voxel coords; voxels span [c, c+1] so the
+    // outer faces are at min .. max+1.
+    const simd::float3 gmin{static_cast<float>(sel.box.min_x),
+                            static_cast<float>(sel.box.min_y),
+                            static_cast<float>(sel.box.min_z)};
+    const simd::float3 gmax{static_cast<float>(sel.box.max_x + 1),
+                            static_cast<float>(sel.box.max_y + 1),
+                            static_cast<float>(sel.box.max_z + 1)};
+
+    auto to_world = [](simd::float3 g) {
+        // Same R = (gx, gz, -gy) the renderer applies.
+        return simd::float3{g.x, g.z, -g.y};
+    };
+
+    simd::float3 corners_grid[8] = {
+        {gmin.x, gmin.y, gmin.z}, {gmax.x, gmin.y, gmin.z},
+        {gmax.x, gmax.y, gmin.z}, {gmin.x, gmax.y, gmin.z},
+        {gmin.x, gmin.y, gmax.z}, {gmax.x, gmin.y, gmax.z},
+        {gmax.x, gmax.y, gmax.z}, {gmin.x, gmax.y, gmax.z},
+    };
+    ImVec2 screen[8];
+    bool valid[8];
+    for (int i = 0; i < 8; ++i) {
+        const simd::float3 wpos = to_world(corners_grid[i]);
+        const simd::float4 clip = simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
+        valid[i] = clip.w > 0.001f;
+        if (valid[i]) {
+            const float ndc_x = clip.x / clip.w;
+            const float ndc_y = clip.y / clip.w;
+            screen[i].x = (ndc_x * 0.5f + 0.5f) * w;
+            screen[i].y = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;  // ImGui Y-down
+        }
+    }
+
+    // 12 edges as pairs of corner indices.
+    static const int kEdges[12][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0},  // bottom
+        {4, 5}, {5, 6}, {6, 7}, {7, 4},  // top
+        {0, 4}, {1, 5}, {2, 6}, {3, 7},  // verticals
+    };
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const ImU32 color = IM_COL32(255, 220, 80, 255);
+    for (int i = 0; i < 12; ++i) {
+        const int a = kEdges[i][0];
+        const int b = kEdges[i][1];
+        if (!valid[a] || !valid[b]) continue;
+        dl->AddLine(screen[a], screen[b], color, 1.5f);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +560,8 @@ enum class EditAction { Place, Erase };
             case macvoxel::ToolKind::Paint:
                 if (old_val != 0) new_val = tool.palette_idx;
                 break;
+            case macvoxel::ToolKind::Select:
+                return;  // Select tool doesn't edit cells; handled in mouseDown
         }
         if (new_val == old_val) return;
         doc->grid.Set(x, y, z, new_val);

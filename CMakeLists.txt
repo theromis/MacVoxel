@@ -60,6 +60,7 @@ set(APP_SOURCES
     src/Raycast.cpp
     src/ToolState.cpp
     src/EditHistory.cpp
+    src/Selection.cpp
     src/ui/ModelPanel.cpp
     src/ui/ToolPanel.cpp
 )
