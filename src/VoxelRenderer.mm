@@ -3,6 +3,7 @@
 #import <cstdio>
 #include <array>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include "Document.h"
@@ -83,18 +84,33 @@ fragment float4 mesh_fragment(V2F in [[stage_in]],
 
 }  // namespace
 
+// Per-chunk mesh cache. Each chunk owns its own MTLBuffers — drawing
+// iterates the map and issues one drawIndexedPrimitives per non-empty
+// chunk. Avoids the concat step that was the drag-paint bottleneck on
+// huge scenes (memcpy of 100+ MB into the master buffer per edit).
+struct ChunkMeshCache {
+    uint32_t cached_version = 0;
+    bool valid = false;
+    id<MTLBuffer> vertexBuffer;
+    id<MTLBuffer> indexBuffer;
+    uint32_t vertexCount = 0;
+    uint32_t indexCount = 0;
+};
+
 @implementation VoxelRenderer {
     id<MTLDevice> _device;
     id<MTLRenderPipelineState> _pipeline;
     id<MTLDepthStencilState> _depthState;
-    id<MTLBuffer> _vertexBuffer;
-    id<MTLBuffer> _indexBuffer;
     id<MTLBuffer> _paletteBuffer;
 
-    uint64_t _cachedVersion;
+    std::unordered_map<macvoxel::VoxelGrid::ChunkCoord,
+                       ChunkMeshCache,
+                       macvoxel::VoxelGrid::ChunkCoordHash>
+        _chunkCaches;
+    uint64_t _cachedDocVersion;
     BOOL _cacheValid;
-    uint32_t _vertexCount;
-    uint32_t _indexCount;
+    uint32_t _totalVertexCount;
+    uint32_t _totalIndexCount;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -111,9 +127,9 @@ fragment float4 mesh_fragment(V2F in [[stage_in]],
     return self;
 }
 
-- (uint32_t)lastVertexCount { return _vertexCount; }
-- (uint32_t)lastIndexCount { return _indexCount; }
-- (uint32_t)lastQuadCount { return _indexCount / 6; }
+- (uint32_t)lastVertexCount { return _totalVertexCount; }
+- (uint32_t)lastIndexCount { return _totalIndexCount; }
+- (uint32_t)lastQuadCount { return _totalIndexCount / 6; }
 
 // ---------------------------------------------------------------------------
 // Static setup
@@ -171,37 +187,91 @@ fragment float4 mesh_fragment(V2F in [[stage_in]],
 // Document-driven cache
 // ---------------------------------------------------------------------------
 
-- (void)rebuildFromDocument:(const macvoxel::Document*)doc {
-    std::vector<macvoxel::MeshVertex> vertices;
-    std::vector<uint32_t> indices;
-    // Reasonable starting capacity — typical voxel scenes after greedy
-    // meshing average a few hundred quads per non-empty chunk.
-    vertices.reserve(doc->grid.chunks().size() * 256);
-    indices.reserve(doc->grid.chunks().size() * 384);
+- (void)rebuildFromDocument:(macvoxel::Document*)doc {
+    auto& grid = doc->grid;
+    const auto& chunks = grid.chunks();
 
-    for (const auto& [coord, chunk] : doc->grid.chunks()) {
-        if (chunk->filled_count == 0) continue;
-        macvoxel::GreedyMeshChunk(doc->grid, coord, *chunk, &vertices, &indices);
+    // Drop caches for chunks that no longer exist (erased to empty during
+    // the last batch of edits, or replaced wholesale by File > Open).
+    for (auto it = _chunkCaches.begin(); it != _chunkCaches.end(); ) {
+        if (chunks.find(it->first) == chunks.end()) {
+            it = _chunkCaches.erase(it);
+        } else {
+            ++it;
+        }
     }
 
-    _vertexCount = static_cast<uint32_t>(vertices.size());
-    _indexCount = static_cast<uint32_t>(indices.size());
-
-    if (_vertexCount > 0) {
-        _vertexBuffer =
-            [_device newBufferWithBytes:vertices.data()
-                                 length:vertices.size() * sizeof(macvoxel::MeshVertex)
-                                options:MTLResourceStorageModeShared];
-        _vertexBuffer.label = @"VoxelMeshVertices";
-        _indexBuffer =
-            [_device newBufferWithBytes:indices.data()
-                                 length:indices.size() * sizeof(uint32_t)
-                                options:MTLResourceStorageModeShared];
-        _indexBuffer.label = @"VoxelMeshIndices";
-    } else {
-        _vertexBuffer = nil;
-        _indexBuffer = nil;
+    // Decide which chunks need (re)meshing. For incremental edits the
+    // grid hands us its dirty set (a few entries); on the first rebuild
+    // after a wholesale doc replacement we may have a fresh grid with no
+    // dirty entries but lots of chunks not yet in our cache — fall back
+    // to "everything not cached" for those.
+    auto dirty = grid.TakeDirtyChunks();
+    if (dirty.empty()) {
+        for (const auto& [coord, chunk] : chunks) {
+            auto it = _chunkCaches.find(coord);
+            if (it == _chunkCaches.end() || !it->second.valid) {
+                dirty.insert(coord);
+            }
+        }
     }
+
+    std::vector<macvoxel::MeshVertex> verts_scratch;
+    std::vector<uint32_t> idx_scratch;
+    uint32_t total_verts = 0;
+    uint32_t total_indices = 0;
+
+    // Existing cache contributions (chunks we won't touch this rebuild).
+    for (const auto& [coord, cache] : _chunkCaches) {
+        if (dirty.find(coord) != dirty.end()) continue;
+        total_verts += cache.vertexCount;
+        total_indices += cache.indexCount;
+    }
+
+    // Re-mesh dirty chunks. Each owns its own MTLBuffers; nothing global
+    // gets touched.
+    for (const auto& coord : dirty) {
+        auto chunk_it = chunks.find(coord);
+        if (chunk_it == chunks.end()) {
+            _chunkCaches.erase(coord);
+            continue;
+        }
+        const auto& chunk = *chunk_it->second;
+        ChunkMeshCache& cache = _chunkCaches[coord];
+
+        verts_scratch.clear();
+        idx_scratch.clear();
+        if (chunk.filled_count > 0) {
+            macvoxel::GreedyMeshChunk(grid, coord, chunk,
+                                      &verts_scratch, &idx_scratch);
+        }
+        cache.vertexCount = static_cast<uint32_t>(verts_scratch.size());
+        cache.indexCount = static_cast<uint32_t>(idx_scratch.size());
+        if (cache.vertexCount > 0) {
+            const size_t v_bytes =
+                verts_scratch.size() * sizeof(macvoxel::MeshVertex);
+            cache.vertexBuffer =
+                [_device newBufferWithBytes:verts_scratch.data()
+                                     length:v_bytes
+                                    options:MTLResourceStorageModeShared];
+            cache.vertexBuffer.label = @"ChunkVertices";
+            const size_t i_bytes = idx_scratch.size() * sizeof(uint32_t);
+            cache.indexBuffer =
+                [_device newBufferWithBytes:idx_scratch.data()
+                                     length:i_bytes
+                                    options:MTLResourceStorageModeShared];
+            cache.indexBuffer.label = @"ChunkIndices";
+        } else {
+            cache.vertexBuffer = nil;
+            cache.indexBuffer = nil;
+        }
+        cache.cached_version = chunk.version;
+        cache.valid = true;
+        total_verts += cache.vertexCount;
+        total_indices += cache.indexCount;
+    }
+    _totalVertexCount = total_verts;
+    _totalIndexCount = total_indices;
 
     // Palette buffer: 256 float4 RGBA in [0, 1].
     std::array<simd::float4, 256> pal_floats{};
@@ -216,7 +286,7 @@ fragment float4 mesh_fragment(V2F in [[stage_in]],
                                          options:MTLResourceStorageModeShared];
     _paletteBuffer.label = @"VoxelPalette";
 
-    _cachedVersion = doc->version;
+    _cachedDocVersion = doc->version;
     _cacheValid = YES;
 }
 
@@ -227,12 +297,12 @@ fragment float4 mesh_fragment(V2F in [[stage_in]],
 - (void)encodeWithEncoder:(id<MTLRenderCommandEncoder>)encoder
                      view:(simd::float4x4)view
                projection:(simd::float4x4)projection
-                 document:(const macvoxel::Document*)doc {
+                 document:(macvoxel::Document*)doc {
     if (doc == nullptr) return;
-    if (!_cacheValid || _cachedVersion != doc->version) {
+    if (!_cacheValid || _cachedDocVersion != doc->version) {
         [self rebuildFromDocument:doc];
     }
-    if (_indexCount == 0) return;
+    if (_totalIndexCount == 0) return;
 
     Uniforms u;
     u.vp = projection * view;
@@ -244,15 +314,18 @@ fragment float4 mesh_fragment(V2F in [[stage_in]],
     [encoder setDepthStencilState:_depthState];
     [encoder setCullMode:MTLCullModeBack];
     [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
-    [encoder setVertexBuffer:_vertexBuffer offset:0 atIndex:0];
     [encoder setVertexBytes:&u length:sizeof(u) atIndex:2];
     [encoder setVertexBuffer:_paletteBuffer offset:0 atIndex:3];
     [encoder setFragmentBytes:&u length:sizeof(u) atIndex:2];
-    [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                        indexCount:_indexCount
-                         indexType:MTLIndexTypeUInt32
-                       indexBuffer:_indexBuffer
-                 indexBufferOffset:0];
+    for (const auto& [coord, cache] : _chunkCaches) {
+        if (cache.indexCount == 0) continue;
+        [encoder setVertexBuffer:cache.vertexBuffer offset:0 atIndex:0];
+        [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                            indexCount:cache.indexCount
+                             indexType:MTLIndexTypeUInt32
+                           indexBuffer:cache.indexBuffer
+                     indexBufferOffset:0];
+    }
     [encoder popDebugGroup];
 }
 

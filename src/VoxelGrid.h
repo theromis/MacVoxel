@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace macvoxel {
 
@@ -58,10 +59,16 @@ public:
         ChunkCoord coord{};
         uint8_t cells[kChunkVolume]{};
         uint32_t filled_count = 0;
+        // Bumped on every modification to this chunk's cells, AND on edits
+        // to neighbor chunks at our shared boundary (those edits can
+        // change which of our boundary faces are visible). Renderers cache
+        // their last-built version per chunk and remesh on mismatch.
+        uint32_t version = 0;
     };
 
     using ChunkMap =
         std::unordered_map<ChunkCoord, std::unique_ptr<Chunk>, ChunkCoordHash>;
+    using ChunkSet = std::unordered_set<ChunkCoord, ChunkCoordHash>;
 
     VoxelGrid() = default;
     VoxelGrid(VoxelGrid&&) = default;
@@ -84,6 +91,17 @@ public:
 
     const ChunkMap& chunks() const { return chunks_; }
 
+    // Set populates this with each modified chunk and any boundary
+    // neighbor whose visible faces could be affected. Consumers (today
+    // just VoxelRenderer) drain it via TakeDirtyChunks() — they receive
+    // the set by move, leaving the grid empty so the next batch of edits
+    // accumulates from scratch.
+    ChunkSet TakeDirtyChunks() {
+        ChunkSet out = std::move(dirty_chunks_);
+        dirty_chunks_.clear();
+        return out;
+    }
+
     // Helpers — exposed for renderers and the save path so they don't have
     // to reproduce the chunk math.
     static ChunkCoord ToChunkCoord(int32_t x, int32_t y, int32_t z) {
@@ -100,6 +118,7 @@ public:
 
 private:
     ChunkMap chunks_;
+    ChunkSet dirty_chunks_;
     size_t total_filled_ = 0;
     Bounds3 bounds_{};
 };

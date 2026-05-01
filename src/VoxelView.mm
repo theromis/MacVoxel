@@ -19,7 +19,7 @@
 #include "ui/ToolPanel.h"
 
 namespace {
-enum class DragMode { None, Orbit, Pan };
+enum class DragMode { None, Orbit, Pan, Paint };
 enum class EditAction { Place, Erase };
 }
 
@@ -28,6 +28,7 @@ enum class EditAction { Place, Erase };
     VoxelRenderer* _voxelRenderer;
     macvoxel::Camera _camera;
     DragMode _dragMode;
+    EditAction _paintAction;
     NSPoint _lastDragLocation;
     BOOL _imguiAlive;
 }
@@ -251,9 +252,9 @@ enum class EditAction { Place, Erase };
         _dragMode = DragMode::Orbit;
         _lastDragLocation = event.locationInWindow;
     } else {
-        _dragMode = DragMode::None;
-        const EditAction action = hasCommand ? EditAction::Erase : EditAction::Place;
-        [self performEditAtPoint:event.locationInWindow action:action];
+        _dragMode = DragMode::Paint;
+        _paintAction = hasCommand ? EditAction::Erase : EditAction::Place;
+        [self performEditAtPoint:event.locationInWindow action:_paintAction];
     }
 }
 
@@ -269,6 +270,7 @@ enum class EditAction { Place, Erase };
     switch (_dragMode) {
         case DragMode::Orbit: _camera.Orbit(dx, dy); break;
         case DragMode::Pan:   _camera.Pan(dx, dy);   break;
+        case DragMode::Paint: [self performEditAtPoint:p action:_paintAction]; break;
         case DragMode::None:  break;
     }
 }
