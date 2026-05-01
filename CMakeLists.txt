@@ -59,6 +59,7 @@ set(APP_SOURCES
     src/VoxFile.cpp
     src/Raycast.cpp
     src/ToolState.cpp
+    src/EditHistory.cpp
     src/ui/ModelPanel.cpp
     src/ui/ToolPanel.cpp
 )

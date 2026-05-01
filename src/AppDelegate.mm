@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "Document.h"
+#include "EditHistory.h"
 #include "VoxFile.h"
 #include "ui/ModelPanel.h"
 
@@ -155,12 +156,16 @@
     NSMenuItem* item = [[NSMenuItem alloc] init];
     NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Edit"];
 
-    [menu addItemWithTitle:@"Undo" action:@selector(undo:) keyEquivalent:@"z"];
+    NSMenuItem* undo = [menu addItemWithTitle:@"Undo"
+                                       action:@selector(undo:)
+                                keyEquivalent:@"z"];
+    [undo setTarget:self];
     NSMenuItem* redo = [menu addItemWithTitle:@"Redo"
                                        action:@selector(redo:)
                                 keyEquivalent:@"Z"];
     [redo setKeyEquivalentModifierMask:NSEventModifierFlagCommand |
                                        NSEventModifierFlagShift];
+    [redo setTarget:self];
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
     [menu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
@@ -239,6 +244,7 @@
     _doc->palette.ResetToDefault();
     _doc->path.clear();
     ++_doc->version;
+    macvoxel::CurrentHistory().Clear();
     [self updateWindowTitle];
     [self frameCameraIfPossible];
 }
@@ -263,6 +269,7 @@
     fresh.path = path;
     fresh.version = _doc->version + 1;
     *_doc = std::move(fresh);
+    macvoxel::CurrentHistory().Clear();
     [self updateWindowTitle];
     [self frameCameraIfPossible];
 }
@@ -298,7 +305,30 @@
     [self updateWindowTitle];
 }
 
-- (IBAction)undo:(id)__unused sender { fprintf(stderr, "[stub] Edit > Undo\n"); }
-- (IBAction)redo:(id)__unused sender { fprintf(stderr, "[stub] Edit > Redo\n"); }
+- (IBAction)undo:(id)__unused sender {
+    if (_doc == nullptr) return;
+    if (macvoxel::CurrentHistory().Undo(_doc->grid)) {
+        ++_doc->version;
+    }
+}
+
+- (IBAction)redo:(id)__unused sender {
+    if (_doc == nullptr) return;
+    if (macvoxel::CurrentHistory().Redo(_doc->grid)) {
+        ++_doc->version;
+    }
+}
+
+// Grey the Undo / Redo items when their stack is empty — standard Mac UX.
+- (BOOL)validateMenuItem:(NSMenuItem*)item {
+    const SEL action = item.action;
+    if (action == @selector(undo:)) {
+        return macvoxel::CurrentHistory().CanUndo();
+    }
+    if (action == @selector(redo:)) {
+        return macvoxel::CurrentHistory().CanRedo();
+    }
+    return YES;
+}
 
 @end

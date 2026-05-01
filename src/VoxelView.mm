@@ -13,6 +13,7 @@
 
 #include "Camera.h"
 #include "Document.h"
+#include "EditHistory.h"
 #include "Raycast.h"
 #include "ToolState.h"
 #include "ui/ModelPanel.h"
@@ -254,6 +255,7 @@ enum class EditAction { Place, Erase };
     } else {
         _dragMode = DragMode::Paint;
         _paintAction = hasCommand ? EditAction::Erase : EditAction::Place;
+        macvoxel::CurrentHistory().BeginOp();
         [self performEditAtPoint:event.locationInWindow action:_paintAction];
     }
 }
@@ -276,6 +278,9 @@ enum class EditAction { Place, Erase };
 }
 
 - (void)mouseUp:(NSEvent*)__unused event {
+    if (_dragMode == DragMode::Paint) {
+        macvoxel::CurrentHistory().CommitOp();
+    }
     _dragMode = DragMode::None;
 }
 
@@ -386,20 +391,25 @@ enum class EditAction { Place, Erase };
         target_z = 0;
     }
 
+    macvoxel::EditHistory& history = macvoxel::CurrentHistory();
+
     auto apply = [&](int x, int y, int z) {
+        const uint8_t old_val = doc->grid.Get(x, y, z);
+        uint8_t new_val = old_val;
         switch (effective) {
             case macvoxel::ToolKind::Place:
-                doc->grid.Set(x, y, z, tool.palette_idx);
+                new_val = tool.palette_idx;
                 break;
             case macvoxel::ToolKind::Erase:
-                doc->grid.Set(x, y, z, 0);
+                new_val = 0;
                 break;
             case macvoxel::ToolKind::Paint:
-                if (doc->grid.Get(x, y, z) != 0) {
-                    doc->grid.Set(x, y, z, tool.palette_idx);
-                }
+                if (old_val != 0) new_val = tool.palette_idx;
                 break;
         }
+        if (new_val == old_val) return;
+        doc->grid.Set(x, y, z, new_val);
+        history.Record(x, y, z, old_val, new_val);
     };
 
     for (int dz = -span; dz <= span; ++dz) {
