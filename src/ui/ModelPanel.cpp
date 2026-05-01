@@ -96,17 +96,11 @@ void DrawModelPanel(const Document& doc, const RenderStats& stats) {
     ImGui::Indent();
     {
         const ImGuiIO& io = ImGui::GetIO();
-        const uint32_t tris = stats.index_count / 3;
-        const float ratio = filled > 0
-                                ? static_cast<float>(stats.quad_count) /
-                                      static_cast<float>(filled * 6)
-                                : 0.0f;
         ImGui::Text("%.1f FPS  (%.2f ms/frame)", io.Framerate,
                     io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f);
-        ImGui::Text("quads      %u", stats.quad_count);
-        ImGui::Text("triangles  %u", tris);
-        ImGui::Text("vertices   %u", stats.vertex_count);
-        ImGui::Text("face ratio %.3f  (quads / 6 * filled)", ratio);
+        ImGui::Text("chunks     %u", stats.chunk_count);
+        const double mb = static_cast<double>(stats.gpu_bytes) / (1024.0 * 1024.0);
+        ImGui::Text("GPU mem    %.1f MB", mb);
     }
     ImGui::Unindent();
 

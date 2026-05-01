@@ -2,7 +2,6 @@
 
 #import "AppDelegate.h"
 #import "RaycastRenderer.h"
-#import "VoxelRenderer.h"
 
 #import <Metal/Metal.h>
 #import <cstdio>
@@ -26,8 +25,7 @@ enum class EditAction { Place, Erase };
 
 @implementation VoxelView {
     id<MTLCommandQueue> _commandQueue;
-    VoxelRenderer* _voxelRenderer;        // mesh-based; left in place for fallback
-    RaycastRenderer* _raycastRenderer;    // primary on this branch
+    RaycastRenderer* _raycastRenderer;
     macvoxel::Camera _camera;
     DragMode _dragMode;
     EditAction _paintAction;
@@ -61,12 +59,6 @@ enum class EditAction { Place, Erase };
 
     self.delegate = self;
 
-    _voxelRenderer = [[VoxelRenderer alloc] initWithDevice:device
-                                               colorFormat:self.colorPixelFormat
-                                               depthFormat:self.depthStencilPixelFormat];
-    if (_voxelRenderer == nil) {
-        return nil;
-    }
     _raycastRenderer = [[RaycastRenderer alloc] initWithDevice:device
                                                    colorFormat:self.colorPixelFormat
                                                    depthFormat:self.depthStencilPixelFormat];
@@ -184,9 +176,8 @@ enum class EditAction { Place, Erase };
     macvoxel::Document* doc = [delegate document];
     if (doc != nullptr) {
         macvoxel::RenderStats stats;
-        stats.vertex_count = [_voxelRenderer lastVertexCount];
-        stats.index_count = [_voxelRenderer lastIndexCount];
-        stats.quad_count = [_voxelRenderer lastQuadCount];
+        stats.chunk_count = [_raycastRenderer lastChunkCount];
+        stats.gpu_bytes = [_raycastRenderer lastGPUBytes];
         macvoxel::DrawModelPanel(*doc, stats);
         macvoxel::DrawToolPanel();
     }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace macvoxel {
@@ -7,9 +8,8 @@ namespace macvoxel {
 struct Document;
 
 struct RenderStats {
-    uint32_t vertex_count = 0;
-    uint32_t index_count = 0;
-    uint32_t quad_count = 0;
+    uint32_t chunk_count = 0;
+    size_t gpu_bytes = 0;
 };
 
 void DrawModelPanel(const Document& doc, const RenderStats& stats);

@@ -35,4 +35,8 @@ namespace macvoxel { struct Document; }
 
 - (uint32_t)lastChunkCount;
 
+// Total GPU memory occupied by the renderer's voxel data structures
+// (coarse grid + chunk pool capacity, in bytes).
+- (size_t)lastGPUBytes;
+
 @end

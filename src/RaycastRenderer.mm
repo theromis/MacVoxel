@@ -320,6 +320,13 @@ fragment float4 raycast_fragment(
 
 - (uint32_t)lastChunkCount { return _chunkCount; }
 
+- (size_t)lastGPUBytes {
+    size_t bytes = 0;
+    if (_coarseBuffer != nil) bytes += _coarseBuffer.length;
+    if (_poolBuffer != nil) bytes += _poolBuffer.length;
+    return bytes;
+}
+
 // ---------------------------------------------------------------------------
 // GPU upload. The hot path is incremental: drain the grid's dirty-chunk
 // set and update only the affected slots in the chunk pool. Wholesale

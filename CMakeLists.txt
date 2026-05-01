@@ -53,12 +53,10 @@ set(APP_SOURCES
     src/AppDelegate.mm
     src/VoxelView.mm
     src/Camera.cpp
-    src/VoxelRenderer.mm
     src/RaycastRenderer.mm
     src/VoxelGrid.cpp
     src/Palette.cpp
     src/VoxFile.cpp
-    src/MeshBuilder.cpp
     src/Raycast.cpp
     src/ToolState.cpp
     src/ui/ModelPanel.cpp
