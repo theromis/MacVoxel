@@ -31,7 +31,7 @@ namespace macvoxel { struct Document; }
                      view:(simd::float4x4)view
                projection:(simd::float4x4)projection
               cameraWorld:(simd::float3)cameraWorld
-                 document:(const macvoxel::Document*)doc;
+                 document:(macvoxel::Document*)doc;
 
 - (uint32_t)lastChunkCount;
 

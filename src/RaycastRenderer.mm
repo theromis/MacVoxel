@@ -212,6 +212,13 @@ fragment float4 raycast_fragment(
     simd::int3 _coarseMin;
     simd::int3 _coarseDim;
     uint32_t _chunkCount;
+    // Pool slot bookkeeping: how many slots are currently in use, and how
+    // many fit in the buffer's current allocation. Slot 0 is reserved as
+    // the "empty" sentinel that coarse_grid uses (1-based pool indices).
+    uint32_t _poolSlotsUsed;
+    uint32_t _poolSlotsCapacity;
+    // Palette state (cached so we don't re-upload it every edit).
+    uint64_t _paletteSignature;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -252,12 +259,14 @@ fragment float4 raycast_fragment(
 - (uint32_t)lastChunkCount { return _chunkCount; }
 
 // ---------------------------------------------------------------------------
-// GPU upload — wholesale on doc->version change. Incremental upload is a
-// future optimization; for now even Rancho Ancon's ~200 MB rebuild is a
-// few hundred ms one-shot, then editing is free.
+// GPU upload. The hot path is incremental: drain the grid's dirty-chunk
+// set and update only the affected slots in the chunk pool. Wholesale
+// rebuild is reserved for the cases where the chunk-coord bounds shift
+// (a fresh document, or an edit that places voxels past the previous
+// extents) — there the coarse grid itself has to be reshaped.
 // ---------------------------------------------------------------------------
 
-- (void)rebuildFromDocument:(const macvoxel::Document*)doc {
+- (void)wholesaleRebuildFromDocument:(macvoxel::Document*)doc {
     using VG = macvoxel::VoxelGrid;
     const auto& chunks = doc->grid.chunks();
     _chunkCount = static_cast<uint32_t>(chunks.size());
@@ -267,8 +276,11 @@ fragment float4 raycast_fragment(
         _coarseDim = simd::int3{0, 0, 0};
         _coarseBuffer = nil;
         _poolBuffer = nil;
+        _poolSlotsUsed = 0;
+        _poolSlotsCapacity = 0;
     } else {
-        // Compute coarse-grid extents from chunk coords.
+        // Coarse-grid extents from chunk coords. Headroom isn't worth the
+        // complexity; if bounds grow during editing we'll wholesale-rebuild.
         int32_t min_cx = INT32_MAX, min_cy = INT32_MAX, min_cz = INT32_MAX;
         int32_t max_cx = INT32_MIN, max_cy = INT32_MIN, max_cz = INT32_MIN;
         for (const auto& [coord, chunk] : chunks) {
@@ -290,13 +302,18 @@ fragment float4 raycast_fragment(
             static_cast<size_t>(_coarseDim.z);
         std::vector<uint32_t> coarse(coarse_count, 0);
 
-        // Pool: index 0 reserved as the "empty" sentinel; first real chunk
-        // is at pool index 0 inside the buffer but referenced as 1 from
-        // coarse_grid (so coarse[i] == 0 means empty without ambiguity).
-        std::vector<uint8_t> pool;
-        pool.reserve(chunks.size() * VG::kChunkVolume);
+        // Pool capacity: one slot per chunk plus headroom so subsequent
+        // edits can append without reallocating immediately.
+        _poolSlotsCapacity = static_cast<uint32_t>(
+            std::max<size_t>(chunks.size() * 3 / 2 + 16, 64));
+        const size_t pool_bytes =
+            static_cast<size_t>(_poolSlotsCapacity) * VG::kChunkVolume;
+        _poolBuffer = [_device newBufferWithLength:pool_bytes
+                                           options:MTLResourceStorageModeShared];
+        _poolBuffer.label = @"RaycastChunkPool";
 
-        uint32_t pool_idx = 1;
+        auto* pool = static_cast<uint8_t*>(_poolBuffer.contents);
+        uint32_t pool_idx = 1;  // 1-based; 0 means empty in the coarse grid
         for (const auto& [coord, chunk] : chunks) {
             const size_t cgi =
                 static_cast<size_t>(coord.x - min_cx) +
@@ -305,23 +322,20 @@ fragment float4 raycast_fragment(
                 static_cast<size_t>(coord.z - min_cz) *
                     static_cast<size_t>(_coarseDim.x) *
                     static_cast<size_t>(_coarseDim.y);
-            coarse[cgi] = pool_idx++;
-            const size_t old = pool.size();
-            pool.resize(old + VG::kChunkVolume);
-            std::memcpy(pool.data() + old, chunk->cells, VG::kChunkVolume);
+            coarse[cgi] = pool_idx;
+            std::memcpy(pool + (pool_idx - 1) * VG::kChunkVolume,
+                        chunk->cells, VG::kChunkVolume);
+            ++pool_idx;
         }
+        _poolSlotsUsed = pool_idx - 1;
 
         _coarseBuffer = [_device newBufferWithBytes:coarse.data()
                                              length:coarse.size() * sizeof(uint32_t)
                                             options:MTLResourceStorageModeShared];
         _coarseBuffer.label = @"RaycastCoarse";
-        _poolBuffer = [_device newBufferWithBytes:pool.data()
-                                           length:pool.size()
-                                          options:MTLResourceStorageModeShared];
-        _poolBuffer.label = @"RaycastChunkPool";
     }
 
-    // Palette buffer (same layout the mesh renderer used).
+    // Palette buffer.
     std::array<simd::float4, 256> pal_floats{};
     for (size_t i = 0; i < 256; ++i) {
         const macvoxel::Color c = doc->palette.Get(static_cast<uint8_t>(i));
@@ -333,19 +347,156 @@ fragment float4 raycast_fragment(
                                           length:sizeof(pal_floats)
                                          options:MTLResourceStorageModeShared];
     _paletteBuffer.label = @"RaycastPalette";
+    _paletteSignature = [self paletteSignature:doc];
+
+    // Wholesale rebuild covered everything; flush the dirty queue so the
+    // next encode doesn't redundantly re-process those same chunks.
+    doc->grid.TakeDirtyChunks();
 
     _cachedDocVersion = doc->version;
     _cacheValid = YES;
+}
+
+- (uint64_t)paletteSignature:(const macvoxel::Document*)doc {
+    // Cheap fingerprint of the palette so we can skip re-uploading it
+    // when only the grid changed. FNV-1a over the 256 RGBA bytes.
+    uint64_t h = 0xcbf29ce484222325ULL;
+    const auto* p = reinterpret_cast<const uint8_t*>(doc->palette.data());
+    for (size_t i = 0; i < 256 * sizeof(macvoxel::Color); ++i) {
+        h ^= p[i];
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
+- (BOOL)dirtyFitsInExistingBounds:(const macvoxel::VoxelGrid::ChunkSet&)dirty {
+    for (const auto& coord : dirty) {
+        if (coord.x < _coarseMin.x ||
+            coord.y < _coarseMin.y ||
+            coord.z < _coarseMin.z ||
+            coord.x >= _coarseMin.x + _coarseDim.x ||
+            coord.y >= _coarseMin.y + _coarseDim.y ||
+            coord.z >= _coarseMin.z + _coarseDim.z) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+- (void)growPoolToSlots:(uint32_t)needed {
+    using VG = macvoxel::VoxelGrid;
+    uint32_t new_cap = std::max(_poolSlotsCapacity * 2, needed);
+    new_cap = std::max<uint32_t>(new_cap, 64);
+    const size_t new_bytes = static_cast<size_t>(new_cap) * VG::kChunkVolume;
+    id<MTLBuffer> new_buf =
+        [_device newBufferWithLength:new_bytes
+                             options:MTLResourceStorageModeShared];
+    new_buf.label = @"RaycastChunkPool";
+    if (_poolBuffer != nil && _poolSlotsUsed > 0) {
+        std::memcpy(new_buf.contents, _poolBuffer.contents,
+                    static_cast<size_t>(_poolSlotsUsed) * VG::kChunkVolume);
+    }
+    _poolBuffer = new_buf;
+    _poolSlotsCapacity = new_cap;
+}
+
+- (void)applyDirty:(macvoxel::Document*)doc dirty:(const macvoxel::VoxelGrid::ChunkSet&)dirty {
+    using VG = macvoxel::VoxelGrid;
+    const auto& chunks = doc->grid.chunks();
+
+    auto* coarse = static_cast<uint32_t*>(_coarseBuffer.contents);
+
+    // First pass: see how many new pool slots we need and grow once.
+    uint32_t new_slots_needed = 0;
+    for (const auto& coord : dirty) {
+        const size_t cgi =
+            static_cast<size_t>(coord.x - _coarseMin.x) +
+            static_cast<size_t>(coord.y - _coarseMin.y) *
+                static_cast<size_t>(_coarseDim.x) +
+            static_cast<size_t>(coord.z - _coarseMin.z) *
+                static_cast<size_t>(_coarseDim.x) *
+                static_cast<size_t>(_coarseDim.y);
+        if (coarse[cgi] == 0 && chunks.find(coord) != chunks.end()) {
+            ++new_slots_needed;
+        }
+    }
+    if (_poolSlotsUsed + new_slots_needed > _poolSlotsCapacity) {
+        [self growPoolToSlots:_poolSlotsUsed + new_slots_needed];
+    }
+
+    auto* pool = static_cast<uint8_t*>(_poolBuffer.contents);
+
+    for (const auto& coord : dirty) {
+        const size_t cgi =
+            static_cast<size_t>(coord.x - _coarseMin.x) +
+            static_cast<size_t>(coord.y - _coarseMin.y) *
+                static_cast<size_t>(_coarseDim.x) +
+            static_cast<size_t>(coord.z - _coarseMin.z) *
+                static_cast<size_t>(_coarseDim.x) *
+                static_cast<size_t>(_coarseDim.y);
+
+        auto chunk_it = chunks.find(coord);
+        if (chunk_it == chunks.end()) {
+            // Chunk was deleted (last filled cell cleared). Mark its coarse
+            // slot empty; pool slot is left unreclaimed for now (a future
+            // free-list could reuse it).
+            coarse[cgi] = 0;
+            continue;
+        }
+
+        uint32_t pool_idx = coarse[cgi];
+        if (pool_idx == 0) {
+            ++_poolSlotsUsed;
+            pool_idx = _poolSlotsUsed;  // 1-based
+            coarse[cgi] = pool_idx;
+        }
+        std::memcpy(pool + (pool_idx - 1) * VG::kChunkVolume,
+                    chunk_it->second->cells, VG::kChunkVolume);
+    }
+
+    _chunkCount = static_cast<uint32_t>(chunks.size());
+}
+
+- (void)updateFromDocument:(macvoxel::Document*)doc {
+    auto dirty = doc->grid.TakeDirtyChunks();
+
+    if (!_cacheValid || _coarseBuffer == nil ||
+        ![self dirtyFitsInExistingBounds:dirty]) {
+        [self wholesaleRebuildFromDocument:doc];
+        return;
+    }
+
+    if (!dirty.empty()) {
+        [self applyDirty:doc dirty:dirty];
+    }
+
+    // Palette is far smaller than the chunk pool but still worth skipping
+    // when it didn't change. Most edits don't touch it.
+    const uint64_t sig = [self paletteSignature:doc];
+    if (sig != _paletteSignature) {
+        std::array<simd::float4, 256> pal_floats{};
+        for (size_t i = 0; i < 256; ++i) {
+            const macvoxel::Color c = doc->palette.Get(static_cast<uint8_t>(i));
+            pal_floats[i] = simd::float4{
+                c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f,
+            };
+        }
+        std::memcpy(_paletteBuffer.contents, pal_floats.data(),
+                    sizeof(pal_floats));
+        _paletteSignature = sig;
+    }
+
+    _cachedDocVersion = doc->version;
 }
 
 - (void)encodeWithEncoder:(id<MTLRenderCommandEncoder>)encoder
                      view:(simd::float4x4)view
                projection:(simd::float4x4)projection
               cameraWorld:(simd::float3)cameraWorld
-                 document:(const macvoxel::Document*)doc {
+                 document:(macvoxel::Document*)doc {
     if (doc == nullptr) return;
     if (!_cacheValid || _cachedDocVersion != doc->version) {
-        [self rebuildFromDocument:doc];
+        [self updateFromDocument:doc];
     }
     if (_coarseBuffer == nil || _poolBuffer == nil) return;
 
