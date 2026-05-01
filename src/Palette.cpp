@@ -56,6 +56,7 @@ void Palette::ResetToDefault() {
         c.b = static_cast<uint8_t>((v >> 16) & 0xff);
         c.a = static_cast<uint8_t>((v >> 24) & 0xff);
         colors_[i] = c;
+        materials_[i] = Material{};  // diffuse defaults
     }
 }
 

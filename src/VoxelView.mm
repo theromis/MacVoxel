@@ -17,6 +17,7 @@
 #include "Raycast.h"
 #include "Selection.h"
 #include "ToolState.h"
+#include "ui/MaterialPanel.h"
 #include "ui/ModelPanel.h"
 #include "ui/ToolPanel.h"
 
@@ -185,6 +186,7 @@ struct Vec3i { int32_t x, y, z; };
         stats.gpu_bytes = [_raycastRenderer lastGPUBytes];
         macvoxel::DrawModelPanel(*doc, stats);
         macvoxel::DrawToolPanel();
+        macvoxel::DrawMaterialPanel(*doc);
         [self drawSelectionOverlay];
     }
 

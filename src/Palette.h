@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Material.h"
+
 #include <array>
 #include <cstdint>
 
@@ -29,14 +31,20 @@ public:
     Color Get(uint8_t index) const { return colors_[index]; }
     void Set(uint8_t index, Color c) { colors_[index] = c; }
 
+    Material GetMaterial(uint8_t index) const { return materials_[index]; }
+    void SetMaterial(uint8_t index, Material m) { materials_[index] = m; }
+
     const Color* data() const { return colors_.data(); }
     Color* data() { return colors_.data(); }
+    const Material* materials_data() const { return materials_.data(); }
 
-    // Replace all 256 entries with the MagicaVoxel default palette.
+    // Replace all 256 entries with the MagicaVoxel default palette and
+    // reset materials to default-constructed Diffuse.
     void ResetToDefault();
 
 private:
     std::array<Color, kSize> colors_{};
+    std::array<Material, kSize> materials_{};
 };
 
 }  // namespace macvoxel

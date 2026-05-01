@@ -64,6 +64,7 @@ set(APP_SOURCES
     src/Clipboard.cpp
     src/ui/ModelPanel.cpp
     src/ui/ToolPanel.cpp
+    src/ui/MaterialPanel.cpp
 )
 
 # Source files referenced in CMakeLists must exist for configure to succeed.
