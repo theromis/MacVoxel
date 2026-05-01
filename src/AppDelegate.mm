@@ -5,8 +5,10 @@
 #import <cstdio>
 #include <memory>
 
+#include "Clipboard.h"
 #include "Document.h"
 #include "EditHistory.h"
+#include "Selection.h"
 #include "VoxFile.h"
 #include "ui/ModelPanel.h"
 
@@ -167,10 +169,30 @@
                                        NSEventModifierFlagShift];
     [redo setTarget:self];
     [menu addItem:[NSMenuItem separatorItem]];
-    [menu addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
-    [menu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
-    [menu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
-    [menu addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+    NSMenuItem* cut = [menu addItemWithTitle:@"Cut"
+                                      action:@selector(cut:)
+                               keyEquivalent:@"x"];
+    [cut setTarget:self];
+    NSMenuItem* copy = [menu addItemWithTitle:@"Copy"
+                                       action:@selector(copy:)
+                                keyEquivalent:@"c"];
+    [copy setTarget:self];
+    NSMenuItem* paste = [menu addItemWithTitle:@"Paste"
+                                        action:@selector(paste:)
+                                 keyEquivalent:@"v"];
+    [paste setTarget:self];
+    NSMenuItem* del = [menu addItemWithTitle:@"Delete"
+                                      action:@selector(deleteSelection:)
+                               keyEquivalent:@"\b"];  // Backspace
+    [del setKeyEquivalentModifierMask:0];
+    [del setTarget:self];
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* deselect = [menu addItemWithTitle:@"Deselect"
+                                           action:@selector(deselect:)
+                                    keyEquivalent:@"D"];
+    [deselect setKeyEquivalentModifierMask:NSEventModifierFlagCommand |
+                                           NSEventModifierFlagShift];
+    [deselect setTarget:self];
 
     [item setSubmenu:menu];
     return item;
@@ -319,7 +341,7 @@
     }
 }
 
-// Grey the Undo / Redo items when their stack is empty — standard Mac UX.
+// Grey items when their preconditions aren't met — standard Mac UX.
 - (BOOL)validateMenuItem:(NSMenuItem*)item {
     const SEL action = item.action;
     if (action == @selector(undo:)) {
@@ -328,7 +350,106 @@
     if (action == @selector(redo:)) {
         return macvoxel::CurrentHistory().CanRedo();
     }
+    if (action == @selector(cut:) || action == @selector(copy:) ||
+        action == @selector(deleteSelection:) || action == @selector(deselect:)) {
+        const macvoxel::Selection& sel = macvoxel::CurrentSelection();
+        return sel.active && !sel.box.empty();
+    }
+    if (action == @selector(paste:)) {
+        return !macvoxel::CurrentClipboard().empty();
+    }
     return YES;
+}
+
+// ---------------------------------------------------------------------------
+// Selection-aware Edit menu actions. Selection bounds drive what gets
+// copied/cut/deleted; paste lands at the current selection's min corner
+// (or origin if there's no selection). All cell-modifying paths go
+// through CurrentHistory so they're undoable.
+// ---------------------------------------------------------------------------
+
+- (IBAction)copy:(id)__unused sender {
+    if (_doc == nullptr) return;
+    const macvoxel::Selection& sel = macvoxel::CurrentSelection();
+    if (!sel.active || sel.box.empty()) return;
+    macvoxel::Clipboard& cb = macvoxel::CurrentClipboard();
+    cb.size_x = static_cast<uint32_t>(sel.box.size_x());
+    cb.size_y = static_cast<uint32_t>(sel.box.size_y());
+    cb.size_z = static_cast<uint32_t>(sel.box.size_z());
+    cb.cells.assign(static_cast<size_t>(cb.size_x) * cb.size_y * cb.size_z, 0);
+    for (uint32_t z = 0; z < cb.size_z; ++z) {
+        for (uint32_t y = 0; y < cb.size_y; ++y) {
+            for (uint32_t x = 0; x < cb.size_x; ++x) {
+                const int32_t gx = sel.box.min_x + static_cast<int32_t>(x);
+                const int32_t gy = sel.box.min_y + static_cast<int32_t>(y);
+                const int32_t gz = sel.box.min_z + static_cast<int32_t>(z);
+                cb.cells[cb.LinearIndex(x, y, z)] = _doc->grid.Get(gx, gy, gz);
+            }
+        }
+    }
+}
+
+- (IBAction)cut:(id)sender {
+    [self copy:sender];
+    [self deleteSelection:sender];
+}
+
+- (IBAction)deleteSelection:(id)__unused sender {
+    if (_doc == nullptr) return;
+    const macvoxel::Selection& sel = macvoxel::CurrentSelection();
+    if (!sel.active || sel.box.empty()) return;
+    macvoxel::EditHistory& history = macvoxel::CurrentHistory();
+    history.BeginOp();
+    for (int32_t z = sel.box.min_z; z <= sel.box.max_z; ++z) {
+        for (int32_t y = sel.box.min_y; y <= sel.box.max_y; ++y) {
+            for (int32_t x = sel.box.min_x; x <= sel.box.max_x; ++x) {
+                const uint8_t old = _doc->grid.Get(x, y, z);
+                if (old != 0) {
+                    _doc->grid.Set(x, y, z, 0);
+                    history.Record(x, y, z, old, 0);
+                }
+            }
+        }
+    }
+    history.CommitOp();
+    ++_doc->version;
+}
+
+- (IBAction)paste:(id)__unused sender {
+    if (_doc == nullptr) return;
+    const macvoxel::Clipboard& cb = macvoxel::CurrentClipboard();
+    if (cb.empty()) return;
+    const macvoxel::Selection& sel = macvoxel::CurrentSelection();
+    int32_t origin_x = 0, origin_y = 0, origin_z = 0;
+    if (sel.active && !sel.box.empty()) {
+        origin_x = sel.box.min_x;
+        origin_y = sel.box.min_y;
+        origin_z = sel.box.min_z;
+    }
+    macvoxel::EditHistory& history = macvoxel::CurrentHistory();
+    history.BeginOp();
+    for (uint32_t z = 0; z < cb.size_z; ++z) {
+        for (uint32_t y = 0; y < cb.size_y; ++y) {
+            for (uint32_t x = 0; x < cb.size_x; ++x) {
+                const uint8_t v = cb.cells[cb.LinearIndex(x, y, z)];
+                if (v == 0) continue;  // empty cells in the clipboard don't overwrite
+                const int32_t gx = origin_x + static_cast<int32_t>(x);
+                const int32_t gy = origin_y + static_cast<int32_t>(y);
+                const int32_t gz = origin_z + static_cast<int32_t>(z);
+                const uint8_t old = _doc->grid.Get(gx, gy, gz);
+                if (old != v) {
+                    _doc->grid.Set(gx, gy, gz, v);
+                    history.Record(gx, gy, gz, old, v);
+                }
+            }
+        }
+    }
+    history.CommitOp();
+    ++_doc->version;
+}
+
+- (IBAction)deselect:(id)__unused sender {
+    macvoxel::CurrentSelection().Clear();
 }
 
 @end

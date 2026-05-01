@@ -61,6 +61,7 @@ set(APP_SOURCES
     src/ToolState.cpp
     src/EditHistory.cpp
     src/Selection.cpp
+    src/Clipboard.cpp
     src/ui/ModelPanel.cpp
     src/ui/ToolPanel.cpp
 )
