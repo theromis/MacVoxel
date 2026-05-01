@@ -5,6 +5,9 @@ build-*/
 # Local-only test corpus — MagicaVoxel sample .vox files, not redistributed.
 test/vox/
 
+# Screenshots / scratch images Paul drops in test/ during bug reports.
+test/*.png
+
 # Xcode user files (in case anyone opens via -G Xcode)
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/

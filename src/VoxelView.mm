@@ -1,6 +1,7 @@
 #import "VoxelView.h"
 
 #import "AppDelegate.h"
+#import "PathTraceRenderer.h"
 #import "RaycastRenderer.h"
 
 #import <Metal/Metal.h>
@@ -16,6 +17,7 @@
 #include "Document.h"
 #include "EditHistory.h"
 #include "Raycast.h"
+#include "RenderState.h"
 #include "Selection.h"
 #include "ToolState.h"
 #include "ui/Fonts.h"
@@ -34,12 +36,14 @@ struct Vec3i { int32_t x, y, z; };
 @implementation VoxelView {
     id<MTLCommandQueue> _commandQueue;
     RaycastRenderer* _raycastRenderer;
+    PathTraceRenderer* _pathTraceRenderer;
     macvoxel::Camera _camera;
     DragMode _dragMode;
     EditAction _paintAction;
     Vec3i _selectionAnchor;
     NSPoint _lastDragLocation;
     BOOL _imguiAlive;
+    bool _wasPathTraced;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -72,6 +76,11 @@ struct Vec3i { int32_t x, y, z; };
                                                    colorFormat:self.colorPixelFormat
                                                    depthFormat:self.depthStencilPixelFormat];
     if (_raycastRenderer == nil) {
+        return nil;
+    }
+    _pathTraceRenderer = [[PathTraceRenderer alloc] initWithDevice:device
+                                                       colorFormat:self.colorPixelFormat];
+    if (_pathTraceRenderer == nil) {
         return nil;
     }
 
@@ -302,28 +311,58 @@ struct Vec3i { int32_t x, y, z; };
 
     ImGui::Render();
 
-    // Aspect from drawableSize (pixels) is robust against mid-frame resizes.
-    const CGSize ds = view.drawableSize;
-    const float aspect = ds.height > 0 ? static_cast<float>(ds.width / ds.height) : 1.0f;
-    const simd::float4x4 viewMat = _camera.ViewMatrix();
-    const simd::float4x4 projMat = _camera.ProjectionMatrix(aspect);
-
     id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
     cmd.label = @"MacVoxel Frame";
 
-    id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:pass];
-    enc.label = @"MacVoxel Pass";
+    const bool pt_now = macvoxel::CurrentRenderState().path_traced;
+    if (pt_now != _wasPathTraced) {
+        // Toggling either direction invalidates whatever the path tracer
+        // had accumulated (or wants to start fresh on enable).
+        [_pathTraceRenderer invalidate];
+        _wasPathTraced = pt_now;
+    }
 
-    [_raycastRenderer encodeWithEncoder:enc
-                                   view:viewMat
-                             projection:projMat
-                            cameraWorld:_camera.Position()
-                               document:doc];
+    if (pt_now) {
+        // Path-traced: PathTraceRenderer handles its own accumulation +
+        // display passes. ImGui draws on top into a follow-up encoder
+        // sharing the same drawable's render-pass descriptor.
+        [_pathTraceRenderer renderInView:view
+                                     cmd:cmd
+                                document:doc
+                                  camera:_camera];
 
-    [enc pushDebugGroup:@"Dear ImGui rendering"];
-    ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmd, enc);
-    [enc popDebugGroup];
-    [enc endEncoding];
+        MTLRenderPassDescriptor* imguiPass =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        imguiPass.colorAttachments[0].texture = drawable.texture;
+        imguiPass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        imguiPass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc =
+            [cmd renderCommandEncoderWithDescriptor:imguiPass];
+        enc.label = @"ImGui (over PT)";
+        ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmd, enc);
+        [enc endEncoding];
+    } else {
+        // Realtime ray-cast renderer + ImGui share one render encoder.
+        const CGSize ds = view.drawableSize;
+        const float aspect = ds.height > 0
+                                 ? static_cast<float>(ds.width / ds.height)
+                                 : 1.0f;
+        const simd::float4x4 viewMat = _camera.ViewMatrix();
+        const simd::float4x4 projMat = _camera.ProjectionMatrix(aspect);
+
+        id<MTLRenderCommandEncoder> enc =
+            [cmd renderCommandEncoderWithDescriptor:pass];
+        enc.label = @"MacVoxel Pass";
+        [_raycastRenderer encodeWithEncoder:enc
+                                       view:viewMat
+                                 projection:projMat
+                                cameraWorld:_camera.Position()
+                                   document:doc];
+        [enc pushDebugGroup:@"Dear ImGui rendering"];
+        ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmd, enc);
+        [enc popDebugGroup];
+        [enc endEncoding];
+    }
 
     [cmd presentDrawable:drawable];
     [cmd commit];

@@ -2,6 +2,7 @@
 
 #include "Document.h"
 #include "Fonts.h"
+#include "RenderState.h"
 
 #include "imgui.h"
 
@@ -56,6 +57,13 @@ void DrawModelPanel(const Document& doc, const RenderStats& stats) {
     ImGui::PopFont();
     ImGui::Indent();
     {
+        RenderState& rs = CurrentRenderState();
+        ImGui::Checkbox("Path traced", &rs.path_traced);
+        if (rs.path_traced) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("samples %u", rs.sample_count);
+            ImGui::SliderInt("Bounces", &rs.max_bounces, 1, 8);
+        }
         const ImGuiIO& io = ImGui::GetIO();
         ImGui::Text("%.1f FPS  (%.2f ms/frame)", io.Framerate,
                     io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f);
