@@ -48,6 +48,9 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     Vec3i _selectionAnchor;
     Vec3i _lastDragEditCell;
     NSPoint _lastDragLocation;
+    NSPoint _hoverWindowPoint;
+    BOOL _hoverHasPoint;
+    NSTrackingArea* _trackingArea;
     BOOL _imguiAlive;
     bool _wasPathTraced;
 }
@@ -313,6 +316,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         macvoxel::DrawToolPanel();
         macvoxel::DrawPalettePanel(*doc);
         [self drawSelectionOverlay];
+        [self drawHoverOverlay];
     }
 
     ImGui::Render();
@@ -385,6 +389,33 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 
 - (BOOL)acceptsFirstMouse:(NSEvent*)__unused event {
     return YES;
+}
+
+// Re-register the tracking area whenever the view's bounds change so
+// mouseMoved fires for hover highlight.
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_trackingArea != nil) {
+        [self removeTrackingArea:_trackingArea];
+    }
+    const NSTrackingAreaOptions opts = NSTrackingMouseMoved
+                                     | NSTrackingMouseEnteredAndExited
+                                     | NSTrackingActiveInKeyWindow
+                                     | NSTrackingInVisibleRect;
+    _trackingArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                                  options:opts
+                                                    owner:self
+                                                 userInfo:nil];
+    [self addTrackingArea:_trackingArea];
+}
+
+- (void)mouseMoved:(NSEvent*)event {
+    _hoverWindowPoint = event.locationInWindow;
+    _hoverHasPoint = YES;
+}
+
+- (void)mouseExited:(NSEvent*)__unused event {
+    _hoverHasPoint = NO;
 }
 
 // ---------------------------------------------------------------------------
@@ -556,6 +587,82 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 // so it overlays the ray-cast scene but sits underneath ImGui panels.
 // ---------------------------------------------------------------------------
 
+// Project a unit cube at grid cell (cx, cy, cz) and draw its 12 edges via
+// ImGui's background draw list. Used by both the selection overlay and
+// the hover indicator so they look like the same kind of object.
+- (void)drawCellWireAtX:(int)cx y:(int)cy z:(int)cz color:(ImU32)color {
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0.0f || h <= 0.0f) return;
+    const float aspect = w / h;
+    const simd::float4x4 vp = _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
+
+    const simd::float3 gmin{static_cast<float>(cx),
+                            static_cast<float>(cy),
+                            static_cast<float>(cz)};
+    const simd::float3 gmax{gmin.x + 1.0f, gmin.y + 1.0f, gmin.z + 1.0f};
+
+    auto to_world = [](simd::float3 g) {
+        return simd::float3{g.x, g.z, -g.y};
+    };
+    simd::float3 corners[8] = {
+        {gmin.x, gmin.y, gmin.z}, {gmax.x, gmin.y, gmin.z},
+        {gmax.x, gmax.y, gmin.z}, {gmin.x, gmax.y, gmin.z},
+        {gmin.x, gmin.y, gmax.z}, {gmax.x, gmin.y, gmax.z},
+        {gmax.x, gmax.y, gmax.z}, {gmin.x, gmax.y, gmax.z},
+    };
+    ImVec2 screen[8];
+    bool valid[8];
+    for (int i = 0; i < 8; ++i) {
+        const simd::float3 wpos = to_world(corners[i]);
+        const simd::float4 clip = simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
+        valid[i] = clip.w > 0.001f;
+        if (valid[i]) {
+            const float ndc_x = clip.x / clip.w;
+            const float ndc_y = clip.y / clip.w;
+            screen[i].x = (ndc_x * 0.5f + 0.5f) * w;
+            screen[i].y = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;
+        }
+    }
+    static const int kEdges[12][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0},
+        {4, 5}, {5, 6}, {6, 7}, {7, 4},
+        {0, 4}, {1, 5}, {2, 6}, {3, 7},
+    };
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    for (int i = 0; i < 12; ++i) {
+        const int a = kEdges[i][0];
+        const int b = kEdges[i][1];
+        if (!valid[a] || !valid[b]) continue;
+        dl->AddLine(screen[a], screen[b], color, 1.5f);
+    }
+}
+
+// Mode-tinted outline of the cell that a click *would* affect: green-ish
+// for Add (placement target = neighbor face), red-ish for Remove, blue-ish
+// for Paint. Skipped during drag-paint (the drag itself shows what it's
+// doing) and when a panel has captured the mouse.
+- (void)drawHoverOverlay {
+    if (!_hoverHasPoint) return;
+    if (_dragMode != DragMode::None) return;
+    if (ImGui::GetIO().WantCaptureMouse) return;
+
+    const macvoxel::ToolState& t = macvoxel::CurrentTool();
+    if (t.tool != macvoxel::ToolKind::Brush) return;
+
+    Vec3i cell;
+    if (![self computeTargetCellAtPoint:_hoverWindowPoint mode:t.mode into:&cell]) {
+        return;
+    }
+    ImU32 color;
+    switch (t.mode) {
+        case macvoxel::ToolMode::Add:    color = IM_COL32(120, 230, 140, 220); break;
+        case macvoxel::ToolMode::Remove: color = IM_COL32(240, 110, 110, 220); break;
+        case macvoxel::ToolMode::Paint:  color = IM_COL32(120, 180, 240, 220); break;
+    }
+    [self drawCellWireAtX:cell.x y:cell.y z:cell.z color:color];
+}
+
 - (void)drawSelectionOverlay {
     const macvoxel::Selection& sel = macvoxel::CurrentSelection();
     if (!sel.active || sel.box.empty()) return;
@@ -620,15 +727,17 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 // Editing — raycast a click into the grid, then place or erase.
 // ---------------------------------------------------------------------------
 
-- (void)performEditAtPoint:(NSPoint)windowPoint mode:(macvoxel::ToolMode)mode {
+- (BOOL)computeTargetCellAtPoint:(NSPoint)windowPoint
+                            mode:(macvoxel::ToolMode)mode
+                            into:(Vec3i*)out {
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) return;
+    if (doc == nullptr) return NO;
 
     const NSPoint local = [self convertPoint:windowPoint fromView:nil];
     const float w = static_cast<float>(self.bounds.size.width);
     const float h = static_cast<float>(self.bounds.size.height);
-    if (w <= 0.0f || h <= 0.0f) return;
+    if (w <= 0.0f || h <= 0.0f) return NO;
 
     // NDC: x, y in [-1, 1]. Cocoa Y-up matches Metal NDC y-up — no flip.
     const float ndc_x = (static_cast<float>(local.x) / w) * 2.0f - 1.0f;
@@ -647,24 +756,18 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         simd::float4 wh = simd_mul(inv_vp, clip);
         return simd::float3{wh.x / wh.w, wh.y / wh.w, wh.z / wh.w};
     };
-    const simd::float3 near_world = unproject(0.0f);  // Metal NDC near
-    const simd::float3 far_world  = unproject(1.0f);  // Metal NDC far
+    const simd::float3 near_world = unproject(0.0f);
+    const simd::float3 far_world  = unproject(1.0f);
     const simd::float3 ray_dir_world = simd::normalize(far_world - near_world);
     const simd::float3 ray_origin_world = _camera.Position();
 
     // World -> grid: invert the renderer's rotation R = (gx, gz, -gy).
-    // R^-1 (wx, wy, wz) = (wx, -wz, wy). No translation now that the
-    // renderer no longer centers the model on the world origin.
     const simd::float3 ray_origin_grid{ray_origin_world.x,
                                        -ray_origin_world.z,
                                        ray_origin_world.y};
     const simd::float3 ray_dir_grid{ray_dir_world.x,
                                     -ray_dir_world.z,
                                     ray_dir_world.y};
-
-    macvoxel::ToolState& tool = macvoxel::CurrentTool();
-    const int radius = std::max(1, tool.brush_radius);
-    const int span = radius - 1;
 
     macvoxel::RayHit hit;
     const bool hit_voxel = macvoxel::Raycast(doc->grid, ray_origin_grid,
@@ -678,7 +781,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         target_y = hit.y;
         target_z = hit.z;
         if (mode == macvoxel::ToolMode::Add) {
-            if (hit.axis < 0) return;  // ray started inside a voxel — no neighbor
+            if (hit.axis < 0) return NO;  // ray started inside a voxel
             if (hit.axis == 0) target_x += hit.sign;
             else if (hit.axis == 1) target_y += hit.sign;
             else if (hit.axis == 2) target_z += hit.sign;
@@ -687,10 +790,10 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         // Empty-space click. Add falls back to the implicit ground plane
         // (grid z=0, matching MagicaVoxel's convention). Remove/Paint need
         // a real voxel to act on, so they no-op here.
-        if (mode != macvoxel::ToolMode::Add) return;
-        if (std::abs(ray_dir_grid.z) < 1e-6f) return;
+        if (mode != macvoxel::ToolMode::Add) return NO;
+        if (std::abs(ray_dir_grid.z) < 1e-6f) return NO;
         const float t = -ray_origin_grid.z / ray_dir_grid.z;
-        if (t < 0.0f || t > 4096.0f) return;
+        if (t < 0.0f || t > 4096.0f) return NO;
         const float hx = ray_origin_grid.x + t * ray_dir_grid.x;
         const float hy = ray_origin_grid.y + t * ray_dir_grid.y;
         target_x = static_cast<int>(std::floor(hx));
@@ -698,11 +801,31 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         target_z = 0;
     }
 
+    *out = Vec3i{target_x, target_y, target_z};
+    return YES;
+}
+
+- (void)performEditAtPoint:(NSPoint)windowPoint mode:(macvoxel::ToolMode)mode {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return;
+
+    Vec3i target;
+    if (![self computeTargetCellAtPoint:windowPoint mode:mode into:&target]) {
+        return;
+    }
+    const int target_x = target.x;
+    const int target_y = target.y;
+    const int target_z = target.z;
+
+    macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    const int radius = std::max(1, tool.brush_radius);
+    const int span = radius - 1;
+
     // Drag-paint dedupe: only fire when the target cell changes. Without
     // this, every pointer-move event during a drag (many per frame) would
     // re-apply the brush to the same cell, which is harmless for Add but
     // bloats the undo history and can produce N²-style work for Paint.
-    const Vec3i target{target_x, target_y, target_z};
     if (_dragMode == DragMode::Paint && SameCell(target, _lastDragEditCell)) {
         return;
     }
