@@ -372,9 +372,43 @@ fragment float4 pt_fragment(
     for (uint b = 0u; b <= u.max_bounces; ++b) {
         DDAHit h = dda_traverse(ray_origin, ray_dir, u,
                                 coarse_grid, chunk_pool, medium_mat);
-        // Default: next iteration is "in air". The glass-transmit branch
-        // re-sets medium_mat below if we're entering a medium.
+        // Remember whether this DDA was inside a medium. The glass entry
+        // branch re-sets medium_mat below if we're entering a new medium;
+        // exit refraction (just below) consumes `entered_medium`.
+        uint entered_medium = medium_mat;
         medium_mat = 0u;
+
+        // Exit refraction: DDA returned a hit while we were inside a
+        // medium, which means the hit is at the medium → air boundary.
+        // Refract (or TIR) at that face, then skip processing this hit
+        // — the next iteration's DDA will find the real hit in air.
+        if (h.hit && entered_medium != 0u) {
+            GpuMaterial em = materials[entered_medium];
+            float3 n = float3(0.0);
+            if      (h.axis == 0) n.x = float(h.sign);
+            else if (h.axis == 1) n.y = float(h.sign);
+            else if (h.axis == 2) n.z = float(h.sign);
+            float cos_i = max(0.0, -dot(ray_dir, n));
+            float eta = em.ior;  // glass -> air
+            float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
+            if (k < 0.0) {
+                // Total internal reflection — bounce back into the medium.
+                ray_origin = h.point + n * 1e-3;
+                ray_dir = ray_dir - 2.0 * dot(ray_dir, n) * n;
+                medium_mat = entered_medium;
+            } else {
+                ray_origin = h.point - n * 1e-3;
+                ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * n;
+            }
+            if (b >= kMinBouncesBeforeRR) {
+                float p = max(throughput.r, max(throughput.g, throughput.b));
+                p = clamp(p, 0.05, 0.95);
+                if (rand1(rng) > p) break;
+                throughput /= p;
+            }
+            continue;
+        }
+
         if (!h.hit) {
             // Try infinite ground before falling back to sky.
             if (ray_dir.z < -1e-6 && ray_origin.z > 0.0) {
@@ -431,12 +465,11 @@ fragment float4 pt_fragment(
             ray_dir = normalize(mix(mirror, diffuse_d, clamp(mat.roughness, 0.0, 1.0)));
             throughput *= albedo;
         } else if (mat_type == kMatGlass) {
-            // No Snell. Glass = tinted air with Fresnel reflection at
-            // the entry face. The ray either reflects (mirror) or
-            // transmits straight through. Setting medium_mat tells the
-            // next DDA to skip cells of this material, so a connected
-            // run of same-material glass cells is treated as one
-            // medium — no per-cell-boundary tint, no seams.
+            // Snell refraction with Fresnel reflectance. medium_mat is
+            // set on transmission so the next DDA skips connected
+            // same-material cells — refraction then fires only at true
+            // air↔glass boundaries (entry here, exit on the next hit),
+            // not at every internal cell face.
             float cos_i = max(0.0, -dot(ray_dir, normal));
             float r0 = (1.0 - mat.ior) / (1.0 + mat.ior);
             r0 *= r0;
@@ -445,8 +478,17 @@ fragment float4 pt_fragment(
                 ray_origin = h.point + normal * 1e-3;
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
             } else {
-                ray_origin = h.point + ray_dir * 1e-3;
-                medium_mat = h.cell_val;
+                float eta = 1.0 / mat.ior;  // air -> glass
+                float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
+                if (k < 0.0) {
+                    // TIR shouldn't occur entering a denser medium, but guard.
+                    ray_origin = h.point + normal * 1e-3;
+                    ray_dir = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
+                } else {
+                    ray_origin = h.point - normal * 1e-3;
+                    ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * normal;
+                    medium_mat = h.cell_val;
+                }
             }
             throughput *= albedo;
         } else {
