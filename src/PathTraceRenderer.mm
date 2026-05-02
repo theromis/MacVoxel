@@ -8,6 +8,7 @@
 
 #include "Camera.h"
 #include "Document.h"
+#include "Material.h"
 #include "RenderState.h"
 
 #include <cmath>
@@ -29,6 +30,21 @@ struct PathUniforms {
     uint32_t _pad4;
     uint32_t _pad5;
 };
+
+// Per-palette-entry material data uploaded to the path-tracer's
+// fragment shader. Mirrors macvoxel::Material but lives in a tightly
+// packed format for the GPU.
+struct GpuMaterial {
+    float type;          // 0=Diffuse, 1=Metal, 2=Emissive, 3=Glass
+    float roughness;
+    float metallic;
+    float emission;
+    float transparency;
+    float ior;
+    float _pad0;
+    float _pad1;
+};
+static_assert(sizeof(GpuMaterial) == 32, "GpuMaterial size mismatch");
 
 struct DisplayUniforms {
     uint32_t sample_count;
@@ -65,6 +81,22 @@ struct DisplayUniforms {
 };
 
 struct Chunk { uint8_t cells[4096]; };
+
+struct GpuMaterial {
+    float type;
+    float roughness;
+    float metallic;
+    float emission;
+    float transparency;
+    float ior;
+    float _pad0;
+    float _pad1;
+};
+
+constant uint kMatDiffuse  = 0u;
+constant uint kMatMetal    = 1u;
+constant uint kMatEmissive = 2u;
+constant uint kMatGlass    = 3u;
 
 struct VertOut {
     float4 position [[position]];
@@ -280,7 +312,8 @@ fragment float4 pt_fragment(
     constant PathUniforms& u [[buffer(0)]],
     device const uint* coarse_grid [[buffer(1)]],
     device const Chunk* chunk_pool [[buffer(2)]],
-    constant float4* palette [[buffer(3)]])
+    constant float4* palette [[buffer(3)]],
+    constant GpuMaterial* materials [[buffer(4)]])
 {
     uint2 pix = uint2(in.position.xy);
     uint rng = (pix.x * 1973u) ^ (pix.y * 9277u) ^ (u.frame_seed * 26699u);
@@ -346,12 +379,21 @@ fragment float4 pt_fragment(
             break;
         }
         float3 albedo = palette[h.cell_val].rgb;
-        if (b == u.max_bounces) {
-            // Out of bounce budget — surface contributes nothing.
-            // Russian roulette below has already terminated most low-
-            // throughput paths, so rays that reach this branch were
-            // genuinely contributing little.
+        GpuMaterial mat = materials[h.cell_val];
+        uint mat_type = uint(mat.type);
+
+        // Emissive cells are light sources: deposit emission * albedo
+        // weighted by current throughput, then terminate. (Treating
+        // emissive as also reflective is an option but for now we
+        // model them as pure emitters — matches typical voxel-art
+        // intent where light sources are explicit.)
+        if (mat_type == kMatEmissive && mat.emission > 0.0) {
+            radiance += throughput * albedo * mat.emission;
             break;
+        }
+
+        if (b == u.max_bounces) {
+            break;  // out of bounce budget
         }
 
         // Surface normal in grid space.
@@ -361,8 +403,22 @@ fragment float4 pt_fragment(
         else if (h.axis == 2) normal.z = float(h.sign);
 
         ray_origin = h.point + normal * 1e-3;
-        ray_dir = cosine_hemi(normal, rng);
-        throughput *= albedo;
+
+        if (mat_type == kMatMetal) {
+            // Mirror-ish reflection. Roughness blends between mirror
+            // direction (roughness 0) and a cosine-hemisphere bounce
+            // (roughness 1). For metals, throughput multiplies by albedo
+            // unconditionally (no Fresnel falloff yet — adequate for
+            // colored metals, full PBR Fresnel can come later).
+            float3 mirror = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
+            float3 diffuse_d = cosine_hemi(normal, rng);
+            ray_dir = normalize(mix(mirror, diffuse_d, clamp(mat.roughness, 0.0, 1.0)));
+            throughput *= albedo;
+        } else {
+            // Diffuse default (covers Glass too until P8.3.x adds it).
+            ray_dir = cosine_hemi(normal, rng);
+            throughput *= albedo;
+        }
 
         // Russian roulette after a couple of guaranteed bounces. Kill
         // paths with probability (1 - p) where p is the maximum component
@@ -409,6 +465,7 @@ fragment float4 display_fragment(
     id<MTLBuffer> _coarseBuffer;
     id<MTLBuffer> _poolBuffer;
     id<MTLBuffer> _paletteBuffer;
+    id<MTLBuffer> _materialBuffer;
     uint64_t _cachedDocVersion;
     BOOL _resourcesValid;
     simd::int3 _coarseMin;
@@ -573,6 +630,24 @@ fragment float4 display_fragment(
                                          options:MTLResourceStorageModeShared];
     _paletteBuffer.label = @"PTPalette";
 
+    // Material buffer parallel to palette; one entry per palette index.
+    std::array<GpuMaterial, 256> mats{};
+    for (size_t i = 0; i < 256; ++i) {
+        const macvoxel::Material m = doc->palette.GetMaterial(static_cast<uint8_t>(i));
+        mats[i].type = static_cast<float>(static_cast<int>(m.type));
+        mats[i].roughness = m.roughness;
+        mats[i].metallic = m.metallic;
+        mats[i].emission = m.emission;
+        mats[i].transparency = m.transparency;
+        mats[i].ior = m.ior;
+        mats[i]._pad0 = 0.0f;
+        mats[i]._pad1 = 0.0f;
+    }
+    _materialBuffer = [_device newBufferWithBytes:mats.data()
+                                           length:sizeof(mats)
+                                          options:MTLResourceStorageModeShared];
+    _materialBuffer.label = @"PTMaterials";
+
     _cachedDocVersion = doc->version;
     _resourcesValid = YES;
 }
@@ -639,7 +714,8 @@ fragment float4 display_fragment(
         _wantsClear = NO;
     }
 
-    if (_coarseBuffer == nil || _poolBuffer == nil || _paletteBuffer == nil) {
+    if (_coarseBuffer == nil || _poolBuffer == nil ||
+        _paletteBuffer == nil || _materialBuffer == nil) {
         // Nothing to trace; let the display pass clear to background.
         return;
     }
@@ -683,6 +759,7 @@ fragment float4 display_fragment(
         [enc setFragmentBuffer:_coarseBuffer offset:0 atIndex:1];
         [enc setFragmentBuffer:_poolBuffer offset:0 atIndex:2];
         [enc setFragmentBuffer:_paletteBuffer offset:0 atIndex:3];
+        [enc setFragmentBuffer:_materialBuffer offset:0 atIndex:4];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [enc endEncoding];
         ++_sampleCount;
