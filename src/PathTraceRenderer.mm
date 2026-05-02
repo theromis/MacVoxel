@@ -410,6 +410,14 @@ fragment float4 pt_fragment(
     // would otherwise re-multiply throughput by albedo and create a
     // visible seam at every internal boundary).
     uint medium_mat = 0u;
+    // Beer-Lambert state for the current medium crossing: where the ray
+    // entered, and the per-channel albedo to attenuate by. Tint is then
+    // throughput *= albedo^distance, so a perpendicular crossing of a
+    // 1-unit slab tints by ~albedo (matching the old behavior) but a
+    // grazing crossing of the same slab tints much more heavily — which
+    // is exactly the edge-darkening real colored glass shows.
+    float3 medium_entry  = float3(0.0);
+    float3 medium_albedo = float3(1.0);
 
     // Virtual ground plane at grid z=0 (matches the editor's
     // ground-plane voxel-placement fallback). Gives undersides somewhere
@@ -432,6 +440,14 @@ fragment float4 pt_fragment(
         // Refract (or TIR) at that face, then skip processing this hit
         // — the next iteration's DDA will find the real hit in air.
         if (h.hit && entered_medium != 0u) {
+            // Beer-Lambert: attenuate throughput by the path length
+            // through the medium since entry. albedo^distance is a
+            // simple interpretation: at distance 1 the tint matches a
+            // single per-cell multiply, longer paths darken further.
+            float dist = length(h.point - medium_entry);
+            throughput *= pow(max(medium_albedo, float3(1e-6)),
+                              float3(dist));
+
             GpuMaterial em = materials[entered_medium];
             float3 n = float3(0.0);
             if      (h.axis == 0) n.x = float(h.sign);
@@ -443,10 +459,12 @@ fragment float4 pt_fragment(
             float eta = em.ior;  // glass -> air
             float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
             if (k < 0.0) {
-                // Total internal reflection — bounce back into the medium.
+                // Total internal reflection — bounce back into the medium
+                // and start a new Beer-Lambert segment from this point.
                 ray_origin = h.point + n * 1e-3;
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
                 medium_mat = entered_medium;
+                medium_entry = h.point;
             } else {
                 ray_origin = h.point - n * 1e-3;
                 ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
@@ -458,6 +476,14 @@ fragment float4 pt_fragment(
                 throughput /= p;
             }
             continue;
+        }
+
+        // Ray missed the grid while still inside a medium — the medium
+        // would extinguish the ray over an effectively infinite path,
+        // so terminate rather than wandering off to sky/ground at full
+        // throughput.
+        if (!h.hit && entered_medium != 0u) {
+            break;
         }
 
         if (!h.hit) {
@@ -528,13 +554,14 @@ fragment float4 pt_fragment(
             // from GGX VNDF (Heitz 2018), then do Fresnel + Snell
             // against `m` rather than the geometric surface normal.
             // At roughness 0 this collapses to perfect mirror / Snell;
-            // at higher roughness it gives a clean frosted-glass lobe
-            // with no spike artifact.
+            // higher roughness gives a clean frosted-glass lobe.
             //
-            // medium_mat is set on transmission so the next DDA skips
-            // connected same-material cells — refraction fires only at
-            // true air↔glass boundaries (entry here, exit on the next
-            // hit), not at every internal cell face.
+            // Color comes from Beer-Lambert absorption while the ray is
+            // inside the medium (applied on exit), not from a tint at
+            // the surface. So Fresnel reflections off colored glass are
+            // spectrally neutral (correct for a dielectric), and the
+            // amount of tint a transmitted ray picks up is proportional
+            // to the actual path length through the glass.
             //
             // Transparency scales the chance of actually transmitting:
             // 1.0 = pure glass, 0.0 = diffuse, intermediate = milky.
@@ -558,13 +585,15 @@ fragment float4 pt_fragment(
                     ray_origin = h.point - normal * 1e-3;
                     ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
                     medium_mat = h.cell_val;
+                    medium_entry = h.point;
+                    medium_albedo = albedo;
                 }
             } else {
                 // Diffuse fallback — translucent / milky glass.
                 ray_origin = h.point + normal * 1e-3;
                 ray_dir = cosine_hemi(normal, rng);
+                throughput *= albedo;
             }
-            throughput *= albedo;
         } else {
             // Diffuse default.
             ray_origin = h.point + normal * 1e-3;
