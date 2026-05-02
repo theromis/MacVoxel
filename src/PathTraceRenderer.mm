@@ -137,6 +137,55 @@ float3 cosine_hemi(float3 n, thread uint& rng) {
     return local.x * t1 + local.y * t2 + local.z * n;
 }
 
+// GGX visible-normal distribution sampling (Heitz 2018, "Sampling the
+// GGX Distribution of Visible Normals"). Returns a microfacet normal in
+// world space, sampled with weight proportional to the GGX NDF *and*
+// the cosine of the view direction — meaning every sample lies on a
+// microfacet that's actually visible to the camera, so reflecting the
+// ray about it always yields an above-surface bounce. No need for a
+// fallback-to-mirror clamp (which produced a spike of perfect-mirror
+// samples piled on top of the diffuse lobe).
+//
+// `view` is the direction the ray *came from* (i.e. -ray_dir).
+// `roughness` is perceptual; alpha = roughness² (Disney/Unreal).
+float3 ggx_sample_vndf(float3 n, float3 view, float roughness, thread uint& rng) {
+    float a = roughness * roughness;
+
+    // TBN around n.
+    float3 helper = abs(n.x) > 0.5 ? float3(0, 1, 0) : float3(1, 0, 0);
+    float3 t1 = normalize(cross(n, helper));
+    float3 t2 = cross(n, t1);
+
+    // View into tangent space, then stretched to a hemisphere where
+    // the NDF is uniform (the trick at the heart of VNDF).
+    float3 Ve = float3(dot(view, t1), dot(view, t2), dot(view, n));
+    float3 Vh = normalize(float3(a * Ve.x, a * Ve.y, Ve.z));
+
+    // Orthonormal basis on that hemisphere.
+    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    float3 T1 = lensq > 0.0
+        ? float3(-Vh.y, Vh.x, 0.0) * rsqrt(lensq)
+        : float3(1.0, 0.0, 0.0);
+    float3 T2 = cross(Vh, T1);
+
+    // Sample a disk, warped so the disk's projection covers exactly
+    // the visible portion of the hemisphere.
+    float u1 = rand1(rng);
+    float u2 = rand1(rng);
+    float r = sqrt(u1);
+    float phi = 6.2831853 * u2;
+    float p1 = r * cos(phi);
+    float p2 = r * sin(phi);
+    float s = 0.5 * (1.0 + Vh.z);
+    p2 = (1.0 - s) * sqrt(1.0 - p1 * p1) + s * p2;
+
+    // Reproject onto hemisphere, then unstretch back to GGX shape.
+    float3 Nh = p1 * T1 + p2 * T2 + sqrt(max(0.0, 1.0 - p1*p1 - p2*p2)) * Vh;
+    float3 Ne = normalize(float3(a * Nh.x, a * Nh.y, max(0.0, Nh.z)));
+
+    return Ne.x * t1 + Ne.y * t2 + Ne.z * n;
+}
+
 constant int kMaxSteps = 4096;
 constant uint kChunkBits = 4;
 constant uint kChunkMask = 15u;
@@ -388,22 +437,19 @@ fragment float4 pt_fragment(
             if      (h.axis == 0) n.x = float(h.sign);
             else if (h.axis == 1) n.y = float(h.sign);
             else if (h.axis == 2) n.z = float(h.sign);
-            float cos_i = max(0.0, -dot(ray_dir, n));
+            float em_rough = clamp(em.roughness, 0.0, 1.0);
+            float3 m = ggx_sample_vndf(n, -ray_dir, em_rough, rng);
+            float cos_i = max(0.0, -dot(ray_dir, m));
             float eta = em.ior;  // glass -> air
             float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
-            float em_rough = clamp(em.roughness, 0.0, 1.0);
             if (k < 0.0) {
                 // Total internal reflection — bounce back into the medium.
-                float3 mirror = ray_dir - 2.0 * dot(ray_dir, n) * n;
-                float3 d = cosine_hemi(n, rng);
                 ray_origin = h.point + n * 1e-3;
-                ray_dir = normalize(mix(mirror, d, em_rough));
+                ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
                 medium_mat = entered_medium;
             } else {
-                float3 refracted = eta * ray_dir + (eta * cos_i - sqrt(k)) * n;
-                float3 d = cosine_hemi(-n, rng);
                 ray_origin = h.point - n * 1e-3;
-                ray_dir = normalize(mix(refracted, d, em_rough));
+                ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
             }
             if (b >= kMinBouncesBeforeRR) {
                 float p = max(throughput.r, max(throughput.g, throughput.b));
@@ -460,50 +506,57 @@ fragment float4 pt_fragment(
         else if (h.axis == 2) normal.z = float(h.sign);
 
         if (mat_type == kMatMetal) {
-            // Mirror-ish reflection. Roughness blends between mirror
-            // direction (roughness 0) and a cosine-hemisphere bounce
-            // (roughness 1). Throughput multiplies by albedo so colored
-            // metals tint reflections.
+            // Metallic: probability the ray takes the specular path vs.
+            // a plain diffuse bounce. 1.0 = pure reflective metal, 0.0 =
+            // effectively diffuse, intermediate = semi-glossy.
+            // The specular path samples a microfacet normal from the
+            // GGX/Trowbridge-Reitz distribution and reflects about it —
+            // gives a proper lobe centered on the mirror direction
+            // instead of the lopsided one you get from blending toward
+            // a normal-hemisphere sample.
             ray_origin = h.point + normal * 1e-3;
-            float3 mirror = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
-            float3 diffuse_d = cosine_hemi(normal, rng);
-            ray_dir = normalize(mix(mirror, diffuse_d, clamp(mat.roughness, 0.0, 1.0)));
+            if (rand1(rng) < clamp(mat.metallic, 0.0, 1.0)) {
+                float r = clamp(mat.roughness, 0.0, 1.0);
+                float3 m = ggx_sample_vndf(normal, -ray_dir, r, rng);
+                ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
+            } else {
+                ray_dir = cosine_hemi(normal, rng);
+            }
             throughput *= albedo;
         } else if (mat_type == kMatGlass) {
-            // Snell refraction + Fresnel reflectance. medium_mat is set
-            // on transmission so the next DDA skips connected
-            // same-material cells — refraction fires only at true
-            // air↔glass boundaries (entry here, exit on the next hit),
-            // not at every internal cell face.
+            // Microfacet glass: sample a visible microfacet normal `m`
+            // from GGX VNDF (Heitz 2018), then do Fresnel + Snell
+            // against `m` rather than the geometric surface normal.
+            // At roughness 0 this collapses to perfect mirror / Snell;
+            // at higher roughness it gives a clean frosted-glass lobe
+            // with no spike artifact.
             //
-            // Roughness perturbs reflected / refracted directions toward
-            // a cosine-weighted hemisphere — gives frosted-glass look.
+            // medium_mat is set on transmission so the next DDA skips
+            // connected same-material cells — refraction fires only at
+            // true air↔glass boundaries (entry here, exit on the next
+            // hit), not at every internal cell face.
+            //
             // Transparency scales the chance of actually transmitting:
-            // 1.0 = pure glass, 0.0 = diffuse, intermediate values blend
-            // (translucent/milky glass).
-            float cos_i = max(0.0, -dot(ray_dir, normal));
+            // 1.0 = pure glass, 0.0 = diffuse, intermediate = milky.
+            float rough = clamp(mat.roughness, 0.0, 1.0);
+            float3 m = ggx_sample_vndf(normal, -ray_dir, rough, rng);
+            float cos_i = max(0.0, -dot(ray_dir, m));
             float r0 = (1.0 - mat.ior) / (1.0 + mat.ior);
             r0 *= r0;
             float fresnel = r0 + (1.0 - r0) * pow(1.0 - cos_i, 5.0);
-            float rough = clamp(mat.roughness, 0.0, 1.0);
             if (rand1(rng) < fresnel) {
-                float3 mirror = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
-                float3 d = cosine_hemi(normal, rng);
                 ray_origin = h.point + normal * 1e-3;
-                ray_dir = normalize(mix(mirror, d, rough));
+                ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
             } else if (rand1(rng) < clamp(mat.transparency, 0.0, 1.0)) {
                 float eta = 1.0 / mat.ior;  // air -> glass
                 float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
                 if (k < 0.0) {
-                    float3 mirror = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
-                    float3 d = cosine_hemi(normal, rng);
+                    // TIR off this microfacet — reflect, stay in air.
                     ray_origin = h.point + normal * 1e-3;
-                    ray_dir = normalize(mix(mirror, d, rough));
+                    ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
                 } else {
-                    float3 refracted = eta * ray_dir + (eta * cos_i - sqrt(k)) * normal;
-                    float3 d = cosine_hemi(-normal, rng);
                     ray_origin = h.point - normal * 1e-3;
-                    ray_dir = normalize(mix(refracted, d, rough));
+                    ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
                     medium_mat = h.cell_val;
                 }
             } else {
