@@ -28,9 +28,14 @@
 
 namespace {
 enum class DragMode { None, Orbit, Pan, Paint, Select };
-enum class EditAction { Place, Erase };
 
 struct Vec3i { int32_t x, y, z; };
+
+constexpr Vec3i kInvalidCell{INT32_MIN, INT32_MIN, INT32_MIN};
+
+bool SameCell(const Vec3i& a, const Vec3i& b) {
+    return a.x == b.x && a.y == b.y && a.z == b.z;
+}
 }
 
 @implementation VoxelView {
@@ -39,8 +44,9 @@ struct Vec3i { int32_t x, y, z; };
     PathTraceRenderer* _pathTraceRenderer;
     macvoxel::Camera _camera;
     DragMode _dragMode;
-    EditAction _paintAction;
+    macvoxel::ToolMode _paintMode;
     Vec3i _selectionAnchor;
+    Vec3i _lastDragEditCell;
     NSPoint _lastDragLocation;
     BOOL _imguiAlive;
     bool _wasPathTraced;
@@ -423,9 +429,11 @@ struct Vec3i { int32_t x, y, z; };
         }
     } else {
         _dragMode = DragMode::Paint;
-        _paintAction = hasCommand ? EditAction::Erase : EditAction::Place;
+        _paintMode = hasCommand ? macvoxel::ToolMode::Remove
+                                : macvoxel::CurrentTool().mode;
+        _lastDragEditCell = kInvalidCell;
         macvoxel::CurrentHistory().BeginOp();
-        [self performEditAtPoint:event.locationInWindow action:_paintAction];
+        [self performEditAtPoint:event.locationInWindow mode:_paintMode];
     }
 }
 
@@ -441,7 +449,7 @@ struct Vec3i { int32_t x, y, z; };
     switch (_dragMode) {
         case DragMode::Orbit: _camera.Orbit(dx, dy); break;
         case DragMode::Pan:   _camera.Pan(dx, dy);   break;
-        case DragMode::Paint: [self performEditAtPoint:p action:_paintAction]; break;
+        case DragMode::Paint: [self performEditAtPoint:p mode:_paintMode]; break;
         case DragMode::Select: {
             Vec3i pick;
             if ([self pickGridCellAtPoint:p into:&pick]) {
@@ -612,7 +620,7 @@ struct Vec3i { int32_t x, y, z; };
 // Editing — raycast a click into the grid, then place or erase.
 // ---------------------------------------------------------------------------
 
-- (void)performEditAtPoint:(NSPoint)windowPoint action:(EditAction)action {
+- (void)performEditAtPoint:(NSPoint)windowPoint mode:(macvoxel::ToolMode)mode {
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
     if (doc == nullptr) return;
@@ -658,12 +666,6 @@ struct Vec3i { int32_t x, y, z; };
     const int radius = std::max(1, tool.brush_radius);
     const int span = radius - 1;
 
-    // Cmd+click forces erase regardless of selected tool — quick override
-    // matching the Phase 5.1 behavior. Otherwise the tool drives.
-    const macvoxel::ToolKind effective = action == EditAction::Erase
-                                             ? macvoxel::ToolKind::Erase
-                                             : tool.tool;
-
     macvoxel::RayHit hit;
     const bool hit_voxel = macvoxel::Raycast(doc->grid, ray_origin_grid,
                                              ray_dir_grid, 4096.0f, &hit);
@@ -675,17 +677,17 @@ struct Vec3i { int32_t x, y, z; };
         target_x = hit.x;
         target_y = hit.y;
         target_z = hit.z;
-        if (effective == macvoxel::ToolKind::Place) {
+        if (mode == macvoxel::ToolMode::Add) {
             if (hit.axis < 0) return;  // ray started inside a voxel — no neighbor
             if (hit.axis == 0) target_x += hit.sign;
             else if (hit.axis == 1) target_y += hit.sign;
             else if (hit.axis == 2) target_z += hit.sign;
         }
     } else {
-        // Empty-space click. Place falls back to the implicit ground plane
-        // (grid z=0, matching MagicaVoxel's convention). Erase/Paint need a
-        // real voxel to act on, so they no-op here.
-        if (effective != macvoxel::ToolKind::Place) return;
+        // Empty-space click. Add falls back to the implicit ground plane
+        // (grid z=0, matching MagicaVoxel's convention). Remove/Paint need
+        // a real voxel to act on, so they no-op here.
+        if (mode != macvoxel::ToolMode::Add) return;
         if (std::abs(ray_dir_grid.z) < 1e-6f) return;
         const float t = -ray_origin_grid.z / ray_dir_grid.z;
         if (t < 0.0f || t > 4096.0f) return;
@@ -696,23 +698,31 @@ struct Vec3i { int32_t x, y, z; };
         target_z = 0;
     }
 
+    // Drag-paint dedupe: only fire when the target cell changes. Without
+    // this, every pointer-move event during a drag (many per frame) would
+    // re-apply the brush to the same cell, which is harmless for Add but
+    // bloats the undo history and can produce N²-style work for Paint.
+    const Vec3i target{target_x, target_y, target_z};
+    if (_dragMode == DragMode::Paint && SameCell(target, _lastDragEditCell)) {
+        return;
+    }
+    _lastDragEditCell = target;
+
     macvoxel::EditHistory& history = macvoxel::CurrentHistory();
 
     auto apply = [&](int x, int y, int z) {
         const uint8_t old_val = doc->grid.Get(x, y, z);
         uint8_t new_val = old_val;
-        switch (effective) {
-            case macvoxel::ToolKind::Place:
+        switch (mode) {
+            case macvoxel::ToolMode::Add:
                 new_val = tool.palette_idx;
                 break;
-            case macvoxel::ToolKind::Erase:
+            case macvoxel::ToolMode::Remove:
                 new_val = 0;
                 break;
-            case macvoxel::ToolKind::Paint:
+            case macvoxel::ToolMode::Paint:
                 if (old_val != 0) new_val = tool.palette_idx;
                 break;
-            case macvoxel::ToolKind::Select:
-                return;  // Select tool doesn't edit cells; handled in mouseDown
         }
         if (new_val == old_val) return;
         doc->grid.Set(x, y, z, new_val);

@@ -4,15 +4,26 @@
 
 namespace macvoxel {
 
+// A tool is *what* the cursor does: brush a cell, drag a marquee, etc.
+// Future tools (line, face/extrude, box, primitive) join this enum.
 enum class ToolKind {
-    Place,   // create voxels adjacent to the picked face
-    Erase,   // remove the picked voxel
-    Paint,   // recolor an existing voxel without changing presence
+    Brush,   // touch-to-edit a cell, plus drag-paint along the cursor path
     Select,  // drag to define a 3D AABB selection
 };
 
+// A mode is *how* a tool's edits modify cells: add new voxels, remove
+// existing ones, or repaint without touching presence. Modes are
+// orthogonal to ToolKind so every modeling tool routes through the same
+// add/remove/paint logic.
+enum class ToolMode {
+    Add,
+    Remove,
+    Paint,
+};
+
 struct ToolState {
-    ToolKind tool = ToolKind::Place;
+    ToolKind tool = ToolKind::Brush;
+    ToolMode mode = ToolMode::Add;
     uint8_t palette_idx = 1;  // current color (0 is "empty"; never used here)
     // Brush extent: edges of (2r-1) voxels per side, centered on the
     // hit cell (r=1 -> 1 voxel; r=2 -> 3x3x3; r=3 -> 5x5x5).
