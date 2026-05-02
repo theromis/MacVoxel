@@ -259,6 +259,13 @@ DDAHit dda_traverse(float3 ray_origin,
     // first-iteration hits.)
     float t_hit = 0.0;
 
+    // Track whether the most recent non-empty cell we visited was the
+    // skip material — needed so we can detect when a ray inside a
+    // medium emerges into empty space (or an empty chunk) and report
+    // that as a medium-exit hit. Without this the caller can't tell a
+    // medium-exit-into-air apart from "missed everything".
+    bool was_in_skip = false;
+
     for (int s = 0; s < kMaxSteps; ++s) {
         int3 chunk_c;
         chunk_c.x = cell.x >> int(kChunkBits);
@@ -268,6 +275,19 @@ DDAHit dda_traverse(float3 ray_origin,
         if (cgc.x < 0 || cgc.y < 0 || cgc.z < 0 ||
             cgc.x >= u.coarse_dim.x || cgc.y >= u.coarse_dim.y ||
             cgc.z >= u.coarse_dim.z) {
+            // Medium ends at the AABB boundary — same fix as the
+            // empty-chunk transition, but for the case where the slab
+            // sits at the very edge of the populated grid.
+            if (skip_mat != 0u && was_in_skip) {
+                h.hit = true;
+                h.point = origin + ray_dir * t_hit;
+                h.axis = last_axis;
+                int step = (last_axis == 0) ? step_dir.x
+                         : (last_axis == 1) ? step_dir.y : step_dir.z;
+                h.sign = -step;
+                h.cell_val = 0u;
+                return h;
+            }
             return h;
         }
         uint coarse_idx = uint(cgc.x) +
@@ -276,6 +296,20 @@ DDAHit dda_traverse(float3 ray_origin,
         uint pool_idx = coarse_grid[coarse_idx];
 
         if (pool_idx == 0u) {
+            // Stepping into an empty chunk after being inside the
+            // medium == ray exits the medium into empty space. Report
+            // it before applying the empty-chunk-skip optimization, or
+            // the caller would miss the boundary entirely.
+            if (skip_mat != 0u && was_in_skip) {
+                h.hit = true;
+                h.point = origin + ray_dir * t_hit;
+                h.axis = last_axis;
+                int step = (last_axis == 0) ? step_dir.x
+                         : (last_axis == 1) ? step_dir.y : step_dir.z;
+                h.sign = -step;
+                h.cell_val = 0u;
+                return h;
+            }
             // Empty-chunk skip via slab. All t_* values inside this DDA
             // are kept relative to the clipped `origin` so they share a
             // reference frame with the initial t_max setup; computing
@@ -342,6 +376,20 @@ DDAHit dda_traverse(float3 ray_origin,
             h.cell_val = cell_val;
             return h;
         }
+        // Transition skip-mat → empty cell: the ray just exited the
+        // medium into open air. Report the boundary so the caller can
+        // apply Beer-Lambert and continue the ray in air.
+        if (skip_mat != 0u && cell_val == 0u && was_in_skip) {
+            h.hit = true;
+            h.point = origin + ray_dir * t_hit;
+            h.axis = last_axis;
+            int step = (last_axis == 0) ? step_dir.x
+                     : (last_axis == 1) ? step_dir.y : step_dir.z;
+            h.sign = -step;
+            h.cell_val = 0u;
+            return h;
+        }
+        was_in_skip = (cell_val == skip_mat);
 
         if (t_max.x < t_max.y && t_max.x < t_max.z) {
             cell.x += step_dir.x;
@@ -441,12 +489,17 @@ fragment float4 pt_fragment(
         // — the next iteration's DDA will find the real hit in air.
         if (h.hit && entered_medium != 0u) {
             // Beer-Lambert: attenuate throughput by the path length
-            // through the medium since entry. albedo^distance is a
-            // simple interpretation: at distance 1 the tint matches a
-            // single per-cell multiply, longer paths darken further.
+            // through the medium. We want the user's albedo to read as
+            // the color at a "typical" slab thickness rather than at
+            // exactly 1 voxel — otherwise saturated colors compound
+            // into near-black across any slab more than 1 voxel thick
+            // or viewed at any angle. The 0.5 factor ties albedo to
+            // a 2-voxel reference depth, which keeps body color readable
+            // and lets edges (longer paths) darken as expected.
+            const float kAbsorptionScale = 0.5;
             float dist = length(h.point - medium_entry);
             throughput *= pow(max(medium_albedo, float3(1e-6)),
-                              float3(dist));
+                              float3(dist * kAbsorptionScale));
 
             GpuMaterial em = materials[entered_medium];
             float3 n = float3(0.0);
