@@ -1,11 +1,8 @@
 # MacVoxel
 
 A native macOS voxel editor in the spirit of MagicaVoxel. AppKit shell, Metal-backed
-content view, Dear ImGui for all in-window UI.
-
-Current state: **Phase 3** — voxels render as one instanced cube per filled cell, with
-MagicaVoxel `.vox` import/export, orbit/pan/zoom camera, and a debug Model panel. See
-`PLAN.md` for the full roadmap.
+content view, Dear ImGui for all in-window UI, GPU ray-cast renderer for editing,
+GPU path tracer for render mode.
 
 ## Build
 
@@ -25,35 +22,75 @@ If you cloned without `--recurse-submodules`:
 git submodule update --init --recursive
 ```
 
-The `-G Ninja` flag is optional but produces faster, cleaner builds; omit it to use
-CMake's default Makefile generator.
+The `-G Ninja` flag is optional but produces faster, cleaner builds.
 
-## What you should see
+## What it does
 
-- Window titled **MacVoxel**, 1280×800, dark slate-blue (`#1e1e2e`) interior.
-- On launch: a 16×16×16 grid containing a single voxel — proof of life until
-  you open a real model.
-- **File → Open** (⌘O) loads a MagicaVoxel `.vox` file. The camera auto-frames
-  the model and the **Model** panel updates with dimensions, voxel count,
-  palette swatches, and frame timing. **File → Save / Save As** (⌘S / ⇧⌘S)
-  writes a single-model `.vox`.
-- Each voxel is rendered as a back-face-culled, depth-tested instanced cube
-  with a hard-coded directional light. There is no interior-face culling yet —
-  Phase 4 (greedy meshing) is the optimization step.
-- **⌘D** toggles the full ImGui demo window (also under View → Show ImGui Demo).
-- **⌘Q** or closing the window quits cleanly.
+- Loads and saves single- and multi-model MagicaVoxel `.vox` files. Scene graph
+  (nTRN/nGRP/nSHP) is honored on load. Material chunks (MATL) are parsed —
+  `_diffuse`, `_metal`, `_glass`, `_emit` types come through with their
+  roughness, metallic, transparency, IOR, and emission settings.
+- Edits voxels with place / erase / paint / pick tools, brush sizes 1–8.
+  Drag-paint streams cells into one undoable stroke. Box selection with cut /
+  copy / paste / delete.
+- Renders interactively via a GPU ray-cast shader with hierarchical empty-space
+  skipping. Edits upload incrementally per dirty chunk, so big scenes stay
+  responsive while you paint.
+- Switches into a path-traced render mode for final-quality output:
+  progressive accumulation, multi-bounce GI with Russian roulette, stochastic
+  AA, virtual ground plane. Materials supported:
+  - **Diffuse** — cosine-weighted hemisphere bounce.
+  - **Metal** — GGX VNDF microfacet sampling, `metallic` toggles between
+    specular and diffuse paths, `roughness` widens the lobe.
+  - **Emissive** — `emission` is the multiplier on the albedo color, terminates
+    the path on hit.
+  - **Glass** — Fresnel reflect / Snell refract on entry and exit, GGX VNDF
+    microfacets for frosted glass, true total internal reflection,
+    Beer-Lambert absorption through the medium body, transparency probabilistically
+    blends glass-vs-diffuse.
 
-### Camera controls
+## Controls
 
-- **Option + drag** — orbit (drag-the-world: scene follows the cursor).
+### Camera
+- **Option + drag** — orbit (drag-the-world).
 - **Option + Shift + drag** — pan.
 - **Two-finger scroll** or **pinch** — zoom.
-- Dragging inside an ImGui window never moves the camera — the
-  `ImGui::GetIO().WantCaptureMouse` gate suppresses scene input there.
 
-The UI font is San Francisco, loaded at runtime from `/System/Library/Fonts/SFNS.ttf`.
-Apple's license forbids bundling SF, so it is not committed; macOS 13+ ships it at
-that path.
+### Editing
+- **Left-click** — apply the current tool (place / erase / paint / pick).
+- **Drag** — drag-paint with the current tool, accumulated as one undo step.
+- **B** — box selection. Click-drag to mark a region; copy / cut / paste / delete
+  apply to it.
+- **⌘Z / ⇧⌘Z** — undo / redo, per stroke.
+- **⌘X / ⌘C / ⌘V** — cut / copy / paste the current selection.
+- Brush size, palette index, tool, and material type are all in the side panels.
+
+### File
+- **⌘O / ⌘S / ⇧⌘S** — open / save / save-as `.vox`.
+- **⌘D** — toggle the ImGui demo window (debug aid).
+- **⌘Q** — quit.
+
+Dragging inside an ImGui window never moves the camera or edits voxels — the
+`ImGui::GetIO().WantCaptureMouse` gate suppresses scene input.
+
+## A few implementation notes
+
+- **Sparse chunked grid.** Voxels live in 16³ chunks keyed by chunk-coord in a
+  hash map. Cells default to 0 (empty); world coords are signed so MagicaVoxel
+  scene-graph translations work directly. The grid tracks dirty chunks so the
+  GPU only re-uploads what changed.
+- **Single render pass per frame.** Scene → ImGui both encode into one
+  `MTLRenderCommandEncoder` with a shared depth buffer. The path-traced mode
+  uses a two-pass setup (accumulate into RGBA32F float texture, then divide by
+  sample count for display) but still composites ImGui in a single pass on top.
+- **No greedy mesher.** An earlier phase had one; it was retired when the GPU
+  ray-cast renderer outpaced it. The grid is uploaded directly to a
+  coarse-grid-of-chunk-indices + chunk pool layout that the shader DDAs through.
+- **Color space.** Palette is sRGB on disk, converted to linear on GPU upload;
+  the path tracer works in linear and the display fragment re-encodes to sRGB.
+- **UI.** Dear ImGui (docking branch). San Francisco at runtime from
+  `/System/Library/Fonts/SFNS.ttf` — Apple's license forbids bundling it. A
+  custom theme is in `src/ui/Theme.cpp`.
 
 ## License
 
