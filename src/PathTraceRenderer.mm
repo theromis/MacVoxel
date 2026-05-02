@@ -188,11 +188,16 @@ DDAHit dda_traverse(float3 ray_origin,
         uint pool_idx = coarse_grid[coarse_idx];
 
         if (pool_idx == 0u) {
-            // Empty-chunk skip via slab.
+            // Empty-chunk skip via slab. All t_* values inside this DDA
+            // are kept relative to the clipped `origin` so they share a
+            // reference frame with the initial t_max setup; computing
+            // chunk-exit t against ray_origin and then mixing it into
+            // t_max would put h.point off by t_start when the caller
+            // reads it.
             float3 chunk_min = float3(chunk_c) * float(kChunkSize);
             float3 chunk_max = chunk_min + float(kChunkSize);
             float3 exit_face = select(chunk_min, chunk_max, step_dir > 0);
-            float3 t_face = (exit_face - ray_origin) * inv_dir;
+            float3 t_face = (exit_face - origin) * inv_dir;
             if (step_dir.x == 0) t_face.x = INFINITY;
             if (step_dir.y == 0) t_face.y = INFINITY;
             if (step_dir.z == 0) t_face.z = INFINITY;
@@ -201,7 +206,7 @@ DDAHit dda_traverse(float3 ray_origin,
                           : (t_face.y <= t_face.z) ? 1 : 2;
             last_axis = exit_axis;
             float eps = max(1e-3, t_chunk_exit * 1e-5);
-            float3 pos = ray_origin + ray_dir * (t_chunk_exit + eps);
+            float3 pos = origin + ray_dir * (t_chunk_exit + eps);
             cell.x = int(floor(pos.x));
             cell.y = int(floor(pos.y));
             cell.z = int(floor(pos.z));
@@ -217,16 +222,16 @@ DDAHit dda_traverse(float3 ray_origin,
             }
             t_max.x = step_dir.x == 0 ? INFINITY :
                       (step_dir.x > 0
-                           ? (float(cell.x + 1) - ray_origin.x) / ray_dir.x
-                           : (ray_origin.x - float(cell.x))     / -ray_dir.x);
+                           ? (float(cell.x + 1) - origin.x) / ray_dir.x
+                           : (origin.x - float(cell.x))     / -ray_dir.x);
             t_max.y = step_dir.y == 0 ? INFINITY :
                       (step_dir.y > 0
-                           ? (float(cell.y + 1) - ray_origin.y) / ray_dir.y
-                           : (ray_origin.y - float(cell.y))     / -ray_dir.y);
+                           ? (float(cell.y + 1) - origin.y) / ray_dir.y
+                           : (origin.y - float(cell.y))     / -ray_dir.y);
             t_max.z = step_dir.z == 0 ? INFINITY :
                       (step_dir.z > 0
-                           ? (float(cell.z + 1) - ray_origin.z) / ray_dir.z
-                           : (ray_origin.z - float(cell.z))     / -ray_dir.z);
+                           ? (float(cell.z + 1) - origin.z) / ray_dir.z
+                           : (origin.z - float(cell.z))     / -ray_dir.z);
             t_hit = t_chunk_exit;
             continue;
         }
@@ -281,10 +286,15 @@ fragment float4 pt_fragment(
     uint rng = (pix.x * 1973u) ^ (pix.y * 9277u) ^ (u.frame_seed * 26699u);
     pcg(rng); pcg(rng);  // mix the seed
 
-    // Reconstruct primary world ray from NDC (no jitter for this commit;
-    // accumulation alone won't antialias, P8.2 will add it).
-    float4 near_clip = float4(in.ndc, 0.0, 1.0);
-    float4 far_clip  = float4(in.ndc, 1.0, 1.0);
+    // Stochastic anti-aliasing: jitter the NDC point inside the pixel.
+    // dfdx/dfdy of NDC give us the pixel's size in NDC space, so the
+    // jitter scales correctly regardless of viewport resolution.
+    float2 pixel_ndc = float2(abs(dfdx(in.ndc.x)), abs(dfdy(in.ndc.y)));
+    float2 jitter = (float2(rand1(rng), rand1(rng)) - 0.5) * pixel_ndc;
+    float2 ndc = in.ndc + jitter;
+
+    float4 near_clip = float4(ndc, 0.0, 1.0);
+    float4 far_clip  = float4(ndc, 1.0, 1.0);
     float4 nh = u.inv_vp * near_clip;
     float4 fh = u.inv_vp * far_clip;
     float3 nw = nh.xyz / nh.w;
@@ -303,19 +313,44 @@ fragment float4 pt_fragment(
     float3 throughput = float3(1.0);
     float3 radiance   = float3(0.0);
 
+    const uint kMinBouncesBeforeRR = 2u;
+
+    // Virtual ground plane at grid z=0 (matches the editor's
+    // ground-plane voxel-placement fallback). Gives undersides somewhere
+    // to bounce light from and makes the scene's lighting environment
+    // legible without requiring the user to place ground voxels.
+    const float3 kGroundAlbedo = float3(0.262, 0.218, 0.178);  // warm grey, linear
+    const float3 kGroundNormal = float3(0.0, 0.0, 1.0);
+
     for (uint b = 0u; b <= u.max_bounces; ++b) {
         DDAHit h = dda_traverse(ray_origin, ray_dir, u, coarse_grid, chunk_pool);
         if (!h.hit) {
+            // Try infinite ground before falling back to sky.
+            if (ray_dir.z < -1e-6 && ray_origin.z > 0.0) {
+                float t_g = -ray_origin.z / ray_dir.z;
+                if (t_g > 0.0) {
+                    float3 g_point = ray_origin + ray_dir * t_g;
+                    if (b == u.max_bounces) {
+                        // Out of budget — terminate without contribution
+                        // rather than sampling sky; matches the voxel-hit
+                        // termination case for consistency.
+                        break;
+                    }
+                    ray_origin = g_point + kGroundNormal * 1e-3;
+                    ray_dir = cosine_hemi(kGroundNormal, rng);
+                    throughput *= kGroundAlbedo;
+                    continue;
+                }
+            }
             radiance += throughput * u.sky_color;
             break;
         }
         float3 albedo = palette[h.cell_val].rgb;
         if (b == u.max_bounces) {
-            // Last bounce: no further rays — sample sky directly via
-            // facing the surface (cheap approximation: assume some sky
-            // contribution proportional to albedo, or terminate). For
-            // P8.1 we just terminate (treat surface as black) so the
-            // single-bounce case shows direct diffuse only.
+            // Out of bounce budget — surface contributes nothing.
+            // Russian roulette below has already terminated most low-
+            // throughput paths, so rays that reach this branch were
+            // genuinely contributing little.
             break;
         }
 
@@ -328,6 +363,18 @@ fragment float4 pt_fragment(
         ray_origin = h.point + normal * 1e-3;
         ray_dir = cosine_hemi(normal, rng);
         throughput *= albedo;
+
+        // Russian roulette after a couple of guaranteed bounces. Kill
+        // paths with probability (1 - p) where p is the maximum component
+        // of throughput; survivors get their throughput boosted by 1/p
+        // so the estimator stays unbiased. Lets bounce_max go higher
+        // without the cost growing linearly.
+        if (b >= kMinBouncesBeforeRR) {
+            float p = max(throughput.r, max(throughput.g, throughput.b));
+            p = clamp(p, 0.05, 0.95);
+            if (rand1(rng) > p) break;
+            throughput /= p;
+        }
     }
     return float4(radiance, 1.0);
 }
