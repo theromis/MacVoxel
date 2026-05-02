@@ -391,14 +391,19 @@ fragment float4 pt_fragment(
             float cos_i = max(0.0, -dot(ray_dir, n));
             float eta = em.ior;  // glass -> air
             float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
+            float em_rough = clamp(em.roughness, 0.0, 1.0);
             if (k < 0.0) {
                 // Total internal reflection — bounce back into the medium.
+                float3 mirror = ray_dir - 2.0 * dot(ray_dir, n) * n;
+                float3 d = cosine_hemi(n, rng);
                 ray_origin = h.point + n * 1e-3;
-                ray_dir = ray_dir - 2.0 * dot(ray_dir, n) * n;
+                ray_dir = normalize(mix(mirror, d, em_rough));
                 medium_mat = entered_medium;
             } else {
+                float3 refracted = eta * ray_dir + (eta * cos_i - sqrt(k)) * n;
+                float3 d = cosine_hemi(-n, rng);
                 ray_origin = h.point - n * 1e-3;
-                ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * n;
+                ray_dir = normalize(mix(refracted, d, em_rough));
             }
             if (b >= kMinBouncesBeforeRR) {
                 float p = max(throughput.r, max(throughput.g, throughput.b));
@@ -465,30 +470,46 @@ fragment float4 pt_fragment(
             ray_dir = normalize(mix(mirror, diffuse_d, clamp(mat.roughness, 0.0, 1.0)));
             throughput *= albedo;
         } else if (mat_type == kMatGlass) {
-            // Snell refraction with Fresnel reflectance. medium_mat is
-            // set on transmission so the next DDA skips connected
-            // same-material cells — refraction then fires only at true
+            // Snell refraction + Fresnel reflectance. medium_mat is set
+            // on transmission so the next DDA skips connected
+            // same-material cells — refraction fires only at true
             // air↔glass boundaries (entry here, exit on the next hit),
             // not at every internal cell face.
+            //
+            // Roughness perturbs reflected / refracted directions toward
+            // a cosine-weighted hemisphere — gives frosted-glass look.
+            // Transparency scales the chance of actually transmitting:
+            // 1.0 = pure glass, 0.0 = diffuse, intermediate values blend
+            // (translucent/milky glass).
             float cos_i = max(0.0, -dot(ray_dir, normal));
             float r0 = (1.0 - mat.ior) / (1.0 + mat.ior);
             r0 *= r0;
             float fresnel = r0 + (1.0 - r0) * pow(1.0 - cos_i, 5.0);
+            float rough = clamp(mat.roughness, 0.0, 1.0);
             if (rand1(rng) < fresnel) {
+                float3 mirror = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
+                float3 d = cosine_hemi(normal, rng);
                 ray_origin = h.point + normal * 1e-3;
-                ray_dir = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
-            } else {
+                ray_dir = normalize(mix(mirror, d, rough));
+            } else if (rand1(rng) < clamp(mat.transparency, 0.0, 1.0)) {
                 float eta = 1.0 / mat.ior;  // air -> glass
                 float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
                 if (k < 0.0) {
-                    // TIR shouldn't occur entering a denser medium, but guard.
+                    float3 mirror = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
+                    float3 d = cosine_hemi(normal, rng);
                     ray_origin = h.point + normal * 1e-3;
-                    ray_dir = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
+                    ray_dir = normalize(mix(mirror, d, rough));
                 } else {
+                    float3 refracted = eta * ray_dir + (eta * cos_i - sqrt(k)) * normal;
+                    float3 d = cosine_hemi(-normal, rng);
                     ray_origin = h.point - normal * 1e-3;
-                    ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * normal;
+                    ray_dir = normalize(mix(refracted, d, rough));
                     medium_mat = h.cell_val;
                 }
+            } else {
+                // Diffuse fallback — translucent / milky glass.
+                ray_origin = h.point + normal * 1e-3;
+                ray_dir = cosine_hemi(normal, rng);
             }
             throughput *= albedo;
         } else {
