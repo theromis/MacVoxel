@@ -154,7 +154,8 @@ DDAHit dda_traverse(float3 ray_origin,
                     float3 ray_dir,
                     constant PathUniforms& u,
                     device const uint* coarse_grid,
-                    device const Chunk* chunk_pool)
+                    device const Chunk* chunk_pool,
+                    uint skip_mat)
 {
     DDAHit h = {false, float3(0.0), -1, 0, 0u};
 
@@ -201,7 +202,13 @@ DDAHit dda_traverse(float3 ray_origin,
     t_delta.z = step_dir.z != 0 ? 1.0 / abs(ray_dir.z) : INFINITY;
 
     int last_axis = entry_axis;
-    float t_hit = t_start;
+    // t_hit is parametric distance from the *clipped* origin, not from
+    // ray_origin — the local `origin` is where we are right now, so the
+    // initial value is 0. (Setting t_hit = t_start was a leftover from
+    // before t_max was made consistently relative to the clipped origin;
+    // keeping it nonzero put h.point off by t_start along the ray for
+    // first-iteration hits.)
+    float t_hit = 0.0;
 
     for (int s = 0; s < kMaxSteps; ++s) {
         int3 chunk_c;
@@ -273,7 +280,7 @@ DDAHit dda_traverse(float3 ray_origin,
         uint lz = uint(cell.z) & kChunkMask;
         uint local_idx = lx + ly * kChunkSize + lz * kChunkSize * kChunkSize;
         uint cell_val = uint(chunk_pool[pool_idx - 1u].cells[local_idx]);
-        if (cell_val != 0u) {
+        if (cell_val != 0u && cell_val != skip_mat) {
             h.hit = true;
             // t_hit is parametric distance from the *clipped* origin. We
             // compute the hit point against that origin directly so the
@@ -348,6 +355,13 @@ fragment float4 pt_fragment(
 
     const uint kMinBouncesBeforeRR = 2u;
 
+    // Material the ray is currently "inside" — DDA skips cells with this
+    // material so adjacent same-material glass voxels read as one
+    // connected medium rather than N stacked surfaces (each of which
+    // would otherwise re-multiply throughput by albedo and create a
+    // visible seam at every internal boundary).
+    uint medium_mat = 0u;
+
     // Virtual ground plane at grid z=0 (matches the editor's
     // ground-plane voxel-placement fallback). Gives undersides somewhere
     // to bounce light from and makes the scene's lighting environment
@@ -356,7 +370,11 @@ fragment float4 pt_fragment(
     const float3 kGroundNormal = float3(0.0, 0.0, 1.0);
 
     for (uint b = 0u; b <= u.max_bounces; ++b) {
-        DDAHit h = dda_traverse(ray_origin, ray_dir, u, coarse_grid, chunk_pool);
+        DDAHit h = dda_traverse(ray_origin, ray_dir, u,
+                                coarse_grid, chunk_pool, medium_mat);
+        // Default: next iteration is "in air". The glass-transmit branch
+        // re-sets medium_mat below if we're entering a medium.
+        medium_mat = 0u;
         if (!h.hit) {
             // Try infinite ground before falling back to sky.
             if (ray_dir.z < -1e-6 && ray_origin.z > 0.0) {
@@ -402,20 +420,38 @@ fragment float4 pt_fragment(
         else if (h.axis == 1) normal.y = float(h.sign);
         else if (h.axis == 2) normal.z = float(h.sign);
 
-        ray_origin = h.point + normal * 1e-3;
-
         if (mat_type == kMatMetal) {
             // Mirror-ish reflection. Roughness blends between mirror
             // direction (roughness 0) and a cosine-hemisphere bounce
-            // (roughness 1). For metals, throughput multiplies by albedo
-            // unconditionally (no Fresnel falloff yet — adequate for
-            // colored metals, full PBR Fresnel can come later).
+            // (roughness 1). Throughput multiplies by albedo so colored
+            // metals tint reflections.
+            ray_origin = h.point + normal * 1e-3;
             float3 mirror = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
             float3 diffuse_d = cosine_hemi(normal, rng);
             ray_dir = normalize(mix(mirror, diffuse_d, clamp(mat.roughness, 0.0, 1.0)));
             throughput *= albedo;
+        } else if (mat_type == kMatGlass) {
+            // No Snell. Glass = tinted air with Fresnel reflection at
+            // the entry face. The ray either reflects (mirror) or
+            // transmits straight through. Setting medium_mat tells the
+            // next DDA to skip cells of this material, so a connected
+            // run of same-material glass cells is treated as one
+            // medium — no per-cell-boundary tint, no seams.
+            float cos_i = max(0.0, -dot(ray_dir, normal));
+            float r0 = (1.0 - mat.ior) / (1.0 + mat.ior);
+            r0 *= r0;
+            float fresnel = r0 + (1.0 - r0) * pow(1.0 - cos_i, 5.0);
+            if (rand1(rng) < fresnel) {
+                ray_origin = h.point + normal * 1e-3;
+                ray_dir = ray_dir - 2.0 * dot(ray_dir, normal) * normal;
+            } else {
+                ray_origin = h.point + ray_dir * 1e-3;
+                medium_mat = h.cell_val;
+            }
+            throughput *= albedo;
         } else {
-            // Diffuse default (covers Glass too until P8.3.x adds it).
+            // Diffuse default.
+            ray_origin = h.point + normal * 1e-3;
             ray_dir = cosine_hemi(normal, rng);
             throughput *= albedo;
         }
