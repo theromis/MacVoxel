@@ -6,12 +6,14 @@
 #include <limits>
 
 namespace macvoxel {
+namespace {
 
-bool Raycast(const VoxelGrid& grid,
-             simd::float3 origin,
-             simd::float3 direction,
-             float t_max,
-             RayHit* out_hit) {
+bool RaycastImpl(const VoxelGrid& grid,
+                 simd::float3 origin,
+                 simd::float3 direction,
+                 float t_max,
+                 const std::unordered_set<int64_t>* ignore,
+                 RayHit* out_hit) {
     constexpr float kInf = std::numeric_limits<float>::infinity();
 
     // Starting cell: floor of origin in each axis.
@@ -41,9 +43,13 @@ bool Raycast(const VoxelGrid& grid,
     const float tDeltaY = (sy != 0) ? 1.0f / std::abs(direction.y) : kInf;
     const float tDeltaZ = (sz != 0) ? 1.0f / std::abs(direction.z) : kInf;
 
+    auto is_ignored = [&](int32_t cx, int32_t cy, int32_t cz) {
+        return ignore != nullptr && ignore->contains(PackCellKey(cx, cy, cz));
+    };
+
     // Starting cell: if it's already filled, the ray began inside a voxel.
     // Return that hit with no face — callers can decide what to do.
-    if (uint8_t v = grid.Get(x, y, z); v != 0) {
+    if (uint8_t v = grid.Get(x, y, z); v != 0 && !is_ignored(x, y, z)) {
         out_hit->x = x;
         out_hit->y = y;
         out_hit->z = z;
@@ -76,7 +82,7 @@ bool Raycast(const VoxelGrid& grid,
         if (t > t_max) return false;
 
         const uint8_t v = grid.Get(x, y, z);
-        if (v != 0) {
+        if (v != 0 && !is_ignored(x, y, z)) {
             out_hit->x = x;
             out_hit->y = y;
             out_hit->z = z;
@@ -92,6 +98,25 @@ bool Raycast(const VoxelGrid& grid,
         }
     }
     return false;
+}
+
+}  // namespace
+
+bool Raycast(const VoxelGrid& grid,
+             simd::float3 origin,
+             simd::float3 direction,
+             float t_max,
+             RayHit* out_hit) {
+    return RaycastImpl(grid, origin, direction, t_max, nullptr, out_hit);
+}
+
+bool RaycastIgnoring(const VoxelGrid& grid,
+                     simd::float3 origin,
+                     simd::float3 direction,
+                     float t_max,
+                     const std::unordered_set<int64_t>& ignore,
+                     RayHit* out_hit) {
+    return RaycastImpl(grid, origin, direction, t_max, &ignore, out_hit);
 }
 
 }  // namespace macvoxel

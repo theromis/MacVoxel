@@ -7,6 +7,7 @@
 #import <Metal/Metal.h>
 #import <cstdio>
 #include <algorithm>
+#include <unordered_set>
 
 #include "imgui.h"
 #include "imgui_impl_metal.h"
@@ -50,6 +51,11 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     NSPoint _lastDragLocation;
     NSPoint _hoverWindowPoint;
     BOOL _hoverHasPoint;
+    // Cells placed during the current drag-Add stroke. The raycast
+    // ignores these so the cursor keeps targeting the *original*
+    // surface; otherwise each new voxel becomes the next event's hit
+    // and the target marches outward along the face normal.
+    std::unordered_set<int64_t> _dragSkipCells;
     NSTrackingArea* _trackingArea;
     BOOL _imguiAlive;
     bool _wasPathTraced;
@@ -492,6 +498,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         _paintMode = hasCommand ? macvoxel::ToolMode::Remove
                                 : macvoxel::CurrentTool().mode;
         _lastDragEditCell = kInvalidCell;
+        _dragSkipCells.clear();
         macvoxel::CurrentHistory().BeginOp();
         [self performEditAtPoint:event.locationInWindow mode:_paintMode];
     }
@@ -533,6 +540,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         macvoxel::CurrentHistory().CommitOp();
     }
     _dragMode = DragMode::None;
+    _dragSkipCells.clear();
 }
 
 - (void)scrollWheel:(NSEvent*)event {
@@ -756,29 +764,21 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 // Editing — raycast a click into the grid, then place or erase.
 // ---------------------------------------------------------------------------
 
-- (BOOL)computeTargetCellAtPoint:(NSPoint)windowPoint
-                            mode:(macvoxel::ToolMode)mode
-                            into:(Vec3i*)out {
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) return NO;
-
+- (BOOL)gridRayAtPoint:(NSPoint)windowPoint
+                origin:(simd::float3*)out_origin
+             direction:(simd::float3*)out_dir {
     const NSPoint local = [self convertPoint:windowPoint fromView:nil];
     const float w = static_cast<float>(self.bounds.size.width);
     const float h = static_cast<float>(self.bounds.size.height);
     if (w <= 0.0f || h <= 0.0f) return NO;
 
-    // NDC: x, y in [-1, 1]. Cocoa Y-up matches Metal NDC y-up — no flip.
     const float ndc_x = (static_cast<float>(local.x) / w) * 2.0f - 1.0f;
     const float ndc_y = (static_cast<float>(local.y) / h) * 2.0f - 1.0f;
 
-    // World-space ray through this NDC point: take inverse of the view-
-    // projection matrix and unproject the near and far plane points.
     const float aspect = w / h;
     const simd::float4x4 vmat = _camera.ViewMatrix();
     const simd::float4x4 pmat = _camera.ProjectionMatrix(aspect);
-    const simd::float4x4 vp = pmat * vmat;
-    const simd::float4x4 inv_vp = simd_inverse(vp);
+    const simd::float4x4 inv_vp = simd_inverse(pmat * vmat);
 
     auto unproject = [&](float z) -> simd::float3 {
         simd::float4 clip{ndc_x, ndc_y, z, 1.0f};
@@ -787,20 +787,43 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     };
     const simd::float3 near_world = unproject(0.0f);
     const simd::float3 far_world  = unproject(1.0f);
-    const simd::float3 ray_dir_world = simd::normalize(far_world - near_world);
-    const simd::float3 ray_origin_world = _camera.Position();
+    const simd::float3 dir_world = simd::normalize(far_world - near_world);
+    const simd::float3 origin_world = _camera.Position();
 
-    // World -> grid: invert the renderer's rotation R = (gx, gz, -gy).
-    const simd::float3 ray_origin_grid{ray_origin_world.x,
-                                       -ray_origin_world.z,
-                                       ray_origin_world.y};
-    const simd::float3 ray_dir_grid{ray_dir_world.x,
-                                    -ray_dir_world.z,
-                                    ray_dir_world.y};
+    // World -> grid: invert the renderer's R = (gx, gz, -gy).
+    *out_origin = simd::float3{origin_world.x, -origin_world.z, origin_world.y};
+    *out_dir    = simd::float3{dir_world.x,    -dir_world.z,    dir_world.y};
+    return YES;
+}
+
+- (BOOL)computeTargetCellAtPoint:(NSPoint)windowPoint
+                            mode:(macvoxel::ToolMode)mode
+                            into:(Vec3i*)out {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return NO;
+
+    simd::float3 ray_origin_grid, ray_dir_grid;
+    if (![self gridRayAtPoint:windowPoint
+                       origin:&ray_origin_grid
+                    direction:&ray_dir_grid]) {
+        return NO;
+    }
 
     macvoxel::RayHit hit;
-    const bool hit_voxel = macvoxel::Raycast(doc->grid, ray_origin_grid,
-                                             ray_dir_grid, 4096.0f, &hit);
+    bool hit_voxel;
+    // During a drag-Add stroke, skip cells we just placed so the raycast
+    // keeps hitting the original surface. Other modes (Remove, Paint)
+    // and non-drag interactions raycast against the live grid.
+    if (mode == macvoxel::ToolMode::Add &&
+        _dragMode == DragMode::Paint && !_dragSkipCells.empty()) {
+        hit_voxel = macvoxel::RaycastIgnoring(doc->grid, ray_origin_grid,
+                                              ray_dir_grid, 4096.0f,
+                                              _dragSkipCells, &hit);
+    } else {
+        hit_voxel = macvoxel::Raycast(doc->grid, ray_origin_grid,
+                                      ray_dir_grid, 4096.0f, &hit);
+    }
 
     int target_x = 0;
     int target_y = 0;
@@ -862,6 +885,8 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 
     macvoxel::EditHistory& history = macvoxel::CurrentHistory();
 
+    const BOOL track_skip = (_dragMode == DragMode::Paint &&
+                             mode == macvoxel::ToolMode::Add);
     auto apply = [&](int x, int y, int z) {
         const uint8_t old_val = doc->grid.Get(x, y, z);
         uint8_t new_val = old_val;
@@ -879,6 +904,9 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         if (new_val == old_val) return;
         doc->grid.Set(x, y, z, new_val);
         history.Record(x, y, z, old_val, new_val);
+        if (track_skip) {
+            _dragSkipCells.insert(macvoxel::PackCellKey(x, y, z));
+        }
     };
 
     for (int dz = -span; dz <= span; ++dz) {
