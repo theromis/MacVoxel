@@ -10,6 +10,15 @@
 #include <cstdio>
 
 namespace macvoxel {
+namespace {
+bool g_save_render_clicked = false;
+}
+
+bool ConsumeSaveRenderClick() {
+    const bool was = g_save_render_clicked;
+    g_save_render_clicked = false;
+    return was;
+}
 
 void DrawRenderPanel(const RenderStats& stats) {
     ImGui::SetNextWindowSize(ImVec2(280, 240), ImGuiCond_FirstUseEver);
@@ -43,6 +52,14 @@ void DrawRenderPanel(const RenderStats& stats) {
             ImGui::TextDisabled("converged — adjust target or move camera "
                                 "to keep sampling");
         }
+
+        ImGui::Spacing();
+        const bool can_save = rs.sample_count > 0;
+        ImGui::BeginDisabled(!can_save);
+        if (ImGui::Button("Save render…")) {
+            g_save_render_clicked = true;
+        }
+        ImGui::EndDisabled();
     }
     ImGui::Unindent();
     ImGui::Spacing();

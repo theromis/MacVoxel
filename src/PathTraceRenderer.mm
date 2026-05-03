@@ -1,5 +1,8 @@
 #import "PathTraceRenderer.h"
 
+#import <ImageIO/ImageIO.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
 #import <cstdio>
 #include <array>
 #include <cstdint>
@@ -1047,6 +1050,133 @@ fragment float4 display_fragment(
     }
 
     macvoxel::CurrentRenderState().sample_count = _sampleCount;
+}
+
+- (BOOL)exportPNGToURL:(NSURL*)url
+          commandQueue:(id<MTLCommandQueue>)queue
+                 error:(NSError**)outError {
+    if (_accumTexture == nil || _displayPipeline == nil) {
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelExport" code:1
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"nothing rendered yet"}];
+        }
+        return NO;
+    }
+
+    // Shared-storage BGRA8 target so we can read it back after the GPU
+    // is done. On Apple Silicon this is a single allocation visible to
+    // both CPU and GPU — no blit needed.
+    const NSUInteger w = static_cast<NSUInteger>(_accumSize.width);
+    const NSUInteger h = static_cast<NSUInteger>(_accumSize.height);
+    if (w == 0 || h == 0) {
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelExport" code:2
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"render target has zero size"}];
+        }
+        return NO;
+    }
+    MTLTextureDescriptor* td =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:_colorFormat
+                                                           width:w
+                                                          height:h
+                                                       mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> shot = [_device newTextureWithDescriptor:td];
+    shot.label = @"PathTraceExport";
+
+    id<MTLCommandBuffer> cmd = [queue commandBuffer];
+    cmd.label = @"PathTraceExport";
+
+    MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+    rpd.colorAttachments[0].texture = shot;
+    rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
+    rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+    rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    id<MTLRenderCommandEncoder> enc =
+        [cmd renderCommandEncoderWithDescriptor:rpd];
+    DisplayUniforms du;
+    du.sample_count = _sampleCount;
+    du.aces_tonemap =
+        macvoxel::CurrentRenderState().aces_tonemap ? 1u : 0u;
+    du._pad0 = du._pad1 = 0u;
+    [enc setRenderPipelineState:_displayPipeline];
+    [enc setCullMode:MTLCullModeNone];
+    [enc setFragmentBytes:&du length:sizeof(du) atIndex:0];
+    [enc setFragmentTexture:_accumTexture atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [enc endEncoding];
+
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    // Pull pixels into a CPU buffer. We encode as RGBA so ImageIO
+    // doesn't have to swap the channels itself.
+    const size_t bytes_per_row = w * 4;
+    std::vector<uint8_t> rgba(bytes_per_row * h);
+    [shot getBytes:rgba.data()
+       bytesPerRow:bytes_per_row
+        fromRegion:MTLRegionMake2D(0, 0, w, h)
+       mipmapLevel:0];
+    if (_colorFormat == MTLPixelFormatBGRA8Unorm) {
+        for (size_t i = 0; i < rgba.size(); i += 4) {
+            std::swap(rgba[i + 0], rgba[i + 2]);
+        }
+    }
+
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGDataProviderRef provider =
+        CGDataProviderCreateWithData(nullptr, rgba.data(),
+                                     rgba.size(), nullptr);
+    const uint32_t bitmap_info = static_cast<uint32_t>(kCGBitmapByteOrderDefault) |
+                                 static_cast<uint32_t>(kCGImageAlphaPremultipliedLast);
+    CGImageRef img = CGImageCreate(
+        w, h, 8, 32, bytes_per_row, cs, bitmap_info,
+        provider, nullptr, false, kCGRenderingIntentDefault);
+    CGDataProviderRelease(provider);
+    CGColorSpaceRelease(cs);
+    if (img == nullptr) {
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelExport" code:3
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"CGImageCreate failed"}];
+        }
+        return NO;
+    }
+
+    CGImageDestinationRef dest = CGImageDestinationCreateWithURL(
+        (__bridge CFURLRef)url, (__bridge CFStringRef)UTTypePNG.identifier,
+        1, nullptr);
+    if (dest == nullptr) {
+        CGImageRelease(img);
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelExport" code:4
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"could not create PNG destination"}];
+        }
+        return NO;
+    }
+    CGImageDestinationAddImage(dest, img, nullptr);
+    const bool ok = CGImageDestinationFinalize(dest);
+    CFRelease(dest);
+    CGImageRelease(img);
+    if (!ok) {
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelExport" code:5
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"PNG write failed"}];
+        }
+        return NO;
+    }
+    return YES;
 }
 
 @end

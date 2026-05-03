@@ -5,6 +5,7 @@
 #import "RaycastRenderer.h"
 
 #import <Metal/Metal.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <cstdio>
 #include <algorithm>
 #include <unordered_set>
@@ -361,6 +362,10 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         macvoxel::DrawPalettePanel(*doc);
         [self drawSelectionOverlay];
         [self drawHoverOverlay];
+
+        if (macvoxel::ConsumeSaveRenderClick()) {
+            [self runSaveRenderPanel];
+        }
     }
 
     ImGui::Render();
@@ -460,6 +465,32 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 
 - (void)mouseExited:(NSEvent*)__unused event {
     _hoverHasPoint = NO;
+}
+
+- (void)runSaveRenderPanel {
+    NSSavePanel* panel = [NSSavePanel savePanel];
+    panel.title = @"Save render";
+    panel.allowedContentTypes = @[ UTTypePNG ];
+    panel.nameFieldStringValue = @"render.png";
+    panel.canCreateDirectories = YES;
+
+    PathTraceRenderer* renderer = _pathTraceRenderer;
+    id<MTLCommandQueue> queue = _commandQueue;
+    [panel beginSheetModalForWindow:self.window
+                  completionHandler:^(NSModalResponse response) {
+        if (response != NSModalResponseOK) return;
+        NSURL* url = panel.URL;
+        if (url == nil) return;
+        NSError* err = nil;
+        if (![renderer exportPNGToURL:url commandQueue:queue error:&err]) {
+            NSAlert* alert = [[NSAlert alloc] init];
+            alert.messageText = @"Couldn't save render";
+            alert.informativeText = err.localizedDescription != nil
+                ? err.localizedDescription
+                : @"Unknown error.";
+            [alert runModal];
+        }
+    }];
 }
 
 // ---------------------------------------------------------------------------

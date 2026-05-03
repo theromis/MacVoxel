@@ -41,4 +41,12 @@ namespace macvoxel { class Camera; }
 
 - (uint32_t)sampleCount;
 
+// Render the current accumulated frame (post-tonemap) to a PNG at `url`.
+// Synchronous — encodes a one-shot display pass into a shared-storage
+// texture, waits for the GPU, then writes via ImageIO. Returns YES on
+// success; on failure, *outError carries an explanation.
+- (BOOL)exportPNGToURL:(NSURL*)url
+          commandQueue:(id<MTLCommandQueue>)queue
+                 error:(NSError**)outError;
+
 @end
