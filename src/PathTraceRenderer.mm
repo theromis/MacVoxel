@@ -1200,49 +1200,12 @@ fragment float4 display_fragment(
 
     // ---------- Pass 1: accumulate one new sample into accum texture ----------
     if (accumulate_more) {
-        MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
-        rpd.colorAttachments[0].texture = _accumTexture;
-        rpd.colorAttachments[0].loadAction =
-            (_sampleCount == 0) ? MTLLoadActionClear : MTLLoadActionLoad;
-        rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
-        rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-        id<MTLRenderCommandEncoder> enc =
-            [cmd renderCommandEncoderWithDescriptor:rpd];
-        enc.label = @"PathTraceAccumulate";
-
-        const float aspect = static_cast<float>(size.width / size.height);
-        const simd::float4x4 vmat = camera.ViewMatrix();
-        const simd::float4x4 pmat = camera.ProjectionMatrix(aspect);
-        const simd::float4x4 inv_vp = simd_inverse(pmat * vmat);
-
-        PathUniforms u;
-        u.inv_vp = inv_vp;
-        u.camera_pos = camera.Position();
-        u._pad0 = 0.0f;
-        u.coarse_min = _coarseMin;
-        u._pad1 = 0;
-        u.coarse_dim = _coarseDim;
-        u._pad2 = 0;
-        u.sky_color = simd::float3{0.65f, 0.75f, 0.95f};
-        u._pad3 = 0.0f;
-        u.frame_seed = _sampleCount + 1u;  // distinct each accumulated sample
-        u.max_bounces = static_cast<uint32_t>(
-            macvoxel::CurrentRenderState().max_bounces);
-        u.light_count = _lightCount;
-        u._pad5 = 0u;
-
-        [enc setRenderPipelineState:_pathPipeline];
-        [enc setCullMode:MTLCullModeNone];
-        [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
-        [enc setFragmentBuffer:_coarseBuffer offset:0 atIndex:1];
-        [enc setFragmentBuffer:_poolBuffer offset:0 atIndex:2];
-        [enc setFragmentBuffer:_paletteBuffer offset:0 atIndex:3];
-        [enc setFragmentBuffer:_materialBuffer offset:0 atIndex:4];
-        [enc setFragmentBuffer:_lightBuffer offset:0 atIndex:5];
-        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-        [enc endEncoding];
-        ++_sampleCount;
+        [self encodeAccumulationSampleIntoCommandBuffer:cmd
+                                                 camera:camera
+                                                   size:size
+                                             maxBounces:static_cast<uint32_t>(
+                                                 macvoxel::CurrentRenderState().max_bounces)
+                                              frameSeed:_sampleCount + 1u];
     }
 
     // ---------- Pass 2: divide accum by sample count, write to drawable ----
@@ -1277,6 +1240,112 @@ fragment float4 display_fragment(
     }
 
     macvoxel::CurrentRenderState().sample_count = _sampleCount;
+}
+
+// Encodes one accumulation pass into `cmd`, drawing into _accumTexture.
+// All resource buffers (_coarseBuffer, _poolBuffer, etc.) and
+// _accumTexture must already be set up by the caller. Increments
+// _sampleCount; loadAction is Clear iff this is the first sample.
+- (void)encodeAccumulationSampleIntoCommandBuffer:(id<MTLCommandBuffer>)cmd
+                                            camera:(const macvoxel::Camera&)camera
+                                              size:(CGSize)size
+                                        maxBounces:(uint32_t)maxBounces
+                                         frameSeed:(uint32_t)frameSeed {
+    MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+    rpd.colorAttachments[0].texture = _accumTexture;
+    rpd.colorAttachments[0].loadAction =
+        (_sampleCount == 0) ? MTLLoadActionClear : MTLLoadActionLoad;
+    rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+    rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    id<MTLRenderCommandEncoder> enc =
+        [cmd renderCommandEncoderWithDescriptor:rpd];
+    enc.label = @"PathTraceAccumulate";
+
+    const float aspect = static_cast<float>(size.width / size.height);
+    const simd::float4x4 vmat = camera.ViewMatrix();
+    const simd::float4x4 pmat = camera.ProjectionMatrix(aspect);
+    const simd::float4x4 inv_vp = simd_inverse(pmat * vmat);
+
+    PathUniforms u;
+    u.inv_vp = inv_vp;
+    u.camera_pos = camera.Position();
+    u._pad0 = 0.0f;
+    u.coarse_min = _coarseMin;
+    u._pad1 = 0;
+    u.coarse_dim = _coarseDim;
+    u._pad2 = 0;
+    u.sky_color = simd::float3{0.65f, 0.75f, 0.95f};
+    u._pad3 = 0.0f;
+    u.frame_seed = frameSeed;
+    u.max_bounces = maxBounces;
+    u.light_count = _lightCount;
+    u._pad5 = 0u;
+
+    [enc setRenderPipelineState:_pathPipeline];
+    [enc setCullMode:MTLCullModeNone];
+    [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+    [enc setFragmentBuffer:_coarseBuffer offset:0 atIndex:1];
+    [enc setFragmentBuffer:_poolBuffer offset:0 atIndex:2];
+    [enc setFragmentBuffer:_paletteBuffer offset:0 atIndex:3];
+    [enc setFragmentBuffer:_materialBuffer offset:0 atIndex:4];
+    [enc setFragmentBuffer:_lightBuffer offset:0 atIndex:5];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [enc endEncoding];
+    ++_sampleCount;
+}
+
+- (BOOL)renderHeadlessSamples:(uint32_t)samples
+                     document:(macvoxel::Document*)doc
+                       camera:(const macvoxel::Camera&)camera
+                         size:(CGSize)size
+                   maxBounces:(uint32_t)maxBounces
+                     baseSeed:(uint32_t)baseSeed
+                 commandQueue:(id<MTLCommandQueue>)queue
+                        error:(NSError**)outError {
+    if (doc == nullptr || queue == nil ||
+        size.width <= 0.0 || size.height <= 0.0) {
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelHeadless" code:1
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"invalid headless render parameters"}];
+        }
+        return NO;
+    }
+
+    [self ensureAccumTextureForSize:size];
+    [self rebuildResourcesFromDocument:doc];
+    _sampleCount = 0;
+    _wantsClear = NO;
+
+    if (_coarseBuffer == nil || _poolBuffer == nil ||
+        _paletteBuffer == nil || _materialBuffer == nil) {
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelHeadless" code:2
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"document has no voxels"}];
+        }
+        return NO;
+    }
+
+    id<MTLCommandBuffer> last = nil;
+    for (uint32_t i = 0; i < samples; ++i) {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [queue commandBuffer];
+            cmd.label = @"PathTraceHeadless";
+            [self encodeAccumulationSampleIntoCommandBuffer:cmd
+                                                     camera:camera
+                                                       size:size
+                                                 maxBounces:maxBounces
+                                                  frameSeed:baseSeed + i + 1u];
+            [cmd commit];
+            last = cmd;
+        }
+    }
+    if (last != nil) [last waitUntilCompleted];
+    return YES;
 }
 
 - (BOOL)exportPNGToURL:(NSURL*)url

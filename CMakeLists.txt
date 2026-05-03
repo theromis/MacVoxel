@@ -53,6 +53,7 @@ set(APP_SOURCES
     src/AppDelegate.mm
     src/VoxelView.mm
     src/Camera.cpp
+    src/CliRender.mm
     src/RaycastRenderer.mm
     src/PathTraceRenderer.mm
     src/RenderState.cpp

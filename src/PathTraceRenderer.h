@@ -41,6 +41,20 @@ namespace macvoxel { class Camera; }
 
 - (uint32_t)sampleCount;
 
+// Headless render: clears the accumulator, runs `samples` path-trace
+// passes (driven from `document` + `camera` at exactly `size` pixels),
+// and waits for the GPU. The seed used for sample i is `baseSeed + i +
+// 1`, so a fixed `baseSeed` reproduces the same image for the same
+// inputs. After it returns, call `exportPNGToURL:` to write the result.
+- (BOOL)renderHeadlessSamples:(uint32_t)samples
+                     document:(macvoxel::Document*)doc
+                       camera:(const macvoxel::Camera&)camera
+                         size:(CGSize)size
+                   maxBounces:(uint32_t)maxBounces
+                     baseSeed:(uint32_t)baseSeed
+                 commandQueue:(id<MTLCommandQueue>)queue
+                        error:(NSError**)outError;
+
 // Render the current accumulated frame (post-tonemap) to a PNG at `url`.
 // Synchronous — encodes a one-shot display pass into a shared-storage
 // texture, waits for the GPU, then writes via ImageIO. Returns YES on
