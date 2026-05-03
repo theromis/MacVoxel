@@ -23,6 +23,10 @@ solid base. **S–M total.**
 - **SF Symbols in tool / palette UI (S).** Replace text labels for tools, brush
   size buttons, mode toggles. ImGui draws them as fonts via Apple's SF Symbols
   font (`/System/Library/Fonts/SF-Pro.ttf` glyph range).
+- **Settle on a UI font size (S).** Currently 13pt body / 15pt header (HIG
+  body + Title 3). Pro apps often run 11–12pt for density, consumer apps
+  trend 15–17pt. Pick the size that fits MacVoxel's identity once enough
+  panels exist to compare against.
 
 ## Phase 10 — Render-mode QoL & tonemapping
 

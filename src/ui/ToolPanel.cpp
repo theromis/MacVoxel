@@ -1,5 +1,6 @@
 #include "ToolPanel.h"
 
+#include "Icons.h"
 #include "ToolState.h"
 
 #include "imgui.h"
@@ -33,28 +34,28 @@ void DrawToolPanel() {
     auto tool_button = [&](const char* label, ToolKind k) {
         const bool active = t.tool == k;
         AccentButtonColors(active);
-        if (ImGui::Button(label, ImVec2(64, 0))) t.tool = k;
+        if (ImGui::Button(label, ImVec2(80, 0))) t.tool = k;
         if (active) ImGui::PopStyleColor(3);
     };
     auto mode_button = [&](const char* label, ToolMode m) {
         const bool active = t.mode == m;
         AccentButtonColors(active);
-        if (ImGui::Button(label, ImVec2(64, 0))) t.mode = m;
+        if (ImGui::Button(label, ImVec2(80, 0))) t.mode = m;
         if (active) ImGui::PopStyleColor(3);
     };
 
     ImGui::TextDisabled("Tool");
-    tool_button("Brush", ToolKind::Brush);
+    tool_button(ICON_PAINT_BRUSH "  Brush", ToolKind::Brush);
     ImGui::SameLine();
-    tool_button("Select", ToolKind::Select);
+    tool_button(ICON_CROP "  Select", ToolKind::Select);
 
     ImGui::Spacing();
     ImGui::TextDisabled("Mode");
-    mode_button("Add", ToolMode::Add);
+    mode_button(ICON_CUBE "  Add", ToolMode::Add);
     ImGui::SameLine();
-    mode_button("Remove", ToolMode::Remove);
+    mode_button(ICON_ERASER "  Remove", ToolMode::Remove);
     ImGui::SameLine();
-    mode_button("Paint", ToolMode::Paint);
+    mode_button(ICON_PAINT "  Paint", ToolMode::Paint);
 
     ImGui::Spacing();
 

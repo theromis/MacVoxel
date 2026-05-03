@@ -80,9 +80,16 @@ foreach(_src IN ITEMS src/AppDelegate.mm src/VoxelView.mm src/Camera.cpp
     endif()
 endforeach()
 
+set(APP_RESOURCES
+    resources/SF-Symbols-Export.ttf
+)
+set_source_files_properties(${APP_RESOURCES}
+    PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+
 add_executable(${APP_NAME} MACOSX_BUNDLE
     ${APP_SOURCES}
     ${IMGUI_SOURCES}
+    ${APP_RESOURCES}
 )
 
 set_target_properties(${APP_NAME} PROPERTIES

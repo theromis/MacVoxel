@@ -145,15 +145,39 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 
         macvoxel::AppFonts& fonts = macvoxel::Fonts();
 
+        // Static ranges array because ImGui retains the pointer across
+        // baking. Used by both body and header merges below.
+        static const ImWchar kIconRanges[] = {0xF000, 0xF0FF, 0};
+        NSString* icon_path = [[NSBundle mainBundle]
+                                  pathForResource:@"SF-Symbols-Export"
+                                           ofType:@"ttf"];
+
+        // MergeMode merges into the *previously-added* font, so each
+        // base font that should carry icons needs its own merge call
+        // right after. Without this, icons silently disappear from the
+        // font you're rendering with and labels show U+FFFD boxes.
+        auto merge_icons_into_previous = [&](float size_px) {
+            if (icon_path == nil) return;
+            ImFontConfig cfg;
+            cfg.MergeMode = true;
+            cfg.PixelSnapH = true;
+            cfg.GlyphOffset = ImVec2(0.0f, 1.0f);
+            cfg.GlyphMinAdvanceX = size_px;
+            io.Fonts->AddFontFromFileTTF([icon_path UTF8String], size_px,
+                                         &cfg, kIconRanges);
+        };
+
         ImFontConfig body_cfg;
         body_cfg.RasterizerMultiply = 1.18f;  // a touch heavier than regular
         fonts.body = io.Fonts->AddFontFromFileTTF(sf_path, body_pt * oversample,
                                                   &body_cfg);
+        merge_icons_into_previous(body_pt * oversample);
 
         ImFontConfig header_cfg;
         header_cfg.RasterizerMultiply = 1.45f;  // synthetic "bold" for headers
         fonts.header = io.Fonts->AddFontFromFileTTF(sf_path, header_pt * oversample,
                                                     &header_cfg);
+        merge_icons_into_previous(header_pt * oversample);
 
         if (fonts.body == nullptr) {
             fprintf(stderr,
@@ -161,6 +185,11 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
                     sf_path);
             fonts.body = io.Fonts->AddFontDefault();
             fonts.header = fonts.body;
+        }
+        if (icon_path == nil) {
+            fprintf(stderr,
+                    "MacVoxel: SF-Symbols-Export.ttf not found in bundle, "
+                    "icons will render as missing-glyph boxes\n");
         }
         io.FontGlobalScale = 1.0f / oversample;
     }
