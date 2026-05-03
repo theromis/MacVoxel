@@ -30,9 +30,19 @@ struct PathUniforms {
     float _pad3;
     uint32_t frame_seed;
     uint32_t max_bounces;
-    uint32_t _pad4;
+    uint32_t light_count;
     uint32_t _pad5;
 };
+
+// Per-emissive-voxel entry in the next-event-estimation light buffer.
+// Built CPU-side at doc.version change so the shader doesn't have to
+// scan the grid; `le` is the linear-space color × effective emission so
+// the shader needs no palette/material lookup at sample time.
+struct GpuLight {
+    simd::float4 pos;  // .xyz = grid-space corner of the voxel; .w unused
+    simd::float4 le;   // .xyz = albedo_linear * effective_emission; .w unused
+};
+static_assert(sizeof(GpuLight) == 32, "GpuLight size mismatch");
 
 // Per-palette-entry material data uploaded to the path-tracer's
 // fragment shader. Mirrors macvoxel::Material but lives in a tightly
@@ -75,8 +85,13 @@ struct PathUniforms {
     float    _pad3;
     uint     frame_seed;
     uint     max_bounces;
-    uint     _pad4;
+    uint     light_count;
     uint     _pad5;
+};
+
+struct GpuLight {
+    float4 pos;  // .xyz = grid-space corner; .w unused
+    float4 le;   // .xyz = albedo_linear * effective_emission; .w unused
 };
 
 struct DisplayUniforms {
@@ -203,6 +218,8 @@ struct DDAHit {
     int    axis;
     int    sign;
     uint   cell_val;
+    int3   cell_coord; // integer grid coords of the hit cell (or last visited
+                       // before exit, for medium-exit reports)
 };
 
 DDAHit dda_traverse(float3 ray_origin,
@@ -212,7 +229,7 @@ DDAHit dda_traverse(float3 ray_origin,
                     device const Chunk* chunk_pool,
                     uint skip_mat)
 {
-    DDAHit h = {false, float3(0.0), -1, 0, 0u};
+    DDAHit h = {false, float3(0.0), -1, 0, 0u, int3(0)};
 
     float3 aabb_min = float3(u.coarse_min) * float(kChunkSize);
     float3 aabb_max = float3(u.coarse_min + u.coarse_dim) * float(kChunkSize);
@@ -292,6 +309,7 @@ DDAHit dda_traverse(float3 ray_origin,
                          : (last_axis == 1) ? step_dir.y : step_dir.z;
                 h.sign = -step;
                 h.cell_val = 0u;
+                h.cell_coord = cell;
                 return h;
             }
             return h;
@@ -314,6 +332,7 @@ DDAHit dda_traverse(float3 ray_origin,
                          : (last_axis == 1) ? step_dir.y : step_dir.z;
                 h.sign = -step;
                 h.cell_val = 0u;
+                h.cell_coord = cell;
                 return h;
             }
             // Empty-chunk skip via slab. All t_* values inside this DDA
@@ -380,6 +399,7 @@ DDAHit dda_traverse(float3 ray_origin,
                      : (last_axis == 1) ? step_dir.y : step_dir.z;
             h.sign = -step;
             h.cell_val = cell_val;
+            h.cell_coord = cell;
             return h;
         }
         // Transition skip-mat → empty cell: the ray just exited the
@@ -393,6 +413,7 @@ DDAHit dda_traverse(float3 ray_origin,
                      : (last_axis == 1) ? step_dir.y : step_dir.z;
             h.sign = -step;
             h.cell_val = 0u;
+            h.cell_coord = cell;
             return h;
         }
         was_in_skip = (cell_val == skip_mat);
@@ -417,13 +438,99 @@ DDAHit dda_traverse(float3 ray_origin,
     return h;
 }
 
+// Next-event estimation for a Lambertian shading point. Picks a random
+// emissive voxel uniformly, samples a uniform point on one of its three
+// faces oriented toward the shading point, traces a shadow ray, and
+// returns the unweighted radiance contribution (caller multiplies by
+// throughput). Returns the contribution for f = albedo / π — for
+// material-mixed bounces (Metal diffuse fallback, Glass diffuse
+// fallback) the caller has already conditioned on that branch, so this
+// is the BRDF the path actually took.
+//
+// pdf_area = 1 / (N_lights * 3 * face_area), with face_area = 1.
+// Estimator: f * Le * cos_x * cos_y / (d² * pdf_area).
+float3 sample_nee_diffuse(float3 x,
+                          float3 n_x,
+                          float3 albedo,
+                          constant PathUniforms& u,
+                          device const GpuLight* lights,
+                          device const uint* coarse_grid,
+                          device const Chunk* chunk_pool,
+                          thread uint& rng)
+{
+    if (u.light_count == 0u) return float3(0.0);
+
+    uint li = uint(rand1(rng) * float(u.light_count));
+    if (li >= u.light_count) li = u.light_count - 1u;
+    GpuLight L = lights[li];
+    float3 corner = L.pos.xyz;
+    float3 center = corner + 0.5;
+    float3 to_x = x - center;
+
+    // Choose one of the three faces oriented toward the shading point —
+    // a face's outward normal sign matches that of (x - center) along
+    // its axis. The other 3 faces are on the back side of the voxel and
+    // self-occluded from x.
+    int axis = int(rand1(rng) * 3.0);
+    if (axis > 2) axis = 2;
+    float coord_axis = (axis == 0) ? to_x.x : (axis == 1) ? to_x.y : to_x.z;
+    float face_sign = coord_axis >= 0.0 ? 1.0 : -1.0;
+
+    float3 n_y = float3(0.0);
+    float3 y = corner;
+    float u1 = rand1(rng);
+    float u2 = rand1(rng);
+    if (axis == 0) {
+        n_y.x = face_sign;
+        y.x += face_sign > 0.0 ? 1.0 : 0.0;
+        y.y += u1;
+        y.z += u2;
+    } else if (axis == 1) {
+        n_y.y = face_sign;
+        y.y += face_sign > 0.0 ? 1.0 : 0.0;
+        y.x += u1;
+        y.z += u2;
+    } else {
+        n_y.z = face_sign;
+        y.z += face_sign > 0.0 ? 1.0 : 0.0;
+        y.x += u1;
+        y.y += u2;
+    }
+
+    float3 d = y - x;
+    float dist2 = dot(d, d);
+    if (dist2 < 1e-8) return float3(0.0);
+    float dist = sqrt(dist2);
+    float3 omega = d / dist;
+
+    float cos_x = dot(n_x, omega);
+    float cos_y = dot(n_y, -omega);
+    if (cos_x <= 0.0 || cos_y <= 0.0) return float3(0.0);
+
+    float3 shadow_origin = x + n_x * 1e-3;
+    DDAHit s = dda_traverse(shadow_origin, omega, u, coarse_grid,
+                            chunk_pool, 0u);
+    // Shadow ray must reach the chosen light voxel as the first hit.
+    // L.pos.xyz already holds the integer grid corner as exact floats,
+    // so int3() truncation matches the DDA's floor() on the cell coord.
+    int3 light_cell = int3(L.pos.xyz);
+    if (!s.hit) return float3(0.0);
+    if (any(s.cell_coord != light_cell)) return float3(0.0);
+
+    const float kInvPi = 0.31830988618;
+    float pdf_area = 1.0 / (float(u.light_count) * 3.0);
+    return (albedo * kInvPi) * L.le.xyz * cos_x * cos_y /
+           (dist2 * pdf_area);
+}
+
 fragment float4 pt_fragment(
     VertOut in [[stage_in]],
     constant PathUniforms& u [[buffer(0)]],
     device const uint* coarse_grid [[buffer(1)]],
     device const Chunk* chunk_pool [[buffer(2)]],
     constant float4* palette [[buffer(3)]],
-    constant GpuMaterial* materials [[buffer(4)]])
+    constant GpuMaterial* materials [[buffer(4)]],
+    device const GpuLight* lights [[buffer(5)]])
 {
     uint2 pix = uint2(in.position.xy);
     uint rng = (pix.x * 1973u) ^ (pix.y * 9277u) ^ (u.frame_seed * 26699u);
@@ -455,6 +562,15 @@ fragment float4 pt_fragment(
 
     float3 throughput = float3(1.0);
     float3 radiance   = float3(0.0);
+
+    // Track whether the path arrived at the current shading point via a
+    // specular interaction (mirror reflection, glass refraction, GGX
+    // microfacet bounce). NEE only fires from diffuse points, so any
+    // emitter hit reached by a specular last segment must still be
+    // counted at the BSDF-sampled hit — otherwise mirrors and refracted
+    // rays would lose their reflected/refracted lights. Camera primary
+    // is "specular" (delta) by convention.
+    bool last_was_specular = true;
 
     const uint kMinBouncesBeforeRR = 2u;
 
@@ -528,6 +644,7 @@ fragment float4 pt_fragment(
                 ray_origin = h.point - n * 1e-3;
                 ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
             }
+            last_was_specular = true;
             if (b >= kMinBouncesBeforeRR) {
                 float p = max(throughput.r, max(throughput.g, throughput.b));
                 p = clamp(p, 0.05, 0.95);
@@ -557,9 +674,14 @@ fragment float4 pt_fragment(
                         // termination case for consistency.
                         break;
                     }
+                    radiance += throughput *
+                        sample_nee_diffuse(g_point, kGroundNormal,
+                                           kGroundAlbedo, u, lights,
+                                           coarse_grid, chunk_pool, rng);
                     ray_origin = g_point + kGroundNormal * 1e-3;
                     ray_dir = cosine_hemi(kGroundNormal, rng);
                     throughput *= kGroundAlbedo;
+                    last_was_specular = false;
                     continue;
                 }
             }
@@ -570,13 +692,15 @@ fragment float4 pt_fragment(
         GpuMaterial mat = materials[h.cell_val];
         uint mat_type = uint(mat.type);
 
-        // Emissive cells are light sources: deposit emission * albedo
-        // weighted by current throughput, then terminate. (Treating
-        // emissive as also reflective is an option but for now we
-        // model them as pure emitters — matches typical voxel-art
-        // intent where light sources are explicit.)
+        // Emissive cells are light sources. With NEE on (light_count >
+        // 0), only count direct camera hits — bounced rays would
+        // double-count what NEE already sampled at the previous shading
+        // point. Without NEE, count emissive on every hit (the old
+        // BSDF-only behavior).
         if (mat_type == kMatEmissive && mat.emission > 0.0) {
-            radiance += throughput * albedo * mat.emission;
+            if (last_was_specular || u.light_count == 0u) {
+                radiance += throughput * albedo * mat.emission;
+            }
             break;
         }
 
@@ -604,8 +728,14 @@ fragment float4 pt_fragment(
                 float r = clamp(mat.roughness, 0.0, 1.0);
                 float3 m = ggx_sample_vndf(normal, -ray_dir, r, rng);
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
+                last_was_specular = true;
             } else {
+                // Took the diffuse branch — NEE on Lambertian f.
+                radiance += throughput *
+                    sample_nee_diffuse(h.point, normal, albedo, u, lights,
+                                       coarse_grid, chunk_pool, rng);
                 ray_dir = cosine_hemi(normal, rng);
+                last_was_specular = false;
             }
             throughput *= albedo;
         } else if (mat_type == kMatGlass) {
@@ -633,6 +763,7 @@ fragment float4 pt_fragment(
             if (rand1(rng) < fresnel) {
                 ray_origin = h.point + normal * 1e-3;
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
+                last_was_specular = true;
             } else if (rand1(rng) < clamp(mat.transparency, 0.0, 1.0)) {
                 float eta = 1.0 / mat.ior;  // air -> glass
                 float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
@@ -647,17 +778,26 @@ fragment float4 pt_fragment(
                     medium_entry = h.point;
                     medium_albedo = albedo;
                 }
+                last_was_specular = true;
             } else {
                 // Diffuse fallback — translucent / milky glass.
                 ray_origin = h.point + normal * 1e-3;
+                radiance += throughput *
+                    sample_nee_diffuse(h.point, normal, albedo, u, lights,
+                                       coarse_grid, chunk_pool, rng);
                 ray_dir = cosine_hemi(normal, rng);
                 throughput *= albedo;
+                last_was_specular = false;
             }
         } else {
             // Diffuse default.
             ray_origin = h.point + normal * 1e-3;
+            radiance += throughput *
+                sample_nee_diffuse(h.point, normal, albedo, u, lights,
+                                   coarse_grid, chunk_pool, rng);
             ray_dir = cosine_hemi(normal, rng);
             throughput *= albedo;
+            last_was_specular = false;
         }
 
         // Russian roulette after a couple of guaranteed bounces. Kill
@@ -730,6 +870,8 @@ fragment float4 display_fragment(
     id<MTLBuffer> _poolBuffer;
     id<MTLBuffer> _paletteBuffer;
     id<MTLBuffer> _materialBuffer;
+    id<MTLBuffer> _lightBuffer;
+    uint32_t _lightCount;
     uint64_t _cachedDocVersion;
     BOOL _resourcesValid;
     simd::int3 _coarseMin;
@@ -912,6 +1054,60 @@ fragment float4 display_fragment(
                                           options:MTLResourceStorageModeShared];
     _materialBuffer.label = @"PTMaterials";
 
+    // Next-event estimation light list. One entry per emissive voxel
+    // (with effective_emission > 0). Stored as { grid corner, linear
+    // albedo × emission } so the shader can sample without a palette
+    // lookup. We keep the buffer non-nil even when empty (Metal needs a
+    // buffer bound at index 5) and gate use via _lightCount.
+    std::vector<GpuLight> lights;
+    lights.reserve(64);
+    for (const auto& [coord, chunk] : chunks) {
+        if (chunk->filled_count == 0) continue;
+        const int32_t base_x = coord.x * static_cast<int32_t>(VG::kChunkSize);
+        const int32_t base_y = coord.y * static_cast<int32_t>(VG::kChunkSize);
+        const int32_t base_z = coord.z * static_cast<int32_t>(VG::kChunkSize);
+        for (uint32_t lz = 0; lz < VG::kChunkSize; ++lz) {
+            for (uint32_t ly = 0; ly < VG::kChunkSize; ++ly) {
+                for (uint32_t lx = 0; lx < VG::kChunkSize; ++lx) {
+                    const size_t li = lx + ly * VG::kChunkSize +
+                                      lz * VG::kChunkSize * VG::kChunkSize;
+                    const uint8_t v = chunk->cells[li];
+                    if (v == 0) continue;
+                    const macvoxel::Material m =
+                        doc->palette.GetMaterial(v);
+                    if (m.type != macvoxel::MaterialType::Emissive) continue;
+                    const float eff = macvoxel::EffectiveEmission(m);
+                    if (eff <= 0.0f) continue;
+                    const macvoxel::Color c = doc->palette.Get(v);
+                    GpuLight L;
+                    L.pos = simd::float4{
+                        static_cast<float>(base_x + static_cast<int32_t>(lx)),
+                        static_cast<float>(base_y + static_cast<int32_t>(ly)),
+                        static_cast<float>(base_z + static_cast<int32_t>(lz)),
+                        0.0f,
+                    };
+                    L.le = simd::float4{
+                        std::pow(c.r / 255.0f, 2.2f) * eff,
+                        std::pow(c.g / 255.0f, 2.2f) * eff,
+                        std::pow(c.b / 255.0f, 2.2f) * eff,
+                        0.0f,
+                    };
+                    lights.push_back(L);
+                }
+            }
+        }
+    }
+    _lightCount = static_cast<uint32_t>(lights.size());
+    if (lights.empty()) {
+        // One zero-init entry so the shader has a valid binding even
+        // when no emissives exist; light_count == 0 keeps it unread.
+        lights.resize(1);
+    }
+    _lightBuffer = [_device newBufferWithBytes:lights.data()
+                                        length:lights.size() * sizeof(GpuLight)
+                                       options:MTLResourceStorageModeShared];
+    _lightBuffer.label = @"PTLights";
+
     _cachedDocVersion = doc->version;
     _resourcesValid = YES;
 }
@@ -1033,7 +1229,8 @@ fragment float4 display_fragment(
         u.frame_seed = _sampleCount + 1u;  // distinct each accumulated sample
         u.max_bounces = static_cast<uint32_t>(
             macvoxel::CurrentRenderState().max_bounces);
-        u._pad4 = u._pad5 = 0u;
+        u.light_count = _lightCount;
+        u._pad5 = 0u;
 
         [enc setRenderPipelineState:_pathPipeline];
         [enc setCullMode:MTLCullModeNone];
@@ -1042,6 +1239,7 @@ fragment float4 display_fragment(
         [enc setFragmentBuffer:_poolBuffer offset:0 atIndex:2];
         [enc setFragmentBuffer:_paletteBuffer offset:0 atIndex:3];
         [enc setFragmentBuffer:_materialBuffer offset:0 atIndex:4];
+        [enc setFragmentBuffer:_lightBuffer offset:0 atIndex:5];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [enc endEncoding];
         ++_sampleCount;
