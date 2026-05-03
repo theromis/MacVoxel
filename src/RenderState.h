@@ -15,6 +15,15 @@ struct RenderState {
     // GPU time. Camera or doc changes invalidate and start the count over.
     int max_samples = 1024;
     bool aces_tonemap = true;  // off = gamma-2.2 only, for before/after compare
+    // Path-trace target resolution. When `match_window` is true, the
+    // tracer renders at the drawable's pixel size (the values below are
+    // ignored). Otherwise it renders at exactly (render_width,
+    // render_height) and the display pass scales to the drawable —
+    // which is exactly what the user wants for "render this scene at
+    // 3840 × 2160" regardless of window size.
+    bool resolution_match_window = true;
+    int render_width = 1920;
+    int render_height = 1080;
 };
 
 RenderState& CurrentRenderState();

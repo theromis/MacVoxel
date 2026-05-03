@@ -52,8 +52,11 @@ static_assert(sizeof(GpuMaterial) == 32, "GpuMaterial size mismatch");
 struct DisplayUniforms {
     uint32_t sample_count;
     uint32_t aces_tonemap;
-    uint32_t _pad0;
-    uint32_t _pad1;
+    // Fractions of the drawable that the rendered image occupies after
+    // aspect-preserving fit-to-window. Both 1.0 means stretch (or
+    // identity, when accum size matches drawable size).
+    float region_w;
+    float region_h;
 };
 
 NSString* const kShaderSource = @R"MSL(
@@ -77,10 +80,10 @@ struct PathUniforms {
 };
 
 struct DisplayUniforms {
-    uint sample_count;
-    uint aces_tonemap;
-    uint _pad0;
-    uint _pad1;
+    uint  sample_count;
+    uint  aces_tonemap;
+    float region_w;
+    float region_h;
 };
 
 struct Chunk { uint8_t cells[4096]; };
@@ -682,8 +685,18 @@ fragment float4 display_fragment(
     constant DisplayUniforms& u [[buffer(0)]],
     texture2d<float, access::sample> accum [[texture(0)]])
 {
-    constexpr sampler s(address::clamp_to_edge, filter::nearest);
-    float2 uv = in.ndc * 0.5 + 0.5;
+    // Linear so the display pass blends sensibly when the accumulator
+    // is rendered at a different resolution than the drawable
+    // (½× iteration mode upscales, 2× supersamples down).
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    // Map drawable NDC [-1, 1] to a centered region of size
+    // (region_w, region_h) — pixels outside it are letterbox / pillarbox
+    // bars. Inside, scale to [0, 1] for the accum sample.
+    float2 ndc = in.ndc;
+    if (abs(ndc.x) > u.region_w || abs(ndc.y) > u.region_h) {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+    float2 uv = float2(ndc.x / u.region_w, ndc.y / u.region_h) * 0.5 + 0.5;
     uv.y = 1.0 - uv.y;
     float4 v = accum.sample(s, uv);
     float n = max(1.0, float(u.sample_count));
@@ -946,8 +959,15 @@ fragment float4 display_fragment(
             document:(macvoxel::Document*)doc
               camera:(const macvoxel::Camera&)camera {
     if (doc == nullptr) return;
-    const CGSize size = view.drawableSize;
-    if (size.width <= 0.0 || size.height <= 0.0) return;
+    const CGSize drawable = view.drawableSize;
+    if (drawable.width <= 0.0 || drawable.height <= 0.0) return;
+
+    const macvoxel::RenderState& rs = macvoxel::CurrentRenderState();
+    CGSize size = drawable;
+    if (!rs.resolution_match_window) {
+        size.width  = std::max(1, std::min(rs.render_width,  16384));
+        size.height = std::max(1, std::min(rs.render_height, 16384));
+    }
 
     [self ensureAccumTextureForSize:size];
     if (!_resourcesValid || _cachedDocVersion != doc->version) {
@@ -1039,7 +1059,16 @@ fragment float4 display_fragment(
         du.sample_count = _sampleCount;
         du.aces_tonemap =
             macvoxel::CurrentRenderState().aces_tonemap ? 1u : 0u;
-        du._pad0 = du._pad1 = 0u;
+        // Aspect-preserving fit-to-window: render-aspect vs drawable-
+        // aspect tells us which dimension is the limiter. Whichever
+        // axis is over-large gets squeezed to a fraction of its NDC
+        // extent; the other stays at 1.0.
+        const float ar = static_cast<float>(_accumSize.width) /
+                         static_cast<float>(_accumSize.height);
+        const float ad = static_cast<float>(drawable.width) /
+                         static_cast<float>(drawable.height);
+        du.region_w = std::min(1.0f, ar / ad);
+        du.region_h = std::min(1.0f, ad / ar);
 
         [enc setRenderPipelineState:_displayPipeline];
         [enc setCullMode:MTLCullModeNone];
@@ -1104,7 +1133,9 @@ fragment float4 display_fragment(
     du.sample_count = _sampleCount;
     du.aces_tonemap =
         macvoxel::CurrentRenderState().aces_tonemap ? 1u : 0u;
-    du._pad0 = du._pad1 = 0u;
+    // Export target matches the accum exactly — no letterbox.
+    du.region_w = 1.0f;
+    du.region_h = 1.0f;
     [enc setRenderPipelineState:_displayPipeline];
     [enc setCullMode:MTLCullModeNone];
     [enc setFragmentBytes:&du length:sizeof(du) atIndex:0];

@@ -34,6 +34,16 @@ void DrawRenderPanel(const RenderStats& stats) {
     if (rs.path_traced) {
         ImGui::Checkbox("ACES tonemap", &rs.aces_tonemap);
         ImGui::SliderInt("Bounces", &rs.max_bounces, 1, 8);
+
+        ImGui::Checkbox("Match window resolution",
+                        &rs.resolution_match_window);
+        ImGui::BeginDisabled(rs.resolution_match_window);
+        int wh[2] = {rs.render_width, rs.render_height};
+        if (ImGui::DragInt2("Resolution", wh, 4.0f, 16, 16384)) {
+            rs.render_width  = std::max(16, std::min(wh[0], 16384));
+            rs.render_height = std::max(16, std::min(wh[1], 16384));
+        }
+        ImGui::EndDisabled();
         // Logarithmic feel — fine control at the low end where the user
         // is iterating, coarse at the upper end where they're committing
         // to a long render.
