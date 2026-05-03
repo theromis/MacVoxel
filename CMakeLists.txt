@@ -67,6 +67,7 @@ set(APP_SOURCES
     src/ui/ModelPanel.cpp
     src/ui/ToolPanel.cpp
     src/ui/PalettePanel.cpp
+    src/ui/RenderPanel.cpp
     src/ui/Fonts.cpp
     src/ui/Theme.cpp
 )

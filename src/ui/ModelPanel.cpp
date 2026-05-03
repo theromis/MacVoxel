@@ -2,7 +2,6 @@
 
 #include "Document.h"
 #include "Fonts.h"
-#include "RenderState.h"
 
 #include "imgui.h"
 
@@ -13,8 +12,8 @@ bool g_show_demo = false;
 
 }  // namespace
 
-void DrawModelPanel(const Document& doc, const RenderStats& stats) {
-    ImGui::SetNextWindowSize(ImVec2(320, 240), ImGuiCond_FirstUseEver);
+void DrawModelPanel(const Document& doc, const RenderStats&) {
+    ImGui::SetNextWindowSize(ImVec2(320, 200), ImGuiCond_FirstUseEver);
     ImGui::Begin("Model");
 
     ImGui::PushFont(Fonts().header);
@@ -48,28 +47,6 @@ void DrawModelPanel(const Document& doc, const RenderStats& stats) {
                                         static_cast<float>(bbox_cells)
                                   : 0.0f;
         ImGui::Text("filled  %zu  (%.3f%% of bbox)", filled, density);
-    }
-    ImGui::Unindent();
-    ImGui::Spacing();
-
-    ImGui::PushFont(Fonts().header);
-    ImGui::TextUnformatted("Render");
-    ImGui::PopFont();
-    ImGui::Indent();
-    {
-        RenderState& rs = CurrentRenderState();
-        ImGui::Checkbox("Path traced", &rs.path_traced);
-        if (rs.path_traced) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("samples %u", rs.sample_count);
-            ImGui::SliderInt("Bounces", &rs.max_bounces, 1, 8);
-        }
-        const ImGuiIO& io = ImGui::GetIO();
-        ImGui::Text("%.1f FPS  (%.2f ms/frame)", io.Framerate,
-                    io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f);
-        ImGui::Text("chunks  %u", stats.chunk_count);
-        const double mb = static_cast<double>(stats.gpu_bytes) / (1024.0 * 1024.0);
-        ImGui::Text("GPU mem %.1f MB", mb);
     }
     ImGui::Unindent();
 

@@ -24,6 +24,7 @@
 #include "ui/Fonts.h"
 #include "ui/ModelPanel.h"
 #include "ui/PalettePanel.h"
+#include "ui/RenderPanel.h"
 #include "ui/Theme.h"
 #include "ui/ToolPanel.h"
 
@@ -278,9 +279,16 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
             ImGui::DockBuilderSplitNode(left, ImGuiDir_Up, 0.30f,
                                         &left_top, &left_bottom);
 
+            // Right column: Model on top (read-only stats), Render
+            // below (interactive controls).
+            ImGuiID right_top, right_bottom;
+            ImGui::DockBuilderSplitNode(right, ImGuiDir_Up, 0.40f,
+                                        &right_top, &right_bottom);
+
             ImGui::DockBuilderDockWindow("Tool", left_top);
             ImGui::DockBuilderDockWindow("Palette", left_bottom);
-            ImGui::DockBuilderDockWindow("Model", right);
+            ImGui::DockBuilderDockWindow("Model", right_top);
+            ImGui::DockBuilderDockWindow("Render", right_bottom);
             ImGui::DockBuilderFinish(dock_id);
         }
     }
@@ -348,6 +356,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         stats.chunk_count = [_raycastRenderer lastChunkCount];
         stats.gpu_bytes = [_raycastRenderer lastGPUBytes];
         macvoxel::DrawModelPanel(*doc, stats);
+        macvoxel::DrawRenderPanel(stats);
         macvoxel::DrawToolPanel();
         macvoxel::DrawPalettePanel(*doc);
         [self drawSelectionOverlay];

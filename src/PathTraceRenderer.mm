@@ -954,8 +954,17 @@ fragment float4 display_fragment(
         return;
     }
 
+    // Stop contributing new samples once the cap is reached. The display
+    // pass below still runs against the existing accumulator, so the
+    // result keeps showing — we just stop burning GPU on noise that
+    // would no longer change the picture.
+    const int max_samples_cfg = std::max(
+        1, macvoxel::CurrentRenderState().max_samples);
+    const bool accumulate_more =
+        _sampleCount < static_cast<uint32_t>(max_samples_cfg);
+
     // ---------- Pass 1: accumulate one new sample into accum texture ----------
-    {
+    if (accumulate_more) {
         MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
         rpd.colorAttachments[0].texture = _accumTexture;
         rpd.colorAttachments[0].loadAction =
