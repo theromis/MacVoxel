@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <array>
 #include <climits>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -183,9 +182,8 @@ struct PlacedShape {
 //   model those.
 // - `_ior` is stored as the offset above 1.0, so e.g. 0.3 → IOR 1.3.
 // - `_alpha` (or `_trans` in some files) carries glass transparency.
-// - For emissive materials, `_flux` is an integer power-of-2 multiplier
-//   on `_emit` — fairly close to MagicaVoxel's UI behavior where each
-//   tick of "Power" roughly doubles light output.
+// - `_emit` (0..1) and `_flux` (0..4) round-trip directly. Effective
+//   brightness is `emit * 10^flux`, applied at upload time.
 Material ParseMatlDict(const std::map<std::string, std::string>& d) {
     Material m;
     auto get_float = [&](const char* key, float fallback) {
@@ -215,9 +213,10 @@ Material ParseMatlDict(const std::map<std::string, std::string>& d) {
     }
 
     if (m.type == MaterialType::Emissive) {
-        const float emit = get_float("_emit", m.emission);
+        m.emission = get_float("_emit", m.emission);
         const float flux = get_float("_flux", 0.0f);
-        m.emission = emit * std::pow(2.0f, flux);
+        const int power = 1 + static_cast<int>(flux);
+        m.emissionPower = std::clamp(power, 1, 5);
     }
     return m;
 }

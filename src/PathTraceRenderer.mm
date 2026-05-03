@@ -901,7 +901,7 @@ fragment float4 display_fragment(
         mats[i].type = static_cast<float>(static_cast<int>(m.type));
         mats[i].roughness = m.roughness;
         mats[i].metallic = m.metallic;
-        mats[i].emission = m.emission;
+        mats[i].emission = macvoxel::EffectiveEmission(m);
         mats[i].transparency = m.transparency;
         mats[i].ior = m.ior;
         mats[i]._pad0 = 0.0f;

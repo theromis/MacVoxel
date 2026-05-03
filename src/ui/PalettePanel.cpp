@@ -127,7 +127,14 @@ void DrawPalettePanel(Document& doc) {
     }
     if (ImGui::SliderFloat("Roughness",    &m.roughness,    0.0f,  1.0f)) dirty = true;
     if (ImGui::SliderFloat("Metallic",     &m.metallic,     0.0f,  1.0f)) dirty = true;
-    if (ImGui::SliderFloat("Emission",     &m.emission,     0.0f, 16.0f)) dirty = true;
+    {
+        float emit_pct = m.emission * 100.0f;
+        if (ImGui::SliderFloat("Emission", &emit_pct, 0.0f, 100.0f, "%.0f")) {
+            m.emission = emit_pct * 0.01f;
+            dirty = true;
+        }
+    }
+    if (ImGui::SliderInt("Power",          &m.emissionPower, 1, 5)) dirty = true;
     if (ImGui::SliderFloat("Transparency", &m.transparency, 0.0f,  1.0f)) dirty = true;
     if (ImGui::SliderFloat("IoR",          &m.ior,          1.0f,  3.0f)) dirty = true;
     if (dirty) {
