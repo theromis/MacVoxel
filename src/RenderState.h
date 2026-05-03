@@ -14,6 +14,7 @@ struct RenderState {
     // new samples — which makes "looks the same any longer" stop costing
     // GPU time. Camera or doc changes invalidate and start the count over.
     int max_samples = 1024;
+    bool aces_tonemap = true;  // off = gamma-2.2 only, for before/after compare
 };
 
 RenderState& CurrentRenderState();

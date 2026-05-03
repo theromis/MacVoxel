@@ -23,6 +23,7 @@ void DrawRenderPanel(const RenderStats& stats) {
     ImGui::Indent();
     ImGui::Checkbox("Path traced", &rs.path_traced);
     if (rs.path_traced) {
+        ImGui::Checkbox("ACES tonemap", &rs.aces_tonemap);
         ImGui::SliderInt("Bounces", &rs.max_bounces, 1, 8);
         // Logarithmic feel — fine control at the low end where the user
         // is iterating, coarse at the upper end where they're committing

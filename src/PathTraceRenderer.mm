@@ -48,9 +48,9 @@ static_assert(sizeof(GpuMaterial) == 32, "GpuMaterial size mismatch");
 
 struct DisplayUniforms {
     uint32_t sample_count;
+    uint32_t aces_tonemap;
     uint32_t _pad0;
     uint32_t _pad1;
-    uint32_t _pad2;
 };
 
 NSString* const kShaderSource = @R"MSL(
@@ -75,9 +75,9 @@ struct PathUniforms {
 
 struct DisplayUniforms {
     uint sample_count;
+    uint aces_tonemap;
     uint _pad0;
     uint _pad1;
-    uint _pad2;
 };
 
 struct Chunk { uint8_t cells[4096]; };
@@ -669,6 +669,11 @@ fragment float4 pt_fragment(
     return float4(radiance, 1.0);
 }
 
+// ACES filmic tonemap (Narkowicz 2015 fit) — squeezes the linear HDR
+// accumulator into [0, 1] with a soft shoulder so bright emissives roll
+// off instead of clipping to white. Followed by a proper linear → sRGB
+// encode (gamma 2.2 is a rough approximation; the piecewise sRGB curve
+// is what the display actually expects).
 fragment float4 display_fragment(
     VertOut in [[stage_in]],
     constant DisplayUniforms& u [[buffer(0)]],
@@ -679,9 +684,18 @@ fragment float4 display_fragment(
     uv.y = 1.0 - uv.y;
     float4 v = accum.sample(s, uv);
     float n = max(1.0, float(u.sample_count));
-    float3 c = v.rgb / n;
-    // Simple gamma-ish tone (renderer is linear; display assumes sRGB-ish).
-    c = pow(max(c, 0.0), 1.0 / 2.2);
+    float3 c = max(v.rgb / n, 0.0);
+
+    if (u.aces_tonemap != 0u) {
+        const float a = 2.51, b = 0.03, c1 = 2.43, d = 0.59, e = 0.14;
+        c = saturate((c * (a * c + b)) / (c * (c1 * c + d) + e));
+        c = select(12.92 * c,
+                   1.055 * pow(c, 1.0 / 2.4) - 0.055,
+                   c > 0.0031308);
+    } else {
+        // Gamma-2.2 fallback for before/after comparison.
+        c = pow(c, 1.0 / 2.2);
+    }
     return float4(c, 1.0);
 }
 )MSL";
@@ -1018,7 +1032,9 @@ fragment float4 display_fragment(
 
         DisplayUniforms du;
         du.sample_count = _sampleCount;
-        du._pad0 = du._pad1 = du._pad2 = 0u;
+        du.aces_tonemap =
+            macvoxel::CurrentRenderState().aces_tonemap ? 1u : 0u;
+        du._pad0 = du._pad1 = 0u;
 
         [enc setRenderPipelineState:_displayPipeline];
         [enc setCullMode:MTLCullModeNone];
