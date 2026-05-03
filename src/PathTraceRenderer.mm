@@ -968,14 +968,16 @@ fragment float4 display_fragment(
         return;
     }
 
-    // Stop contributing new samples once the cap is reached. The display
-    // pass below still runs against the existing accumulator, so the
-    // result keeps showing — we just stop burning GPU on noise that
-    // would no longer change the picture.
+    // Stop contributing new samples once the cap is reached, or when
+    // the app isn't active — there's no point burning GPU on a render
+    // the user can't see (and on battery it matters). Display pass
+    // below still runs so the image keeps showing the moment focus
+    // returns.
     const int max_samples_cfg = std::max(
         1, macvoxel::CurrentRenderState().max_samples);
     const bool accumulate_more =
-        _sampleCount < static_cast<uint32_t>(max_samples_cfg);
+        _sampleCount < static_cast<uint32_t>(max_samples_cfg) &&
+        [NSApp isActive];
 
     // ---------- Pass 1: accumulate one new sample into accum texture ----------
     if (accumulate_more) {
