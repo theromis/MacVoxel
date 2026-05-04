@@ -438,27 +438,41 @@ DDAHit dda_traverse(float3 ray_origin,
     return h;
 }
 
-// Next-event estimation for a Lambertian shading point. Picks a random
-// emissive voxel uniformly, samples a uniform point on one of its three
-// faces oriented toward the shading point, traces a shadow ray, and
-// returns the unweighted radiance contribution (caller multiplies by
-// throughput). Returns the contribution for f = albedo / π — for
-// material-mixed bounces (Metal diffuse fallback, Glass diffuse
-// fallback) the caller has already conditioned on that branch, so this
-// is the BRDF the path actually took.
-//
-// pdf_area = 1 / (N_lights * 3 * face_area), with face_area = 1.
-// Estimator: f * Le * cos_x * cos_y / (d² * pdf_area).
-float3 sample_nee_diffuse(float3 x,
+// Result of importance-sampling a single emissive voxel for NEE.
+// Same sampling strategy whether the receiving surface is diffuse or
+// glossy; the BRDF evaluation differs between callers.
+struct NEELight {
+    bool   visible;
+    float3 omega_i;   // unit direction from x toward sampled light point
+    float3 le;        // emitter radiance (linear, premultiplied)
+    float  cos_x;     // dot(n_x, omega_i)
+    float  cos_y;     // dot(n_y, -omega_i)
+    float  dist2;
+    float  pdf_area;  // joint area pdf over the chosen face / light / N
+};
+
+// Pick a uniformly-random emissive voxel, pick one of the three faces
+// oriented toward x, sample uniformly on that face, and trace a shadow
+// ray to confirm the chosen light is the first occluder. Returns
+// `visible = false` for back-facing or occluded picks; callers should
+// short-circuit accordingly. pdf_area = 1 / (N_lights * 3 * 1.0).
+NEELight nee_sample_light(float3 x,
                           float3 n_x,
-                          float3 albedo,
                           constant PathUniforms& u,
                           device const GpuLight* lights,
                           device const uint* coarse_grid,
                           device const Chunk* chunk_pool,
                           thread uint& rng)
 {
-    if (u.light_count == 0u) return float3(0.0);
+    NEELight r;
+    r.visible = false;
+    r.omega_i = float3(0.0);
+    r.le = float3(0.0);
+    r.cos_x = 0.0;
+    r.cos_y = 0.0;
+    r.dist2 = 0.0;
+    r.pdf_area = 0.0;
+    if (u.light_count == 0u) return r;
 
     uint li = uint(rand1(rng) * float(u.light_count));
     if (li >= u.light_count) li = u.light_count - 1u;
@@ -467,10 +481,8 @@ float3 sample_nee_diffuse(float3 x,
     float3 center = corner + 0.5;
     float3 to_x = x - center;
 
-    // Choose one of the three faces oriented toward the shading point —
-    // a face's outward normal sign matches that of (x - center) along
-    // its axis. The other 3 faces are on the back side of the voxel and
-    // self-occluded from x.
+    // Pick one of the 3 faces oriented toward x (other 3 are
+    // self-occluded from this side of the light).
     int axis = int(rand1(rng) * 3.0);
     if (axis > 2) axis = 2;
     float coord_axis = (axis == 0) ? to_x.x : (axis == 1) ? to_x.y : to_x.z;
@@ -498,29 +510,74 @@ float3 sample_nee_diffuse(float3 x,
     }
 
     float3 d = y - x;
-    float dist2 = dot(d, d);
-    if (dist2 < 1e-8) return float3(0.0);
-    float dist = sqrt(dist2);
-    float3 omega = d / dist;
+    r.dist2 = dot(d, d);
+    if (r.dist2 < 1e-8) return r;
+    float dist = sqrt(r.dist2);
+    r.omega_i = d / dist;
+    r.cos_x = dot(n_x, r.omega_i);
+    r.cos_y = dot(n_y, -r.omega_i);
+    if (r.cos_x <= 0.0 || r.cos_y <= 0.0) return r;
 
-    float cos_x = dot(n_x, omega);
-    float cos_y = dot(n_y, -omega);
-    if (cos_x <= 0.0 || cos_y <= 0.0) return float3(0.0);
-
-    float3 shadow_origin = x + n_x * 1e-3;
-    DDAHit s = dda_traverse(shadow_origin, omega, u, coarse_grid,
-                            chunk_pool, 0u);
-    // Shadow ray must reach the chosen light voxel as the first hit.
-    // L.pos.xyz already holds the integer grid corner as exact floats,
-    // so int3() truncation matches the DDA's floor() on the cell coord.
+    DDAHit s = dda_traverse(x + n_x * 1e-3, r.omega_i, u,
+                            coarse_grid, chunk_pool, 0u);
     int3 light_cell = int3(L.pos.xyz);
-    if (!s.hit) return float3(0.0);
-    if (any(s.cell_coord != light_cell)) return float3(0.0);
+    if (!s.hit) return r;
+    if (any(s.cell_coord != light_cell)) return r;
 
+    r.visible = true;
+    r.le = L.le.xyz;
+    r.pdf_area = 1.0 / (float(u.light_count) * 3.0);
+    return r;
+}
+
+// Lambertian f = albedo / π. Estimator: f · Le · cos_x · cos_y / (d² · pdf).
+float3 nee_eval_diffuse(NEELight L, float3 albedo) {
+    if (!L.visible) return float3(0.0);
     const float kInvPi = 0.31830988618;
-    float pdf_area = 1.0 / (float(u.light_count) * 3.0);
-    return (albedo * kInvPi) * L.le.xyz * cos_x * cos_y /
-           (dist2 * pdf_area);
+    return (albedo * kInvPi) * L.le * L.cos_x * L.cos_y /
+           (L.dist2 * L.pdf_area);
+}
+
+// GGX microfacet specular BRDF, Cook-Torrance form, with Smith-G2
+// separable masking-shadowing and Schlick Fresnel against the half-vector.
+// F0 is the specular reflectance at normal incidence:
+//   - Metal: F0 = albedo (and Fresnel rolls to white at grazing).
+//   - Glass-reflect / TIR: F0 = ((1 - ior) / (1 + ior))^2.
+// The cos_x at the shading point is built into the BRDF's 1/cos_i term,
+// so the cos_x factor in the rendering-equation estimator cancels — we
+// return only the surviving ratio.
+float3 nee_eval_specular_ggx(NEELight L, float3 omega_o, float3 n_x,
+                             float3 F0, float roughness)
+{
+    if (!L.visible) return float3(0.0);
+    float cos_o = dot(n_x, omega_o);
+    if (cos_o <= 0.0) return float3(0.0);
+
+    float3 h = normalize(L.omega_i + omega_o);
+    float h_dot_n = max(0.0, dot(h, n_x));
+    float h_dot_o = max(0.0, dot(h, omega_o));
+
+    float alpha = max(roughness * roughness, 1e-4);
+    float a2 = alpha * alpha;
+
+    float h_n_sq = h_dot_n * h_dot_n;
+    float denom = h_n_sq * (a2 - 1.0) + 1.0;
+    float D = a2 / (3.14159265 * denom * denom);
+
+    // Smith G2 separable.
+    float G1_o = 2.0 * cos_o /
+                 (cos_o + sqrt(a2 + (1.0 - a2) * cos_o * cos_o));
+    float G1_i = 2.0 * L.cos_x /
+                 (L.cos_x + sqrt(a2 + (1.0 - a2) * L.cos_x * L.cos_x));
+    float G = G1_o * G1_i;
+
+    float fpow = pow(max(0.0, 1.0 - h_dot_o), 5.0);
+    float3 F = F0 + (float3(1.0) - F0) * fpow;
+
+    // f · cos_x = D · F · G / (4 cos_o), with the cos_x in the estimator
+    // cancelling 1/cos_i from the BRDF normalisation.
+    float3 brdf_cos_i = (F * D * G) / max(4.0 * cos_o, 1e-8);
+    return brdf_cos_i * L.le * L.cos_y / (L.dist2 * L.pdf_area);
 }
 
 fragment float4 pt_fragment(
@@ -674,10 +731,13 @@ fragment float4 pt_fragment(
                         // termination case for consistency.
                         break;
                     }
-                    radiance += throughput *
-                        sample_nee_diffuse(g_point, kGroundNormal,
-                                           kGroundAlbedo, u, lights,
-                                           coarse_grid, chunk_pool, rng);
+                    {
+                        NEELight nee = nee_sample_light(
+                            g_point, kGroundNormal, u, lights,
+                            coarse_grid, chunk_pool, rng);
+                        radiance += throughput *
+                            nee_eval_diffuse(nee, kGroundAlbedo);
+                    }
                     ray_origin = g_point + kGroundNormal * 1e-3;
                     ray_dir = cosine_hemi(kGroundNormal, rng);
                     throughput *= kGroundAlbedo;
@@ -724,19 +784,28 @@ fragment float4 pt_fragment(
             // instead of the lopsided one you get from blending toward
             // a normal-hemisphere sample.
             ray_origin = h.point + normal * 1e-3;
-            if (rand1(rng) < clamp(mat.metallic, 0.0, 1.0)) {
-                float r = clamp(mat.roughness, 0.0, 1.0);
-                float3 m = ggx_sample_vndf(normal, -ray_dir, r, rng);
-                ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
-                last_was_specular = true;
-            } else {
-                // Took the diffuse branch — NEE on Lambertian f.
-                radiance += throughput *
-                    sample_nee_diffuse(h.point, normal, albedo, u, lights,
-                                       coarse_grid, chunk_pool, rng);
-                ray_dir = cosine_hemi(normal, rng);
-                last_was_specular = false;
+            {
+                NEELight nee = nee_sample_light(h.point, normal, u, lights,
+                                                coarse_grid, chunk_pool,
+                                                rng);
+                if (rand1(rng) < clamp(mat.metallic, 0.0, 1.0)) {
+                    float r = clamp(mat.roughness, 0.0, 1.0);
+                    // Metal F0 = albedo. NEE evaluates GGX·F0 directly
+                    // toward the chosen light — that's how reflections
+                    // of small bright sources stay visible at low
+                    // roughness without depending on the GGX sampler
+                    // randomly aiming at them.
+                    radiance += throughput *
+                        nee_eval_specular_ggx(nee, -ray_dir, normal,
+                                              albedo, r);
+                    float3 m = ggx_sample_vndf(normal, -ray_dir, r, rng);
+                    ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
+                } else {
+                    radiance += throughput * nee_eval_diffuse(nee, albedo);
+                    ray_dir = cosine_hemi(normal, rng);
+                }
             }
+            last_was_specular = false;
             throughput *= albedo;
         } else if (mat_type == kMatGlass) {
             // Microfacet glass: sample a visible microfacet normal `m`
@@ -760,31 +829,57 @@ fragment float4 pt_fragment(
             float r0 = (1.0 - mat.ior) / (1.0 + mat.ior);
             r0 *= r0;
             float fresnel = r0 + (1.0 - r0) * pow(1.0 - cos_i, 5.0);
+            float3 f0 = float3(r0);
             if (rand1(rng) < fresnel) {
+                // Specular reflection off the glass surface — without
+                // NEE here, reflections of small lights in clear glass
+                // (the giveaway look of "this is glass, not chalk") are
+                // statistically invisible at the GGX lobe widths we use.
+                NEELight nee = nee_sample_light(h.point, normal, u, lights,
+                                                coarse_grid, chunk_pool,
+                                                rng);
+                radiance += throughput *
+                    nee_eval_specular_ggx(nee, -ray_dir, normal, f0, rough);
                 ray_origin = h.point + normal * 1e-3;
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
-                last_was_specular = true;
+                last_was_specular = false;
             } else if (rand1(rng) < clamp(mat.transparency, 0.0, 1.0)) {
                 float eta = 1.0 / mat.ior;  // air -> glass
                 float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
                 if (k < 0.0) {
-                    // TIR off this microfacet — reflect, stay in air.
+                    // TIR off this microfacet — same specular geometry
+                    // as the Fresnel-reflect branch above, so NEE here
+                    // for the same reason.
+                    NEELight nee = nee_sample_light(
+                        h.point, normal, u, lights,
+                        coarse_grid, chunk_pool, rng);
+                    radiance += throughput *
+                        nee_eval_specular_ggx(nee, -ray_dir, normal,
+                                              f0, rough);
                     ray_origin = h.point + normal * 1e-3;
                     ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
+                    last_was_specular = false;
                 } else {
+                    // Refraction into the medium — transmission, not a
+                    // shading point for direct lighting; keep the
+                    // specular flag so light seen *through* the glass
+                    // still counts via the BSDF-sampled hit.
                     ray_origin = h.point - normal * 1e-3;
                     ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
                     medium_mat = h.cell_val;
                     medium_entry = h.point;
                     medium_albedo = albedo;
+                    last_was_specular = true;
                 }
-                last_was_specular = true;
             } else {
                 // Diffuse fallback — translucent / milky glass.
                 ray_origin = h.point + normal * 1e-3;
-                radiance += throughput *
-                    sample_nee_diffuse(h.point, normal, albedo, u, lights,
-                                       coarse_grid, chunk_pool, rng);
+                {
+                    NEELight nee = nee_sample_light(
+                        h.point, normal, u, lights,
+                        coarse_grid, chunk_pool, rng);
+                    radiance += throughput * nee_eval_diffuse(nee, albedo);
+                }
                 ray_dir = cosine_hemi(normal, rng);
                 throughput *= albedo;
                 last_was_specular = false;
@@ -792,9 +887,12 @@ fragment float4 pt_fragment(
         } else {
             // Diffuse default.
             ray_origin = h.point + normal * 1e-3;
-            radiance += throughput *
-                sample_nee_diffuse(h.point, normal, albedo, u, lights,
-                                   coarse_grid, chunk_pool, rng);
+            {
+                NEELight nee = nee_sample_light(h.point, normal, u, lights,
+                                                coarse_grid, chunk_pool,
+                                                rng);
+                radiance += throughput * nee_eval_diffuse(nee, albedo);
+            }
             ray_dir = cosine_hemi(normal, rng);
             throughput *= albedo;
             last_was_specular = false;
