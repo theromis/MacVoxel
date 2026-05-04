@@ -963,16 +963,15 @@ fragment float4 pt_fragment(
                         ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
                         medium_mat = h.cell_val;
                         medium_entry = h.point;
-                        // Absorption mode caps the "clear" end at 0.9
+                        // Absorption mode caps the "clear" end at 0.8
                         // rather than full white so even nominally-
-                        // clear glass keeps a small per-voxel Beer-
-                        // Lambert factor. That attenuates the back-
-                        // face Fresnel ghost reflection (P11.5) over
-                        // its two-medium-traversal path without
-                        // visibly tinting through-glass views of the
-                        // scene at typical slab thicknesses.
+                        // clear glass keeps a per-voxel Beer-Lambert
+                        // factor. That attenuates the back-face
+                        // Fresnel ghost reflection (P11.5) over its
+                        // two-medium-traversal path so the ghost reads
+                        // as a clearly-fainter copy of the primary.
                         medium_albedo = (u.glass_mode == 1u)
-                            ? mix(albedo, float3(0.9), trans)
+                            ? mix(albedo, float3(0.8), trans)
                             : albedo;
                         prev_is_delta = true;
                     }
