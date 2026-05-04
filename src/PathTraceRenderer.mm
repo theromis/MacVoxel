@@ -856,6 +856,10 @@ fragment float4 pt_fragment(
                 float3 m = ggx_sample_vndf(normal, omega_o, r, rng);
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
                 prev_bsdf_pdf = pdf_ggx_vndf(normal, omega_o, ray_dir, r);
+                // Below the same low-roughness threshold used for
+                // glass-Fresnel-reflect, treat as delta — see that
+                // branch for context.
+                prev_is_delta = (r < 0.05) || (prev_bsdf_pdf <= 0.0);
             } else {
                 {
                     NEELight nee = nee_sample_light(
@@ -866,8 +870,8 @@ fragment float4 pt_fragment(
                 }
                 ray_dir = cosine_hemi(normal, rng);
                 prev_bsdf_pdf = pdf_lambert(normal, ray_dir);
+                prev_is_delta = false;
             }
-            prev_is_delta = false;
             throughput *= albedo;
         } else if (mat_type == kMatGlass) {
             // Microfacet glass: sample a visible microfacet normal `m`
@@ -913,7 +917,13 @@ fragment float4 pt_fragment(
                 ray_origin = h.point + normal * 1e-3;
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
                 prev_bsdf_pdf = pdf_ggx_vndf(normal, omega_o, ray_dir, rough);
-                prev_is_delta = false;
+                // At very low roughness the GGX lobe is effectively
+                // delta — MIS weighting around the BSDF arrival has
+                // produced visible black-hole artifacts where mirror
+                // reflections of bright sources should appear. Treat
+                // those as delta so the next emitter hit gets full
+                // BSDF weight; broader lobes still use MIS normally.
+                prev_is_delta = (rough < 0.05) || (prev_bsdf_pdf <= 0.0);
             } else {
                 // Decide whether the transmit branch refracts (always in
                 // Absorption mode; with probability = transparency in
@@ -938,7 +948,8 @@ fragment float4 pt_fragment(
                         ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
                         prev_bsdf_pdf = pdf_ggx_vndf(normal, omega_o,
                                                      ray_dir, rough);
-                        prev_is_delta = false;
+                        prev_is_delta = (rough < 0.05) ||
+                                        (prev_bsdf_pdf <= 0.0);
                     } else {
                         // Refraction into the medium — delta-like; no
                         // NEE. The next emitter arrival (after exit)
