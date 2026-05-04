@@ -64,6 +64,37 @@ file change).
 `-Wall -Wextra -Wpedantic -Werror` is on for project sources. ImGui is built
 with `-Wno-everything`. Don't suppress warnings to silence; fix them.
 
+## Headless rendering (use this!)
+
+The same binary has a `render` subcommand that runs the path tracer
+without spawning a GUI — write a PNG, exit. Use it for any "did the
+renderer change behave the way I think" question, instead of asking
+Paul to eyeball the running app.
+
+```sh
+build/MacVoxel.app/Contents/MacOS/MacVoxel render \
+  --input  test/vox/teapot.vox \
+  --output /tmp/check.png \
+  --width 512 --height 512 \
+  --samples 256 --bounces 5 --seed 1
+```
+
+Then `Read /tmp/check.png` to actually see the result.
+
+- `--samples` is per-pixel; 64–256 is usually enough to read shape and
+  shading, 1024+ if you need to evaluate noise.
+- `--seed` makes the output byte-deterministic for fixed inputs — diff
+  two renders with `md5` to confirm a change is/isn't a no-op.
+- `--no-aces` swaps the ACES tonemap for a plain gamma-2.2 curve.
+- The camera is fit-to-bounds (matching the GUI's load-time framing);
+  there are no yaw/pitch/distance flags. If a scene has interior
+  detail (sealed boxes, etc.) the headless view won't see it.
+
+Sample `.vox` files live in `test/vox/`. Useful ones:
+`teapot.vox` (clean diffuse), `_metal mat test.vox` (metal + emissive),
+`_light test.vox` (mixed diffuse/metal/glass surfaces with small
+emitters — good for spotting NEE / MIS issues).
+
 ## Conventions Paul has set
 
 These came up repeatedly during development and are worth not relitigating:
