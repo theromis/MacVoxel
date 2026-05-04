@@ -438,27 +438,85 @@ DDAHit dda_traverse(float3 ray_origin,
     return h;
 }
 
-// Next-event estimation for a Lambertian shading point. Picks a random
-// emissive voxel uniformly, samples a uniform point on one of its three
-// faces oriented toward the shading point, traces a shadow ray, and
-// returns the unweighted radiance contribution (caller multiplies by
-// throughput). Returns the contribution for f = albedo / π — for
-// material-mixed bounces (Metal diffuse fallback, Glass diffuse
-// fallback) the caller has already conditioned on that branch, so this
-// is the BRDF the path actually took.
-//
-// pdf_area = 1 / (N_lights * 3 * face_area), with face_area = 1.
-// Estimator: f * Le * cos_x * cos_y / (d² * pdf_area).
-float3 sample_nee_diffuse(float3 x,
+// MIS power heuristic (β=2). Returns the weight for the strategy whose
+// pdf is `p`, given the other strategy's pdf `q`. Both pdfs must be in
+// the same measure (we use solid angle).
+float mis_power(float p, float q) {
+    float p2 = p * p;
+    float q2 = q * q;
+    float s  = p2 + q2;
+    return s > 0.0 ? p2 / s : 0.0;
+}
+
+// Lambertian solid-angle pdf at omega given surface normal n.
+float pdf_lambert(float3 n, float3 omega) {
+    return max(0.0, dot(n, omega)) * 0.31830988618;
+}
+
+// GGX VNDF solid-angle pdf for omega_i given outgoing omega_o and
+// normal n. Heitz 2018: pdf_omega_i = D(h) · G1(omega_o) / (4·cos_o).
+float pdf_ggx_vndf(float3 n, float3 omega_o, float3 omega_i, float roughness) {
+    float cos_o = dot(n, omega_o);
+    float cos_i = dot(n, omega_i);
+    if (cos_o <= 0.0 || cos_i <= 0.0) return 0.0;
+    float3 h = normalize(omega_o + omega_i);
+    float h_dot_n = max(0.0, dot(h, n));
+    float alpha = max(roughness * roughness, 1e-4);
+    float a2 = alpha * alpha;
+    float denom = h_dot_n * h_dot_n * (a2 - 1.0) + 1.0;
+    float D = a2 / (3.14159265 * denom * denom);
+    float G1_o = 2.0 * cos_o /
+                 (cos_o + sqrt(a2 + (1.0 - a2) * cos_o * cos_o));
+    return D * G1_o / max(4.0 * cos_o, 1e-8);
+}
+
+// Solid-angle pdf that NEE would have given for sampling a direction
+// arriving at an emissive voxel hit, used as the "other" pdf when
+// MIS-weighting a BSDF-sampled emitter arrival.
+float nee_pdf_solid_for_arrival(constant PathUniforms& u,
+                                float3 omega,
+                                float3 n_y,
+                                float dist2)
+{
+    if (u.light_count == 0u) return 0.0;
+    float cos_y = dot(n_y, -omega);
+    if (cos_y <= 0.0) return 0.0;
+    float pdf_area = 1.0 / (float(u.light_count) * 3.0);
+    return pdf_area * dist2 / cos_y;
+}
+
+// Result of importance-sampling a single emissive voxel for NEE.
+// pdf_solid is in solid-angle measure so it slots directly into MIS.
+struct NEELight {
+    bool   visible;
+    float3 omega_i;      // unit dir from x toward sampled light point
+    float3 le;           // emitter linear radiance (premultiplied)
+    float  cos_x;        // dot(n_x, omega_i)
+    float  cos_y;        // dot(n_y, -omega_i)
+    float  dist2;
+    float  pdf_solid;    // pdf_area · d² / cos_y
+};
+
+// Pick a uniformly-random emissive voxel, pick one of the three faces
+// oriented toward x, sample uniformly on that face, trace a shadow ray.
+// pdf_area = 1 / (N_lights · 3 · 1.0); pdf_solid follows.
+NEELight nee_sample_light(float3 x,
                           float3 n_x,
-                          float3 albedo,
                           constant PathUniforms& u,
                           device const GpuLight* lights,
                           device const uint* coarse_grid,
                           device const Chunk* chunk_pool,
                           thread uint& rng)
 {
-    if (u.light_count == 0u) return float3(0.0);
+    NEELight r;
+    r.visible = false;
+    r.omega_i = float3(0.0);
+    r.le = float3(0.0);
+    r.cos_x = 0.0;
+    r.cos_y = 0.0;
+    r.dist2 = 0.0;
+    r.pdf_solid = 0.0;
+    if (u.light_count == 0u) return r;
 
     uint li = uint(rand1(rng) * float(u.light_count));
     if (li >= u.light_count) li = u.light_count - 1u;
@@ -467,10 +525,6 @@ float3 sample_nee_diffuse(float3 x,
     float3 center = corner + 0.5;
     float3 to_x = x - center;
 
-    // Choose one of the three faces oriented toward the shading point —
-    // a face's outward normal sign matches that of (x - center) along
-    // its axis. The other 3 faces are on the back side of the voxel and
-    // self-occluded from x.
     int axis = int(rand1(rng) * 3.0);
     if (axis > 2) axis = 2;
     float coord_axis = (axis == 0) ? to_x.x : (axis == 1) ? to_x.y : to_x.z;
@@ -483,44 +537,89 @@ float3 sample_nee_diffuse(float3 x,
     if (axis == 0) {
         n_y.x = face_sign;
         y.x += face_sign > 0.0 ? 1.0 : 0.0;
-        y.y += u1;
-        y.z += u2;
+        y.y += u1; y.z += u2;
     } else if (axis == 1) {
         n_y.y = face_sign;
         y.y += face_sign > 0.0 ? 1.0 : 0.0;
-        y.x += u1;
-        y.z += u2;
+        y.x += u1; y.z += u2;
     } else {
         n_y.z = face_sign;
         y.z += face_sign > 0.0 ? 1.0 : 0.0;
-        y.x += u1;
-        y.y += u2;
+        y.x += u1; y.y += u2;
     }
 
     float3 d = y - x;
     float dist2 = dot(d, d);
-    if (dist2 < 1e-8) return float3(0.0);
+    if (dist2 < 1e-8) return r;
     float dist = sqrt(dist2);
     float3 omega = d / dist;
-
     float cos_x = dot(n_x, omega);
     float cos_y = dot(n_y, -omega);
-    if (cos_x <= 0.0 || cos_y <= 0.0) return float3(0.0);
+    if (cos_x <= 0.0 || cos_y <= 0.0) return r;
 
-    float3 shadow_origin = x + n_x * 1e-3;
-    DDAHit s = dda_traverse(shadow_origin, omega, u, coarse_grid,
-                            chunk_pool, 0u);
-    // Shadow ray must reach the chosen light voxel as the first hit.
-    // L.pos.xyz already holds the integer grid corner as exact floats,
-    // so int3() truncation matches the DDA's floor() on the cell coord.
+    DDAHit s = dda_traverse(x + n_x * 1e-3, omega, u,
+                            coarse_grid, chunk_pool, 0u);
     int3 light_cell = int3(L.pos.xyz);
-    if (!s.hit) return float3(0.0);
-    if (any(s.cell_coord != light_cell)) return float3(0.0);
+    if (!s.hit) return r;
+    if (any(s.cell_coord != light_cell)) return r;
 
-    const float kInvPi = 0.31830988618;
+    r.visible   = true;
+    r.omega_i   = omega;
+    r.le        = L.le.xyz;
+    r.cos_x     = cos_x;
+    r.cos_y     = cos_y;
+    r.dist2     = dist2;
     float pdf_area = 1.0 / (float(u.light_count) * 3.0);
-    return (albedo * kInvPi) * L.le.xyz * cos_x * cos_y /
-           (dist2 * pdf_area);
+    r.pdf_solid = pdf_area * dist2 / cos_y;
+    return r;
+}
+
+// MIS-weighted NEE for a Lambertian shading point. Caller multiplies by
+// throughput. f = albedo / π. Estimator: w · f · Le · cos_x / pdf_solid.
+float3 nee_diffuse_mis(NEELight L, float3 albedo, float3 n_x) {
+    if (!L.visible) return float3(0.0);
+    float pdf_bsdf = pdf_lambert(n_x, L.omega_i);
+    float w = mis_power(L.pdf_solid, pdf_bsdf);
+    const float kInvPi = 0.31830988618;
+    return (albedo * kInvPi) * L.le * L.cos_x * w / L.pdf_solid;
+}
+
+// MIS-weighted NEE for a GGX-specular shading point (Cook-Torrance with
+// Schlick Fresnel). F0 is the normal-incidence reflectance — albedo for
+// metals; ((1-ior)/(1+ior))² for glass-reflect / glass-TIR. The cos_x
+// factor in the estimator cancels the 1/cos_i in the BRDF normalisation.
+float3 nee_ggx_mis(NEELight L, float3 omega_o, float3 n_x,
+                   float3 F0, float roughness)
+{
+    if (!L.visible) return float3(0.0);
+    float cos_o = dot(n_x, omega_o);
+    if (cos_o <= 0.0) return float3(0.0);
+
+    float3 h = normalize(L.omega_i + omega_o);
+    float h_dot_n = max(0.0, dot(h, n_x));
+    float h_dot_o = max(0.0, dot(h, omega_o));
+
+    float alpha = max(roughness * roughness, 1e-4);
+    float a2 = alpha * alpha;
+
+    float denom = h_dot_n * h_dot_n * (a2 - 1.0) + 1.0;
+    float D = a2 / (3.14159265 * denom * denom);
+
+    float G1_o = 2.0 * cos_o /
+                 (cos_o + sqrt(a2 + (1.0 - a2) * cos_o * cos_o));
+    float G1_i = 2.0 * L.cos_x /
+                 (L.cos_x + sqrt(a2 + (1.0 - a2) * L.cos_x * L.cos_x));
+    float G = G1_o * G1_i;
+
+    float fpow = pow(max(0.0, 1.0 - h_dot_o), 5.0);
+    float3 F = F0 + (float3(1.0) - F0) * fpow;
+
+    // f · cos_x = D · F · G / (4 cos_o), with the cos_x in the estimator
+    // cancelling 1/cos_i from the BRDF normalisation.
+    float3 brdf_cos_i = (F * D * G) / max(4.0 * cos_o, 1e-8);
+    float pdf_bsdf = D * G1_o / max(4.0 * cos_o, 1e-8);
+    float w = mis_power(L.pdf_solid, pdf_bsdf);
+    return brdf_cos_i * L.le * w / L.pdf_solid;
 }
 
 fragment float4 pt_fragment(
@@ -563,14 +662,16 @@ fragment float4 pt_fragment(
     float3 throughput = float3(1.0);
     float3 radiance   = float3(0.0);
 
-    // Track whether the path arrived at the current shading point via a
-    // specular interaction (mirror reflection, glass refraction, GGX
-    // microfacet bounce). NEE only fires from diffuse points, so any
-    // emitter hit reached by a specular last segment must still be
-    // counted at the BSDF-sampled hit — otherwise mirrors and refracted
-    // rays would lose their reflected/refracted lights. Camera primary
-    // is "specular" (delta) by convention.
-    bool last_was_specular = true;
+    // MIS state carried forward across bounces.
+    //   `prev_bsdf_pdf` is the solid-angle pdf of the BSDF sample that
+    //   produced the current ray direction. Combined with the NEE pdf
+    //   computed at an emitter arrival, this drives the power-heuristic
+    //   MIS weight on the BSDF side.
+    //   `prev_is_delta` is true for paths arriving via a delta-like
+    //   interaction (refraction, primary camera ray) where NEE can't
+    //   compete — those get full BSDF weight at emitter hits.
+    float prev_bsdf_pdf = 0.0;
+    bool  prev_is_delta = true;
 
     const uint kMinBouncesBeforeRR = 2u;
 
@@ -644,7 +745,10 @@ fragment float4 pt_fragment(
                 ray_origin = h.point - n * 1e-3;
                 ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
             }
-            last_was_specular = true;
+            // Refraction / TIR off the medium-exit boundary is delta-
+            // like — NEE can't sample these directions, so the next
+            // emitter arrival gets full BSDF weight.
+            prev_is_delta = true;
             if (b >= kMinBouncesBeforeRR) {
                 float p = max(throughput.r, max(throughput.g, throughput.b));
                 p = clamp(p, 0.05, 0.95);
@@ -674,14 +778,18 @@ fragment float4 pt_fragment(
                         // termination case for consistency.
                         break;
                     }
-                    radiance += throughput *
-                        sample_nee_diffuse(g_point, kGroundNormal,
-                                           kGroundAlbedo, u, lights,
-                                           coarse_grid, chunk_pool, rng);
+                    {
+                        NEELight nee = nee_sample_light(
+                            g_point, kGroundNormal, u, lights,
+                            coarse_grid, chunk_pool, rng);
+                        radiance += throughput *
+                            nee_diffuse_mis(nee, kGroundAlbedo, kGroundNormal);
+                    }
                     ray_origin = g_point + kGroundNormal * 1e-3;
                     ray_dir = cosine_hemi(kGroundNormal, rng);
+                    prev_bsdf_pdf = pdf_lambert(kGroundNormal, ray_dir);
+                    prev_is_delta = false;
                     throughput *= kGroundAlbedo;
-                    last_was_specular = false;
                     continue;
                 }
             }
@@ -692,14 +800,26 @@ fragment float4 pt_fragment(
         GpuMaterial mat = materials[h.cell_val];
         uint mat_type = uint(mat.type);
 
-        // Emissive cells are light sources. With NEE on (light_count >
-        // 0), only count direct camera hits — bounced rays would
-        // double-count what NEE already sampled at the previous shading
-        // point. Without NEE, count emissive on every hit (the old
-        // BSDF-only behavior).
+        // Emissive cells are light sources. The BSDF arrival has
+        // already moved throughput by the BRDF·cos/pdf factor; we just
+        // need to multiply by Le and apply the MIS weight on the BSDF
+        // side. Primary visibility (b=0), delta-like prior bounces, and
+        // the no-NEE case (light_count=0) get full weight.
         if (mat_type == kMatEmissive && mat.emission > 0.0) {
-            if (last_was_specular || u.light_count == 0u) {
-                radiance += throughput * albedo * mat.emission;
+            float3 Le = albedo * mat.emission;
+            if (b == 0u || prev_is_delta || u.light_count == 0u) {
+                radiance += throughput * Le;
+            } else {
+                float3 n_y = float3(0.0);
+                if      (h.axis == 0) n_y.x = float(h.sign);
+                else if (h.axis == 1) n_y.y = float(h.sign);
+                else if (h.axis == 2) n_y.z = float(h.sign);
+                float3 d = h.point - ray_origin;
+                float dist2 = dot(d, d);
+                float pdf_light = nee_pdf_solid_for_arrival(
+                    u, ray_dir, n_y, dist2);
+                float w_bsdf = mis_power(prev_bsdf_pdf, pdf_light);
+                radiance += throughput * Le * w_bsdf;
             }
             break;
         }
@@ -717,26 +837,37 @@ fragment float4 pt_fragment(
         if (mat_type == kMatMetal) {
             // Metallic: probability the ray takes the specular path vs.
             // a plain diffuse bounce. 1.0 = pure reflective metal, 0.0 =
-            // effectively diffuse, intermediate = semi-glossy.
-            // The specular path samples a microfacet normal from the
-            // GGX/Trowbridge-Reitz distribution and reflects about it —
-            // gives a proper lobe centered on the mirror direction
-            // instead of the lopsided one you get from blending toward
-            // a normal-hemisphere sample.
+            // effectively diffuse, intermediate = semi-glossy. The
+            // specular path samples GGX VNDF (Heitz 2018); diffuse uses
+            // cosine hemisphere. Each branch gets MIS-weighted NEE
+            // against its own BSDF — power heuristic auto-selects
+            // whichever is locally lower-variance.
             ray_origin = h.point + normal * 1e-3;
+            float3 omega_o = -ray_dir;
             if (rand1(rng) < clamp(mat.metallic, 0.0, 1.0)) {
                 float r = clamp(mat.roughness, 0.0, 1.0);
-                float3 m = ggx_sample_vndf(normal, -ray_dir, r, rng);
+                {
+                    NEELight nee = nee_sample_light(
+                        h.point, normal, u, lights,
+                        coarse_grid, chunk_pool, rng);
+                    radiance += throughput *
+                        nee_ggx_mis(nee, omega_o, normal, albedo, r);
+                }
+                float3 m = ggx_sample_vndf(normal, omega_o, r, rng);
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
-                last_was_specular = true;
+                prev_bsdf_pdf = pdf_ggx_vndf(normal, omega_o, ray_dir, r);
             } else {
-                // Took the diffuse branch — NEE on Lambertian f.
-                radiance += throughput *
-                    sample_nee_diffuse(h.point, normal, albedo, u, lights,
-                                       coarse_grid, chunk_pool, rng);
+                {
+                    NEELight nee = nee_sample_light(
+                        h.point, normal, u, lights,
+                        coarse_grid, chunk_pool, rng);
+                    radiance += throughput *
+                        nee_diffuse_mis(nee, albedo, normal);
+                }
                 ray_dir = cosine_hemi(normal, rng);
-                last_was_specular = false;
+                prev_bsdf_pdf = pdf_lambert(normal, ray_dir);
             }
+            prev_is_delta = false;
             throughput *= albedo;
         } else if (mat_type == kMatGlass) {
             // Microfacet glass: sample a visible microfacet normal `m`
@@ -759,16 +890,30 @@ fragment float4 pt_fragment(
             //    interpolates albedo (transparency=0) toward white
             //    (transparency=1). transparency=1 is fully clear.
             float rough = clamp(mat.roughness, 0.0, 1.0);
-            float3 m = ggx_sample_vndf(normal, -ray_dir, rough, rng);
+            float3 omega_o = -ray_dir;
+            float3 m = ggx_sample_vndf(normal, omega_o, rough, rng);
             float cos_i = max(0.0, -dot(ray_dir, m));
             float r0 = (1.0 - mat.ior) / (1.0 + mat.ior);
             r0 *= r0;
             float fresnel = r0 + (1.0 - r0) * pow(1.0 - cos_i, 5.0);
             float trans = clamp(mat.transparency, 0.0, 1.0);
+            float3 f0_glass = float3(r0);
             if (rand1(rng) < fresnel) {
+                // Fresnel reflect lobe — MIS-weighted NEE against the
+                // GGX VNDF sampler. At low roughness the BSDF wins and
+                // captures crisp mirror-of-light contributions; at high
+                // roughness NEE wins and direct-samples emitters.
+                {
+                    NEELight nee = nee_sample_light(
+                        h.point, normal, u, lights,
+                        coarse_grid, chunk_pool, rng);
+                    radiance += throughput *
+                        nee_ggx_mis(nee, omega_o, normal, f0_glass, rough);
+                }
                 ray_origin = h.point + normal * 1e-3;
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
-                last_was_specular = true;
+                prev_bsdf_pdf = pdf_ggx_vndf(normal, omega_o, ray_dir, rough);
+                prev_is_delta = false;
             } else {
                 // Decide whether the transmit branch refracts (always in
                 // Absorption mode; with probability = transparency in
@@ -779,10 +924,25 @@ fragment float4 pt_fragment(
                     float eta = 1.0 / mat.ior;  // air -> glass
                     float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
                     if (k < 0.0) {
-                        // TIR off this microfacet — reflect, stay in air.
+                        // TIR — same reflect geometry as the Fresnel
+                        // reflect branch; same MIS-weighted NEE.
+                        {
+                            NEELight nee = nee_sample_light(
+                                h.point, normal, u, lights,
+                                coarse_grid, chunk_pool, rng);
+                            radiance += throughput *
+                                nee_ggx_mis(nee, omega_o, normal,
+                                            f0_glass, rough);
+                        }
                         ray_origin = h.point + normal * 1e-3;
                         ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
+                        prev_bsdf_pdf = pdf_ggx_vndf(normal, omega_o,
+                                                     ray_dir, rough);
+                        prev_is_delta = false;
                     } else {
+                        // Refraction into the medium — delta-like; no
+                        // NEE. The next emitter arrival (after exit)
+                        // gets full BSDF weight via prev_is_delta.
                         ray_origin = h.point - normal * 1e-3;
                         ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
                         medium_mat = h.cell_val;
@@ -790,28 +950,37 @@ fragment float4 pt_fragment(
                         medium_albedo = (u.glass_mode == 1u)
                             ? mix(albedo, float3(1.0), trans)
                             : albedo;
+                        prev_is_delta = true;
                     }
-                    last_was_specular = true;
                 } else {
-                    // Diffuse fallback — translucent / milky glass.
+                    // Diffuse fallback — Probabilistic mode only.
+                    {
+                        NEELight nee = nee_sample_light(
+                            h.point, normal, u, lights,
+                            coarse_grid, chunk_pool, rng);
+                        radiance += throughput *
+                            nee_diffuse_mis(nee, albedo, normal);
+                    }
                     ray_origin = h.point + normal * 1e-3;
-                    radiance += throughput *
-                        sample_nee_diffuse(h.point, normal, albedo, u, lights,
-                                           coarse_grid, chunk_pool, rng);
                     ray_dir = cosine_hemi(normal, rng);
+                    prev_bsdf_pdf = pdf_lambert(normal, ray_dir);
+                    prev_is_delta = false;
                     throughput *= albedo;
-                    last_was_specular = false;
                 }
             }
         } else {
             // Diffuse default.
+            {
+                NEELight nee = nee_sample_light(h.point, normal, u, lights,
+                                                coarse_grid, chunk_pool,
+                                                rng);
+                radiance += throughput * nee_diffuse_mis(nee, albedo, normal);
+            }
             ray_origin = h.point + normal * 1e-3;
-            radiance += throughput *
-                sample_nee_diffuse(h.point, normal, albedo, u, lights,
-                                   coarse_grid, chunk_pool, rng);
             ray_dir = cosine_hemi(normal, rng);
+            prev_bsdf_pdf = pdf_lambert(normal, ray_dir);
+            prev_is_delta = false;
             throughput *= albedo;
-            last_was_specular = false;
         }
 
         // Russian roulette after a couple of guaranteed bounces. Kill
