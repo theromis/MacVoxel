@@ -35,6 +35,20 @@ void DrawRenderPanel(const RenderStats& stats) {
         ImGui::Checkbox("ACES tonemap", &rs.aces_tonemap);
         ImGui::SliderInt("Bounces", &rs.max_bounces, 1, 8);
 
+        const char* kGlassNames[] = {"Probabilistic", "Absorption"};
+        int gm = static_cast<int>(rs.glass_mode);
+        if (ImGui::Combo("Glass mode", &gm, kGlassNames,
+                         IM_ARRAYSIZE(kGlassNames))) {
+            rs.glass_mode = static_cast<GlassMode>(gm);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Probabilistic: transparency picks refract vs diffuse, "
+                "tint = surface color regardless.\n"
+                "Absorption: always refracts; transparency interpolates "
+                "tint from full color (0) to clear (1).");
+        }
+
         ImGui::Checkbox("Match window resolution",
                         &rs.resolution_match_window);
         ImGui::BeginDisabled(rs.resolution_match_window);

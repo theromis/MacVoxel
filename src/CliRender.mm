@@ -28,6 +28,7 @@ struct Args {
     int bounces = 5;
     uint32_t seed = 1;
     bool aces = true;
+    GlassMode glass_mode = GlassMode::Probabilistic;
 };
 
 void PrintUsage() {
@@ -35,7 +36,8 @@ void PrintUsage() {
         "usage: MacVoxel render --input <file.vox> --output <file.png>\n"
         "                       [--width N] [--height N]\n"
         "                       [--samples N] [--bounces N] [--seed N]\n"
-        "                       [--no-aces]\n");
+        "                       [--no-aces]\n"
+        "                       [--glass-mode probabilistic|absorption]\n");
 }
 
 bool ParseArgs(int argc, const char* argv[], Args* out) {
@@ -72,6 +74,17 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
             out->seed = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
         } else if (eq("--no-aces")) {
             out->aces = false;
+        } else if (eq("--glass-mode")) {
+            const char* v = need_val("--glass-mode"); if (!v) return false;
+            if (std::strcmp(v, "probabilistic") == 0) {
+                out->glass_mode = GlassMode::Probabilistic;
+            } else if (std::strcmp(v, "absorption") == 0) {
+                out->glass_mode = GlassMode::Absorption;
+            } else {
+                std::fprintf(stderr,
+                    "--glass-mode must be 'probabilistic' or 'absorption'\n");
+                return false;
+            }
         } else if (eq("-h") || eq("--help")) {
             PrintUsage();
             return false;
@@ -146,8 +159,10 @@ int RunCliRender(int argc, const char* argv[]) {
             return 1;
         }
 
-        // exportPNGToURL: reads aces_tonemap from CurrentRenderState.
+        // exportPNGToURL: reads aces_tonemap from CurrentRenderState; the
+        // path-trace pass reads glass_mode from it as well.
         CurrentRenderState().aces_tonemap = args.aces;
+        CurrentRenderState().glass_mode = args.glass_mode;
 
         PathTraceRenderer* renderer =
             [[PathTraceRenderer alloc] initWithDevice:device

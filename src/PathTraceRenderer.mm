@@ -31,7 +31,7 @@ struct PathUniforms {
     uint32_t frame_seed;
     uint32_t max_bounces;
     uint32_t light_count;
-    uint32_t _pad5;
+    uint32_t glass_mode;  // 0 = Probabilistic, 1 = Absorption
 };
 
 // Per-emissive-voxel entry in the next-event-estimation light buffer.
@@ -86,7 +86,7 @@ struct PathUniforms {
     uint     frame_seed;
     uint     max_bounces;
     uint     light_count;
-    uint     _pad5;
+    uint     glass_mode;
 };
 
 struct GpuLight {
@@ -814,15 +814,19 @@ fragment float4 pt_fragment(
             // At roughness 0 this collapses to perfect mirror / Snell;
             // higher roughness gives a clean frosted-glass lobe.
             //
-            // Color comes from Beer-Lambert absorption while the ray is
-            // inside the medium (applied on exit), not from a tint at
-            // the surface. So Fresnel reflections off colored glass are
-            // spectrally neutral (correct for a dielectric), and the
-            // amount of tint a transmitted ray picks up is proportional
-            // to the actual path length through the glass.
+            // Beer-Lambert tint is applied on exit from the medium, not
+            // at the surface — so Fresnel reflections off colored glass
+            // are spectrally neutral (correct for a dielectric) and
+            // transmitted-ray tint scales with the actual path length.
             //
-            // Transparency scales the chance of actually transmitting:
-            // 1.0 = pure glass, 0.0 = diffuse, intermediate = milky.
+            // Transparency interpretation depends on RenderState's
+            // glass_mode (set per-frame as u.glass_mode):
+            //  - Probabilistic (0): with prob=transparency, refract with
+            //    medium_albedo = albedo. Else diffuse-fallback bounce.
+            //    transparency=1 still tints; transparency=0.5 reads milky.
+            //  - Absorption (1): always refract on transmit; medium_albedo
+            //    interpolates albedo (transparency=0) toward white
+            //    (transparency=1). transparency=1 is fully clear.
             float rough = clamp(mat.roughness, 0.0, 1.0);
             float3 m = ggx_sample_vndf(normal, -ray_dir, rough, rng);
             float cos_i = max(0.0, -dot(ray_dir, m));
@@ -849,45 +853,57 @@ fragment float4 pt_fragment(
                     nee_eval_specular_ggx(nee, -ray_dir, normal, f0, rough);
             }
 
+            float trans = clamp(mat.transparency, 0.0, 1.0);
             if (rand1(rng) < fresnel) {
                 ray_origin = h.point + normal * 1e-3;
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
                 last_was_specular = false;
-            } else if (rand1(rng) < clamp(mat.transparency, 0.0, 1.0)) {
-                float eta = 1.0 / mat.ior;  // air -> glass
-                float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
-                if (k < 0.0) {
-                    // TIR — same reflect geometry; NEE for the reflect
-                    // lobe already added above.
-                    ray_origin = h.point + normal * 1e-3;
-                    ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
-                    last_was_specular = false;
-                } else {
-                    // Refraction into the medium — transmission, not a
-                    // shading point for direct lighting; keep the
-                    // specular flag so light seen *through* the glass
-                    // still counts via the BSDF-sampled hit.
-                    ray_origin = h.point - normal * 1e-3;
-                    ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
-                    medium_mat = h.cell_val;
-                    medium_entry = h.point;
-                    medium_albedo = albedo;
-                    last_was_specular = true;
-                }
             } else {
-                // Diffuse fallback — branch probability matches the
-                // diffuse lobe's weight in the full BRDF, so
-                // conditional NEE inside this branch is unbiased.
-                ray_origin = h.point + normal * 1e-3;
-                {
-                    NEELight nee = nee_sample_light(
-                        h.point, normal, u, lights,
-                        coarse_grid, chunk_pool, rng);
-                    radiance += throughput * nee_eval_diffuse(nee, albedo);
+                // Decide whether the transmit branch refracts (always in
+                // Absorption mode; with probability=transparency in
+                // Probabilistic mode) or falls back to diffuse.
+                bool refract_path = (u.glass_mode == 1u) ||
+                                    (rand1(rng) < trans);
+                if (refract_path) {
+                    float eta = 1.0 / mat.ior;  // air -> glass
+                    float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
+                    if (k < 0.0) {
+                        // TIR — same reflect geometry; NEE for the
+                        // reflect lobe already added above.
+                        ray_origin = h.point + normal * 1e-3;
+                        ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
+                        last_was_specular = false;
+                    } else {
+                        // Refraction into the medium — transmission, not
+                        // a shading point for direct lighting; keep the
+                        // specular flag so light seen *through* the glass
+                        // still counts via the BSDF-sampled hit.
+                        ray_origin = h.point - normal * 1e-3;
+                        ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
+                        medium_mat = h.cell_val;
+                        medium_entry = h.point;
+                        medium_albedo = (u.glass_mode == 1u)
+                            ? mix(albedo, float3(1.0), trans)
+                            : albedo;
+                        last_was_specular = true;
+                    }
+                } else {
+                    // Diffuse fallback (Probabilistic mode only) — branch
+                    // probability matches the diffuse lobe's weight in
+                    // the full BRDF, so conditional NEE inside this
+                    // branch is unbiased.
+                    ray_origin = h.point + normal * 1e-3;
+                    {
+                        NEELight nee = nee_sample_light(
+                            h.point, normal, u, lights,
+                            coarse_grid, chunk_pool, rng);
+                        radiance += throughput *
+                            nee_eval_diffuse(nee, albedo);
+                    }
+                    ray_dir = cosine_hemi(normal, rng);
+                    throughput *= albedo;
+                    last_was_specular = false;
                 }
-                ray_dir = cosine_hemi(normal, rng);
-                throughput *= albedo;
-                last_was_specular = false;
             }
         } else {
             // Diffuse default.
@@ -986,6 +1002,9 @@ fragment float4 display_fragment(
 
     // Camera-state hash for reset detection.
     uint64_t _lastCameraHash;
+    // Glass interpretation last seen — toggling forces an accumulator
+    // reset since the two modes produce visually different estimators.
+    macvoxel::GlassMode _lastGlassMode;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -1278,6 +1297,11 @@ fragment float4 display_fragment(
         _lastCameraHash = cam_hash;
         _wantsClear = YES;
     }
+    const macvoxel::GlassMode mode = macvoxel::CurrentRenderState().glass_mode;
+    if (mode != _lastGlassMode) {
+        _lastGlassMode = mode;
+        _wantsClear = YES;
+    }
 
     if (_wantsClear) {
         _sampleCount = 0;
@@ -1383,7 +1407,8 @@ fragment float4 display_fragment(
     u.frame_seed = frameSeed;
     u.max_bounces = maxBounces;
     u.light_count = _lightCount;
-    u._pad5 = 0u;
+    u.glass_mode = static_cast<uint32_t>(
+        macvoxel::CurrentRenderState().glass_mode);
 
     [enc setRenderPipelineState:_pathPipeline];
     [enc setCullMode:MTLCullModeNone];

@@ -4,6 +4,24 @@
 
 namespace macvoxel {
 
+// How `Material::transparency` shapes the glass branch of the path
+// tracer. Two interpretations the user can flip between:
+//
+// - Probabilistic: with probability `transparency`, take a refracting
+//   transmit path (Beer-Lambert through the actual albedo); otherwise
+//   diffuse-fallback bounce. transparency=1 still tints heavily because
+//   the medium albedo is the surface color regardless. transparency=0.5
+//   reads as "milky glass". This is the editor-original behavior.
+// - Absorption: always refract on transmit (no diffuse fallback).
+//   transparency interpolates the medium albedo from the surface color
+//   (transparency=0) toward white (transparency=1). transparency=1 is a
+//   completely clear pane regardless of color; transparency=0 is fully
+//   tinted glass. Matches MagicaVoxel's interpretation more closely.
+enum class GlassMode : uint8_t {
+    Probabilistic = 0,
+    Absorption = 1,
+};
+
 // Application-wide rendering settings — which renderer is active, etc.
 struct RenderState {
     bool path_traced = false;
@@ -24,6 +42,7 @@ struct RenderState {
     bool resolution_match_window = true;
     int render_width = 1920;
     int render_height = 1080;
+    GlassMode glass_mode = GlassMode::Probabilistic;
 };
 
 RenderState& CurrentRenderState();
