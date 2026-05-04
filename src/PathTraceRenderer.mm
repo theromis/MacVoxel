@@ -830,16 +830,26 @@ fragment float4 pt_fragment(
             r0 *= r0;
             float fresnel = r0 + (1.0 - r0) * pow(1.0 - cos_i, 5.0);
             float3 f0 = float3(r0);
-            if (rand1(rng) < fresnel) {
-                // Specular reflection off the glass surface — without
-                // NEE here, reflections of small lights in clear glass
-                // (the giveaway look of "this is glass, not chalk") are
-                // statistically invisible at the GGX lobe widths we use.
+
+            // NEE for the glass reflect lobe — applied unconditionally
+            // before the BSDF branches, NOT inside the Fresnel-reflect
+            // branch. The branch probability `fresnel` is per-
+            // microfacet (~0.04 at normal incidence for IOR 1.5);
+            // gating NEE on it would underestimate the reflect lobe's
+            // direct lighting by ~25× because the per-light-direction
+            // Fresnel evaluated inside nee_eval_specular_ggx already
+            // correctly attenuates by F0+Schlick. Reflections of small
+            // lights in clear glass need this contribution to read at
+            // sane sample counts.
+            {
                 NEELight nee = nee_sample_light(h.point, normal, u, lights,
                                                 coarse_grid, chunk_pool,
                                                 rng);
                 radiance += throughput *
                     nee_eval_specular_ggx(nee, -ray_dir, normal, f0, rough);
+            }
+
+            if (rand1(rng) < fresnel) {
                 ray_origin = h.point + normal * 1e-3;
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
                 last_was_specular = false;
@@ -847,15 +857,8 @@ fragment float4 pt_fragment(
                 float eta = 1.0 / mat.ior;  // air -> glass
                 float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
                 if (k < 0.0) {
-                    // TIR off this microfacet — same specular geometry
-                    // as the Fresnel-reflect branch above, so NEE here
-                    // for the same reason.
-                    NEELight nee = nee_sample_light(
-                        h.point, normal, u, lights,
-                        coarse_grid, chunk_pool, rng);
-                    radiance += throughput *
-                        nee_eval_specular_ggx(nee, -ray_dir, normal,
-                                              f0, rough);
+                    // TIR — same reflect geometry; NEE for the reflect
+                    // lobe already added above.
                     ray_origin = h.point + normal * 1e-3;
                     ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
                     last_was_specular = false;
@@ -872,7 +875,9 @@ fragment float4 pt_fragment(
                     last_was_specular = true;
                 }
             } else {
-                // Diffuse fallback — translucent / milky glass.
+                // Diffuse fallback — branch probability matches the
+                // diffuse lobe's weight in the full BRDF, so
+                // conditional NEE inside this branch is unbiased.
                 ray_origin = h.point + normal * 1e-3;
                 {
                     NEELight nee = nee_sample_light(
