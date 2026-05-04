@@ -736,9 +736,22 @@ fragment float4 pt_fragment(
             float cos_i = max(0.0, -dot(ray_dir, m));
             float eta = em.ior;  // glass -> air
             float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
-            if (k < 0.0) {
-                // Total internal reflection — bounce back into the medium
-                // and start a new Beer-Lambert segment from this point.
+            // Fresnel at the medium → air interface from the inside.
+            // Schlick is symmetric in the index ratio, so the same r0
+            // form used at entry applies here. Without this coin-flip
+            // the renderer never produces the secondary "ghost"
+            // reflection real glass shows: a small fraction of the
+            // light entering the front face refracts in, internally
+            // reflects on the back face, and exits the front face
+            // again — visibly offset from the primary front-face
+            // reflection. TIR (k < 0) still forces an internal
+            // reflection regardless of the coin flip.
+            float r0_in = (em.ior - 1.0) / (em.ior + 1.0);
+            r0_in *= r0_in;
+            float fresnel_in = r0_in + (1.0 - r0_in) * pow(1.0 - cos_i, 5.0);
+            if (k < 0.0 || rand1(rng) < fresnel_in) {
+                // Total internal reflection or Fresnel-sampled internal
+                // bounce — start a new Beer-Lambert segment from here.
                 ray_origin = h.point + n * 1e-3;
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
                 medium_mat = entered_medium;
