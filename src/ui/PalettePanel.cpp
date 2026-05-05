@@ -1,8 +1,6 @@
 #include "PalettePanel.h"
 
 #include "Document.h"
-#include "Fonts.h"
-#include "Material.h"
 #include "Palette.h"
 #include "ToolState.h"
 
@@ -12,16 +10,6 @@ namespace macvoxel {
 namespace {
 
 ImU32 ColorToImU32(Color c) { return IM_COL32(c.r, c.g, c.b, c.a); }
-
-const char* TypeName(MaterialType t) {
-    switch (t) {
-        case MaterialType::Diffuse:  return "Diffuse";
-        case MaterialType::Metal:    return "Metal";
-        case MaterialType::Emissive: return "Emissive";
-        case MaterialType::Glass:    return "Glass";
-    }
-    return "Diffuse";
-}
 
 }  // namespace
 
@@ -93,53 +81,6 @@ void DrawPalettePanel(Document& doc) {
                 ++doc.version;
             }
         }
-    }
-
-    ImGui::Spacing();
-    {
-        ImGui::PushFont(Fonts().header);
-        ImGui::TextUnformatted("Material");
-        ImGui::PopFont();
-    }
-    ImGui::TextDisabled("Applied by Phase 8 path tracer.");
-
-    Material m = doc.palette.GetMaterial(idx);
-    bool dirty = false;
-    {
-        const char* current = TypeName(m.type);
-        if (ImGui::BeginCombo("Type", current)) {
-            const MaterialType opts[] = {
-                MaterialType::Diffuse, MaterialType::Metal,
-                MaterialType::Emissive, MaterialType::Glass,
-            };
-            for (MaterialType opt : opts) {
-                const bool selected = m.type == opt;
-                if (ImGui::Selectable(TypeName(opt), selected)) {
-                    if (m.type != opt) {
-                        m.type = opt;
-                        dirty = true;
-                    }
-                }
-                if (selected) ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndCombo();
-        }
-    }
-    if (ImGui::SliderFloat("Roughness",    &m.roughness,    0.0f,  1.0f)) dirty = true;
-    if (ImGui::SliderFloat("Metallic",     &m.metallic,     0.0f,  1.0f)) dirty = true;
-    {
-        float emit_pct = m.emission * 100.0f;
-        if (ImGui::SliderFloat("Emission", &emit_pct, 0.0f, 100.0f, "%.0f")) {
-            m.emission = emit_pct * 0.01f;
-            dirty = true;
-        }
-    }
-    if (ImGui::SliderInt("Power",          &m.emissionPower, 1, 5)) dirty = true;
-    if (ImGui::SliderFloat("Transparency", &m.transparency, 0.0f,  1.0f)) dirty = true;
-    if (ImGui::SliderFloat("IoR",          &m.ior,          1.0f,  3.0f)) dirty = true;
-    if (dirty) {
-        doc.palette.SetMaterial(idx, m);
-        ++doc.version;
     }
 
     ImGui::End();

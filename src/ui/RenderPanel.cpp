@@ -1,7 +1,11 @@
 #include "RenderPanel.h"
 
+#include "Document.h"
 #include "Fonts.h"
+#include "Material.h"
+#include "Palette.h"
 #include "RenderState.h"
+#include "ToolState.h"
 
 #include "imgui.h"
 
@@ -12,7 +16,17 @@
 namespace macvoxel {
 namespace {
 bool g_save_render_clicked = false;
+
+const char* TypeName(MaterialType t) {
+    switch (t) {
+        case MaterialType::Diffuse:  return "Diffuse";
+        case MaterialType::Metal:    return "Metal";
+        case MaterialType::Emissive: return "Emissive";
+        case MaterialType::Glass:    return "Glass";
+    }
+    return "Diffuse";
 }
+}  // namespace
 
 bool ConsumeSaveRenderClick() {
     const bool was = g_save_render_clicked;
@@ -20,7 +34,7 @@ bool ConsumeSaveRenderClick() {
     return was;
 }
 
-void DrawRenderPanel(const RenderStats& stats) {
+void DrawRenderPanel(Document& doc, const RenderStats& stats) {
     ImGui::SetNextWindowSize(ImVec2(280, 240), ImGuiCond_FirstUseEver);
     ImGui::Begin("Render");
 
@@ -84,6 +98,61 @@ void DrawRenderPanel(const RenderStats& stats) {
             g_save_render_clicked = true;
         }
         ImGui::EndDisabled();
+    }
+    ImGui::Unindent();
+    ImGui::Spacing();
+
+    // -----------------------------------------------------------------
+    // Material editor for the palette index currently selected in the
+    // Palette panel. Changes apply immediately and bump doc.version, so
+    // the path tracer rebuilds and re-accumulates.
+    // -----------------------------------------------------------------
+    ImGui::PushFont(Fonts().header);
+    ImGui::TextUnformatted("Material");
+    ImGui::PopFont();
+    ImGui::Indent();
+    {
+        const uint8_t idx = CurrentTool().palette_idx;
+        ImGui::Text("Index %u", idx);
+
+        Material m = doc.palette.GetMaterial(idx);
+        bool dirty = false;
+        {
+            const char* current = TypeName(m.type);
+            if (ImGui::BeginCombo("Type", current)) {
+                const MaterialType opts[] = {
+                    MaterialType::Diffuse, MaterialType::Metal,
+                    MaterialType::Emissive, MaterialType::Glass,
+                };
+                for (MaterialType opt : opts) {
+                    const bool selected = m.type == opt;
+                    if (ImGui::Selectable(TypeName(opt), selected)) {
+                        if (m.type != opt) {
+                            m.type = opt;
+                            dirty = true;
+                        }
+                    }
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        }
+        if (ImGui::SliderFloat("Roughness", &m.roughness, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::SliderFloat("Metallic",  &m.metallic,  0.0f, 1.0f)) dirty = true;
+        {
+            float emit_pct = m.emission * 100.0f;
+            if (ImGui::SliderFloat("Emission", &emit_pct, 0.0f, 100.0f, "%.0f")) {
+                m.emission = emit_pct * 0.01f;
+                dirty = true;
+            }
+        }
+        if (ImGui::SliderInt("Power",        &m.emissionPower, 1, 5)) dirty = true;
+        if (ImGui::SliderFloat("Transparency", &m.transparency, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::SliderFloat("IoR",        &m.ior,        1.0f, 3.0f)) dirty = true;
+        if (dirty) {
+            doc.palette.SetMaterial(idx, m);
+            ++doc.version;
+        }
     }
     ImGui::Unindent();
     ImGui::Spacing();

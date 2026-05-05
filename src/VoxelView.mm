@@ -357,7 +357,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         stats.chunk_count = [_raycastRenderer lastChunkCount];
         stats.gpu_bytes = [_raycastRenderer lastGPUBytes];
         macvoxel::DrawModelPanel(*doc, stats);
-        macvoxel::DrawRenderPanel(stats);
+        macvoxel::DrawRenderPanel(*doc, stats);
         macvoxel::DrawToolPanel();
         macvoxel::DrawPalettePanel(*doc);
         [self drawSelectionOverlay];
