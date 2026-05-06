@@ -33,16 +33,13 @@ Effort labels are rough: **S** ≈ a few hours, **M** ≈ a day, **L** ≈ multi
   the Palette panel into the Render panel as part of this. Fixed an
   old keyboard-input bug along the way (VoxelView was claiming first
   responder, evicting ImGui's KeyEventResponder).
-  
-## Phase 11.5 - Palette right-click menu
-
-This is a menu that appears when right-clicking on a slot in the color palette grid.
-
-- **Copy/Paste color value**.
-- **Select voxels by color.** Selects all voxels whose assigned color is part of the currently selected set.
-- **Paint voxels with selected color.** If one color slot is selected, assign all selected voxels to that color.
-- **Paint voxels with random selected colors.** If multiple color slots are selected, paint each voxel in the selection with a random color from the selected set
-- **Make gradient.** When multiple palette slots are selected, calculate a linearly-interpolated color gradient whose endpoints are the color values in the first and last slots of the selection, and assign all intermediate slots to the appropriate colors from the gradient.
+- **Phase 11.5 — Palette right-click menu.** Copy/Paste color between
+  slots; Make gradient across selected slots; introduced a sparse
+  voxel-selection vector to back Select-voxels-by-color and the two
+  paint actions (solid pick / random pick). Per-voxel wireframe
+  highlight with interior-face dedupe + back-face culling. Two
+  carry-overs filed for Phase 13: depth-aware occluded-voxel culling,
+  and unifying AABB cut/copy/delete with the sparse selection.
 
 ## Phase 12 — New modeling tools
 
@@ -72,6 +69,19 @@ shippable per-tool.**
 - **Free transform gizmo (L).** ImGuizmo-style rotate / scale of the selection
   with live preview, committed on confirm.
 - **Set selection as Pattern (S).** Wires Phase 12's brush tool.
+- **Proper hidden-surface cull on per-voxel selection highlights (M).**
+  Phase 11.5 added a per-voxel wireframe with interior-face dedupe and
+  back-face culling, but voxels that are themselves visible-from-camera
+  but occluded by other geometry still draw their wireframes through
+  the occluder. A naive per-voxel DDA from the camera looked off; the
+  right fix probably needs depth-buffer integration with the renderer
+  pass or a coarser silhouette extraction. Tackle alongside the
+  selection-as-set work since both want a real depth-aware overlay.
+- **AABB cut/copy/delete unify with sparse selection (S).** Today
+  AppDelegate's clipboard ops still iterate the AABB and ignore
+  Selection::voxels. Extend them to filter by the sparse set when
+  present (need O(1) membership — promote the list to an
+  unordered_set or maintain both side-by-side).
 
 ## Phase 14 — Renderer features
 
