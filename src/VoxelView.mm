@@ -536,6 +536,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
             sel.box.min_y = sel.box.max_y = pick.y;
             sel.box.min_z = sel.box.max_z = pick.z;
             sel.active = true;
+            sel.voxels.clear();
         } else {
             _dragMode = DragMode::None;
         }
