@@ -2,6 +2,7 @@
 
 #include "Document.h"
 #include "Palette.h"
+#include "Selection.h"
 #include "ToolState.h"
 
 #include "imgui.h"
@@ -254,7 +255,49 @@ void DrawPalettePanel(Document& doc) {
                 if (any) ++doc.version;
             }
             ImGui::Separator();
-            ImGui::MenuItem("Select voxels by color", nullptr, false, false);
+            const bool any_slot_selected = (n_sel > 0);
+            if (ImGui::MenuItem("Select voxels by color", nullptr, false,
+                                any_slot_selected)) {
+                Selection& sel = CurrentSelection();
+                sel.voxels.clear();
+                Bounds3 b{};
+                bool first = true;
+                for (const auto& kv : doc.grid.chunks()) {
+                    const VoxelGrid::Chunk* ch = kv.second.get();
+                    const int32_t base_x = kv.first.x << VoxelGrid::kChunkBits;
+                    const int32_t base_y = kv.first.y << VoxelGrid::kChunkBits;
+                    const int32_t base_z = kv.first.z << VoxelGrid::kChunkBits;
+                    for (uint32_t lz = 0; lz < VoxelGrid::kChunkSize; ++lz) {
+                        for (uint32_t ly = 0; ly < VoxelGrid::kChunkSize; ++ly) {
+                            for (uint32_t lx = 0; lx < VoxelGrid::kChunkSize; ++lx) {
+                                const uint8_t v = ch->cells[
+                                    lx + ly * VoxelGrid::kChunkSize +
+                                    lz * VoxelGrid::kChunkSize * VoxelGrid::kChunkSize];
+                                if (v == 0 || !tool.selected_slots.test(v)) continue;
+                                const int32_t x = base_x + static_cast<int32_t>(lx);
+                                const int32_t y = base_y + static_cast<int32_t>(ly);
+                                const int32_t z = base_z + static_cast<int32_t>(lz);
+                                sel.voxels.push_back({x, y, z});
+                                if (first) {
+                                    b.min_x = b.max_x = x;
+                                    b.min_y = b.max_y = y;
+                                    b.min_z = b.max_z = z;
+                                    first = false;
+                                } else {
+                                    b.min_x = std::min(b.min_x, x);
+                                    b.min_y = std::min(b.min_y, y);
+                                    b.min_z = std::min(b.min_z, z);
+                                    b.max_x = std::max(b.max_x, x);
+                                    b.max_y = std::max(b.max_y, y);
+                                    b.max_z = std::max(b.max_z, z);
+                                }
+                            }
+                        }
+                    }
+                }
+                sel.box = b;
+                sel.active = !sel.voxels.empty();
+            }
             ImGui::MenuItem("Paint voxels with selected color", nullptr, false, false);
             ImGui::MenuItem("Paint voxels with random selected colors",
                             nullptr, false, false);
