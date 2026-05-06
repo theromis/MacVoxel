@@ -33,12 +33,27 @@ Effort labels are rough: **S** ≈ a few hours, **M** ≈ a day, **L** ≈ multi
   the Palette panel into the Render panel as part of this. Fixed an
   old keyboard-input bug along the way (VoxelView was claiming first
   responder, evicting ImGui's KeyEventResponder).
+  
+## Phase 11.5 - Palette right-click menu
+
+This is a menu that appears when right-clicking on a slot in the color palette grid.
+
+- **Copy/Paste color value**.
+- **Select voxels by color.** Selects all voxels whose assigned color is part of the currently selected set.
+- **Paint voxels with selected color.** If one color slot is selected, assign all selected voxels to that color.
+- **Paint voxels with random selected colors.** If multiple color slots are selected, paint each voxel in the selection with a random color from the selected set
+- **Make gradient.** When multiple palette slots are selected, calculate a linearly-interpolated color gradient whose endpoints are the color values in the first and last slots of the selection, and assign all intermediate slots to the appropriate colors from the gradient.
 
 ## Phase 12 — New modeling tools
 
 Each is a distinct tool; ordered roughly by usefulness. **L total, but
 shippable per-tool.**
 
+- **Pencil tool.** Modification to current voxel placement. Add options for:
+	- Brush size
+	- Brush shape (circle or square)
+	- 2D/3D (2D is a one-voxel-thick circle or square of the given size, 3D is a sphere/cube)
+	
 - **Line tool (S–M).** Two-click point-to-point. *Straight* mode = 3D Bresenham
   through cells; *project* mode = locks to nearest axis plane.
 - **Face tool (M).** Pick a coplanar contiguous region; extrude / inset by a
