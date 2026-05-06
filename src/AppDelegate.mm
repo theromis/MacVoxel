@@ -73,7 +73,12 @@
 
     VoxelView* view = [[VoxelView alloc] initWithFrame:frame];
     [self.window setContentView:view];
-    [self.window makeFirstResponder:view];
+    // Don't makeFirstResponder:view — ImGui's OSX backend installs a
+    // hidden KeyEventResponder subview that needs to remain first
+    // responder so keyDown events get absorbed and routed through
+    // interpretKeyEvents: into ImGui's text input. Forcing the
+    // VoxelView to be first responder leaves keystrokes unhandled
+    // and produces system beeps when typing in ImGui input fields.
     [self.window center];
     [self.window makeKeyAndOrderFront:nil];
 }
