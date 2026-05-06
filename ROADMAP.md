@@ -7,51 +7,32 @@ Effort labels are rough: **S** ≈ a few hours, **M** ≈ a day, **L** ≈ multi
 
 ---
 
-## Phase 9 — Modeling foundation cleanup
+## Done
 
-The day-to-day editing experience has a couple of paper cuts and one missing
-abstraction (tool mode). Fix those and the rest of the modeling work has a
-solid base. **S–M total.**
-
-- **Tool modes (S).** Global Add / Remove / Paint state. Every modeling tool
-  routes through it instead of having its own add/erase logic. Sets up the
-  Modeling Tools phase.
-- **Drag-paint cell-change fix (S).** Currently fires every pointer move; should
-  fire only when the raycast lands on a new cell. One commit.
-- **Pointed-at voxel highlight (S–M).** Outline / tint the cell under the
-  cursor. Drawn in the ray-cast shader so it tracks the camera.
-- **SF Symbols in tool / palette UI (S).** Replace text labels for tools, brush
-  size buttons, mode toggles. ImGui draws them as fonts via Apple's SF Symbols
-  font (`/System/Library/Fonts/SF-Pro.ttf` glyph range).
-- **Settle on a UI font size (S).** Currently 13pt body / 15pt header (HIG
-  body + Title 3). Pro apps often run 11–12pt for density, consumer apps
-  trend 15–17pt. Pick the size that fits MacVoxel's identity once enough
-  panels exist to compare against.
-
-## Phase 10 — Render-mode QoL & tonemapping
-
-The path tracer is feature-complete enough that we should make output usable.
-ACES alone is a huge visible win for ~10 lines of shader. **S–M total.**
-
-- **ACES tonemapping (S).** Replace the gamma-only display fragment with
-  ACES-fitted tonemap → sRGB encode. Bright emissives stop blowing out.
-- **Render-resolution + max-samples controls (S).** Path-trace panel gets
-  resolution scale (½ / 1× / 2×) and max-samples target.
-- **Progress bar (S).** Sample-count vs. target.
-- **Pause when unfocused (S).** Stop accumulating when the app loses
-  `windowDidResignKey`. Resume on regain.
-- **PNG export (S).** "Save render…" item that writes the current accumulator
-  divided by sample count, post-tonemap, as PNG.
-
-## Phase 11 — Palette redesign
-
-Self-contained UX overhaul. **M.**
-
-- 8×32 grid (or 16×16 — TBD), id 0 in a fixed corner.
-- Grid resizes to horizontal space.
-- Click-drag → rect selection of slots.
-- Shift-click → add/remove from selection.
-- Material edits apply to all selected slots.
+- **Phase 9 — Modeling foundation cleanup.** Tool modes, drag-paint dedupe,
+  hover highlight, SF Symbols icons, font sizing.
+- **Phase 10 — Render-mode QoL & tonemapping.** ACES, render-resolution +
+  max-samples, progress bar, focus pause, PNG export, explicit render
+  resolution with letterbox.
+- **Phase 10.5 — Path tracer correctness (unplanned).** MagicaVoxel-style
+  emission (intensity + integer power decades), next-event estimation on
+  emissive voxels, MIS with the power heuristic for direct lighting (with
+  numerically stable mis_power that sidesteps the inf/inf=NaN trap),
+  Fresnel reflection on medium exit (the "ghost" second reflection visible
+  in clear glass), Probabilistic vs Absorption transmission modes for
+  glass with a UI toggle and CLI flag.
+- **Phase 10.6 — Headless render CLI (unplanned).** `MacVoxel render
+  --input … --output …` invocation that bypasses NSApplicationMain and
+  drives PathTraceRenderer directly. Deterministic per `--seed`. Lets
+  Claude (and CI) iterate on the renderer without a GUI session.
+- **Phase 11 — Palette redesign.** 8×32 grid matching MagicaVoxel's
+  layout (id 1 bottom-left, id 0 top-right corner with hatch),
+  per-axis swatch scaling within [8, 28] px, click-drag rect selection,
+  shift-click / shift-drag toggle, bulk material editor in the Render
+  panel writing to all selected slots. Material section moved out of
+  the Palette panel into the Render panel as part of this. Fixed an
+  old keyboard-input bug along the way (VoxelView was claiming first
+  responder, evicting ImGui's KeyEventResponder).
 
 ## Phase 12 — New modeling tools
 
@@ -132,7 +113,7 @@ phase boundary, not a side change.
 
 ## Suggested next-up
 
-If we had to pick one phase right now: **Phase 9** (modeling cleanup), then
-**Phase 10** (render QoL + ACES). Both are mostly small commits, both are
-visible improvements every session, and they unblock the bigger phases that
-follow.
+**Phase 12 — modeling tools.** The renderer and palette UX are in a good
+spot; the next visible-every-session win is making it faster to *build*
+voxel models. Line and box tools are small commits each; face/extrude
+unlocks the kind of moves that turn a sketch into a finished shape.
