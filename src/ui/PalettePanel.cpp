@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <random>
 #include <vector>
 
 namespace macvoxel {
@@ -350,8 +351,15 @@ void DrawPalettePanel(Document& doc) {
                 paint_each([&] { return v; });
             }
 
-            ImGui::MenuItem("Paint voxels with random selected colors",
-                            nullptr, false, false);
+            const bool paint_random_ok =
+                has_voxel_sel && selected_idx.size() >= 2;
+            if (ImGui::MenuItem("Paint voxels with random selected colors",
+                                nullptr, false, paint_random_ok)) {
+                std::mt19937 rng{std::random_device{}()};
+                std::uniform_int_distribution<size_t> dist(
+                    0, selected_idx.size() - 1);
+                paint_each([&] { return selected_idx[dist(rng)]; });
+            }
             ImGui::Separator();
             // Endpoints are the lowest- and highest-index selected slots;
             // each selected slot in between gets the lerped color at its
