@@ -60,6 +60,19 @@ uint8_t& ContextSlot() {
     return s;
 }
 
+// Single-color clipboard for the palette right-click "Copy/Paste color"
+// action. Separate from the voxel-region clipboard in Clipboard.h —
+// they're orthogonal: this one is RGBA only, used to ferry a color
+// value between palette slots.
+struct ColorClipboard {
+    Color color{};
+    bool has_value = false;
+};
+ColorClipboard& ColorClip() {
+    static ColorClipboard c;
+    return c;
+}
+
 // Clamp a (col, row) computed from raw mouse position to grid bounds so
 // drag sweeps that wander outside the panel still produce a valid rect.
 int Clamp(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
@@ -223,8 +236,23 @@ void DrawPalettePanel(Document& doc) {
             const size_t n_sel = tool.selected_slots.count();
             ImGui::TextDisabled("idx %u  (%zu selected)", ctx, n_sel);
             ImGui::Separator();
-            ImGui::MenuItem("Copy color", nullptr, false, false);
-            ImGui::MenuItem("Paste color", nullptr, false, false);
+            if (ImGui::MenuItem("Copy color")) {
+                ColorClip().color = doc.palette.Get(ctx);
+                ColorClip().has_value = true;
+            }
+            if (ImGui::MenuItem("Paste color", nullptr, false,
+                                ColorClip().has_value)) {
+                const Color c = ColorClip().color;
+                bool any = false;
+                for (int i = 1; i < 256; ++i) {
+                    if (!tool.selected_slots.test(i)) continue;
+                    if (!(doc.palette.Get(static_cast<uint8_t>(i)) == c)) {
+                        doc.palette.Set(static_cast<uint8_t>(i), c);
+                        any = true;
+                    }
+                }
+                if (any) ++doc.version;
+            }
             ImGui::Separator();
             ImGui::MenuItem("Select voxels by color", nullptr, false, false);
             ImGui::MenuItem("Paint voxels with selected color", nullptr, false, false);
