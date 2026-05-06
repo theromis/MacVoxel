@@ -428,12 +428,18 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 }
 
 // ---------------------------------------------------------------------------
-// First responder — without this, the view never receives keyboard events
-// and ImGui's text input / shortcuts go nowhere.
+// First responder — return NO so AppKit doesn't promote VoxelView to first
+// responder when the user clicks on it. ImGui's OSX backend installs a
+// hidden KeyEventResponder NSView during ImGui_ImplOSX_Init that needs to
+// remain first responder so keyDown events get absorbed and routed through
+// interpretKeyEvents: into ImGui's text input. Mouse events still reach
+// us regardless of responder status (they route to the view under the
+// cursor), and menu shortcuts route through the responder chain via
+// target=nil so they fall through to AppDelegate as before.
 // ---------------------------------------------------------------------------
 
 - (BOOL)acceptsFirstResponder {
-    return YES;
+    return NO;
 }
 
 - (BOOL)acceptsFirstMouse:(NSEvent*)__unused event {
