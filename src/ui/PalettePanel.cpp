@@ -1,6 +1,7 @@
 #include "PalettePanel.h"
 
 #include "Document.h"
+#include "EditHistory.h"
 #include "Palette.h"
 #include "Selection.h"
 #include "ToolState.h"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <vector>
 
 namespace macvoxel {
 namespace {
@@ -298,7 +300,56 @@ void DrawPalettePanel(Document& doc) {
                 sel.box = b;
                 sel.active = !sel.voxels.empty();
             }
-            ImGui::MenuItem("Paint voxels with selected color", nullptr, false, false);
+            // Paint operations need (a) a voxel selection to act on and
+            // (b) the right number of palette slots selected — single
+            // slot for the solid paint, multiple for the random pick.
+            const Selection& sel_view = CurrentSelection();
+            const bool has_voxel_sel =
+                sel_view.active &&
+                (!sel_view.voxels.empty() || !sel_view.box.empty());
+            // Collect selected slot indices once; reused by both paint
+            // variants below.
+            std::vector<uint8_t> selected_idx;
+            selected_idx.reserve(n_sel);
+            for (int i = 1; i < 256; ++i) {
+                if (tool.selected_slots.test(i))
+                    selected_idx.push_back(static_cast<uint8_t>(i));
+            }
+
+            auto paint_each = [&](auto&& choose) {
+                Selection& sel = CurrentSelection();
+                EditHistory& hist = CurrentHistory();
+                hist.BeginOp();
+                bool any = false;
+                auto try_paint = [&](int32_t x, int32_t y, int32_t z) {
+                    const uint8_t old = doc.grid.Get(x, y, z);
+                    if (old == 0) return;  // empty cells aren't "voxels"
+                    const uint8_t nv = choose();
+                    if (nv == 0 || nv == old) return;
+                    doc.grid.Set(x, y, z, nv);
+                    hist.Record(x, y, z, old, nv);
+                    any = true;
+                };
+                if (!sel.voxels.empty()) {
+                    for (const auto& v : sel.voxels) try_paint(v[0], v[1], v[2]);
+                } else {
+                    for (int32_t z = sel.box.min_z; z <= sel.box.max_z; ++z)
+                        for (int32_t y = sel.box.min_y; y <= sel.box.max_y; ++y)
+                            for (int32_t x = sel.box.min_x; x <= sel.box.max_x; ++x)
+                                try_paint(x, y, z);
+                }
+                hist.CommitOp();
+                if (any) ++doc.version;
+            };
+
+            const bool paint_solid_ok =
+                has_voxel_sel && selected_idx.size() == 1;
+            if (ImGui::MenuItem("Paint voxels with selected color", nullptr,
+                                false, paint_solid_ok)) {
+                const uint8_t v = selected_idx.front();
+                paint_each([&] { return v; });
+            }
+
             ImGui::MenuItem("Paint voxels with random selected colors",
                             nullptr, false, false);
             ImGui::Separator();
