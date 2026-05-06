@@ -757,53 +757,141 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     const float aspect = w / h;
     const simd::float4x4 vp = _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
 
-    // Selection box in grid voxel coords; voxels span [c, c+1] so the
-    // outer faces are at min .. max+1.
-    const simd::float3 gmin{static_cast<float>(sel.box.min_x),
-                            static_cast<float>(sel.box.min_y),
-                            static_cast<float>(sel.box.min_z)};
-    const simd::float3 gmax{static_cast<float>(sel.box.max_x + 1),
-                            static_cast<float>(sel.box.max_y + 1),
-                            static_cast<float>(sel.box.max_z + 1)};
-
-    auto to_world = [](simd::float3 g) {
-        // Same R = (gx, gz, -gy) the renderer applies.
-        return simd::float3{g.x, g.z, -g.y};
-    };
-
-    simd::float3 corners_grid[8] = {
-        {gmin.x, gmin.y, gmin.z}, {gmax.x, gmin.y, gmin.z},
-        {gmax.x, gmax.y, gmin.z}, {gmin.x, gmax.y, gmin.z},
-        {gmin.x, gmin.y, gmax.z}, {gmax.x, gmin.y, gmax.z},
-        {gmax.x, gmax.y, gmax.z}, {gmin.x, gmax.y, gmax.z},
-    };
-    ImVec2 screen[8];
-    bool valid[8];
-    for (int i = 0; i < 8; ++i) {
-        const simd::float3 wpos = to_world(corners_grid[i]);
-        const simd::float4 clip = simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
-        valid[i] = clip.w > 0.001f;
-        if (valid[i]) {
-            const float ndc_x = clip.x / clip.w;
-            const float ndc_y = clip.y / clip.w;
-            screen[i].x = (ndc_x * 0.5f + 0.5f) * w;
-            screen[i].y = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;  // ImGui Y-down
-        }
-    }
-
-    // 12 edges as pairs of corner indices.
+    // 12 edges of a unit cube as pairs of corner indices.
     static const int kEdges[12][2] = {
         {0, 1}, {1, 2}, {2, 3}, {3, 0},  // bottom
         {4, 5}, {5, 6}, {6, 7}, {7, 4},  // top
         {0, 4}, {1, 5}, {2, 6}, {3, 7},  // verticals
     };
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    const ImU32 color = IM_COL32(255, 220, 80, 255);
-    for (int i = 0; i < 12; ++i) {
-        const int a = kEdges[i][0];
-        const int b = kEdges[i][1];
-        if (!valid[a] || !valid[b]) continue;
-        dl->AddLine(screen[a], screen[b], color, 1.5f);
+
+    auto project_corners = [&](simd::float3 gmin, simd::float3 gmax,
+                               ImVec2* screen, bool* valid) {
+        // Same R = (gx, gz, -gy) the renderer applies.
+        const simd::float3 corners_grid[8] = {
+            {gmin.x, gmin.y, gmin.z}, {gmax.x, gmin.y, gmin.z},
+            {gmax.x, gmax.y, gmin.z}, {gmin.x, gmax.y, gmin.z},
+            {gmin.x, gmin.y, gmax.z}, {gmax.x, gmin.y, gmax.z},
+            {gmax.x, gmax.y, gmax.z}, {gmin.x, gmax.y, gmax.z},
+        };
+        for (int i = 0; i < 8; ++i) {
+            const simd::float3 g = corners_grid[i];
+            const simd::float3 wpos{g.x, g.z, -g.y};
+            const simd::float4 clip =
+                simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
+            valid[i] = clip.w > 0.001f;
+            if (valid[i]) {
+                const float ndc_x = clip.x / clip.w;
+                const float ndc_y = clip.y / clip.w;
+                screen[i].x = (ndc_x * 0.5f + 0.5f) * w;
+                screen[i].y = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;  // ImGui Y-down
+            }
+        }
+    };
+
+    auto stroke_edges = [&](const ImVec2* screen, const bool* valid,
+                            const int (*edges)[2], int n,
+                            ImU32 color, float thickness) {
+        for (int i = 0; i < n; ++i) {
+            const int a = edges[i][0];
+            const int b = edges[i][1];
+            if (!valid[a] || !valid[b]) continue;
+            dl->AddLine(screen[a], screen[b], color, thickness);
+        }
+    };
+
+    // Outer AABB. Voxels span [c, c+1] so the outer faces are at min..max+1.
+    {
+        const simd::float3 box_min{static_cast<float>(sel.box.min_x),
+                                   static_cast<float>(sel.box.min_y),
+                                   static_cast<float>(sel.box.min_z)};
+        const simd::float3 box_max{static_cast<float>(sel.box.max_x + 1),
+                                   static_cast<float>(sel.box.max_y + 1),
+                                   static_cast<float>(sel.box.max_z + 1)};
+        ImVec2 screen[8];
+        bool valid[8];
+        project_corners(box_min, box_max, screen, valid);
+        stroke_edges(screen, valid, kEdges, 12,
+                     IM_COL32(255, 220, 80, 255), 1.5f);
+    }
+
+    if (sel.voxels.empty()) return;
+
+    // Per-voxel highlights for sparse selections. Two passes of
+    // hidden-line removal keep the overlay legible when thousands of
+    // voxels are selected:
+    //  1. Skip faces whose neighbor cell is also selected — internal
+    //     boundaries collapse, leaving only the silhouette of the
+    //     selected region.
+    //  2. Of those, skip back-facing faces (normal pointing away from
+    //     the camera) so we don't double-stroke through the silhouette.
+    // The 6 faces and their corner-quads, paired with the neighbor
+    // offset that would hide them. Order: +X, -X, +Y, -Y, +Z, -Z. Each
+    // face's 4 edges live in indices kFaceEdges[face][0..3].
+    static const int kFaceEdges[6][4][2] = {
+        {{1, 2}, {2, 6}, {6, 5}, {5, 1}},  // +X
+        {{0, 3}, {3, 7}, {7, 4}, {4, 0}},  // -X
+        {{3, 2}, {2, 6}, {6, 7}, {7, 3}},  // +Y
+        {{0, 1}, {1, 5}, {5, 4}, {4, 0}},  // -Y
+        {{4, 5}, {5, 6}, {6, 7}, {7, 4}},  // +Z
+        {{0, 1}, {1, 2}, {2, 3}, {3, 0}},  // -Z
+    };
+    static const int kNeighbor[6][3] = {
+        {+1, 0, 0}, {-1, 0, 0},
+        {0, +1, 0}, {0, -1, 0},
+        {0, 0, +1}, {0, 0, -1},
+    };
+    // Face outward normal in world space (after R = (gx, gz, -gy)):
+    // grid +X→world +X, grid +Y→world -Z, grid +Z→world +Y.
+    static const simd::float3 kFaceNormalWorld[6] = {
+        { 1.0f,  0.0f,  0.0f},
+        {-1.0f,  0.0f,  0.0f},
+        { 0.0f,  0.0f, -1.0f},
+        { 0.0f,  0.0f,  1.0f},
+        { 0.0f,  1.0f,  0.0f},
+        { 0.0f, -1.0f,  0.0f},
+    };
+
+    auto pack = [](int32_t x, int32_t y, int32_t z) {
+        // 21 bits per axis (range ±2^20 ≈ ±1M voxels), masked so
+        // negatives don't bleed into adjacent fields.
+        const uint64_t ux = uint64_t(static_cast<uint32_t>(x)) & 0x1FFFFFu;
+        const uint64_t uy = uint64_t(static_cast<uint32_t>(y)) & 0x1FFFFFu;
+        const uint64_t uz = uint64_t(static_cast<uint32_t>(z)) & 0x1FFFFFu;
+        return (ux << 42) | (uy << 21) | uz;
+    };
+    std::unordered_set<uint64_t> selected_set;
+    selected_set.reserve(sel.voxels.size() * 2);
+    for (const auto& v : sel.voxels) {
+        selected_set.insert(pack(v[0], v[1], v[2]));
+    }
+
+    const simd::float3 cam = _camera.Position();
+    const ImU32 voxel_color = IM_COL32(255, 220, 80, 200);
+    for (const auto& v : sel.voxels) {
+        const simd::float3 cmin{static_cast<float>(v[0]),
+                                static_cast<float>(v[1]),
+                                static_cast<float>(v[2])};
+        const simd::float3 cmax{cmin.x + 1.0f, cmin.y + 1.0f, cmin.z + 1.0f};
+        ImVec2 screen[8];
+        bool valid[8];
+        project_corners(cmin, cmax, screen, valid);
+        // Cell center in world space, used for the back-face cull.
+        const simd::float3 center_world{
+            cmin.x + 0.5f, cmin.z + 0.5f, -(cmin.y + 0.5f)};
+        for (int f = 0; f < 6; ++f) {
+            if (selected_set.count(pack(v[0] + kNeighbor[f][0],
+                                        v[1] + kNeighbor[f][1],
+                                        v[2] + kNeighbor[f][2]))) {
+                continue;  // interior face
+            }
+            const simd::float3 to_cam = cam - center_world;
+            if (simd_dot(to_cam, kFaceNormalWorld[f]) <= 0.0f) {
+                continue;  // back-facing
+            }
+            stroke_edges(screen, valid, kFaceEdges[f], 4,
+                         voxel_color, 1.0f);
+        }
     }
 }
 
