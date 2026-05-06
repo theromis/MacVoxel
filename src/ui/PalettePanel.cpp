@@ -83,25 +83,32 @@ void DrawPalettePanel(Document& doc) {
             ImGui::GetTextLineHeight() +
             ImGui::GetFrameHeightWithSpacing() * 2.0f;
         const ImVec2 avail = ImGui::GetContentRegionAvail();
-        const float sw_x =
-            (avail.x - (kPaletteCols - 1) * spacing) / kPaletteCols;
-        const float sw_y =
+        // Cells size independently along each axis so the grid fills
+        // both directions of the panel — they go rectangular when the
+        // panel's aspect ratio doesn't match the grid's. Each axis is
+        // clamped to [kMinSwatch, kMaxSwatch] so cells stay clickable
+        // on small panels and don't get gigantic on maximized ones.
+        const float sw_x = std::clamp(
+            (avail.x - (kPaletteCols - 1) * spacing) / kPaletteCols,
+            kMinSwatch, kMaxSwatch);
+        const float sw_y = std::clamp(
             (std::max(64.0f, avail.y - reserved) -
-             (kPaletteRows - 1) * spacing) / kPaletteRows;
-        const float swatch = std::clamp(std::min(sw_x, sw_y),
-                                        kMinSwatch, kMaxSwatch);
+             (kPaletteRows - 1) * spacing) / kPaletteRows,
+            kMinSwatch, kMaxSwatch);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 origin = ImGui::GetCursorScreenPos();
-        const float total_w = kPaletteCols * (swatch + spacing) - spacing;
-        const float total_h = kPaletteRows * (swatch + spacing) - spacing;
+        const float step_x = sw_x + spacing;
+        const float step_y = sw_y + spacing;
+        const float total_w = kPaletteCols * step_x - spacing;
+        const float total_h = kPaletteRows * step_y - spacing;
         ImGui::InvisibleButton("palette_grid", ImVec2(total_w, total_h));
 
         const ImVec2 mouse = ImGui::GetIO().MousePos;
         const int hover_col = Clamp(
-            static_cast<int>((mouse.x - origin.x) / (swatch + spacing)),
+            static_cast<int>((mouse.x - origin.x) / step_x),
             0, kPaletteCols - 1);
         const int hover_row = Clamp(
-            static_cast<int>((mouse.y - origin.y) / (swatch + spacing)),
+            static_cast<int>((mouse.y - origin.y) / step_y),
             0, kPaletteRows - 1);
         const bool grid_hovered = ImGui::IsItemHovered();
 
@@ -144,9 +151,9 @@ void DrawPalettePanel(Document& doc) {
         // ends up where it should regardless of mapping changes.
         for (int row = 0; row < kPaletteRows; ++row) {
             for (int col = 0; col < kPaletteCols; ++col) {
-                const ImVec2 a{origin.x + col * (swatch + spacing),
-                               origin.y + row * (swatch + spacing)};
-                const ImVec2 b{a.x + swatch, a.y + swatch};
+                const ImVec2 a{origin.x + col * step_x,
+                               origin.y + row * step_y};
+                const ImVec2 b{a.x + sw_x, a.y + sw_y};
                 const uint8_t idx = SlotIndexAt(col, row);
                 const Color c = doc.palette.Get(idx);
                 dl->AddRectFilled(a, b, ColorToImU32(c));
@@ -172,9 +179,8 @@ void DrawPalettePanel(Document& doc) {
         {
             int ac = 0, ar = 0;
             SlotPosition(tool.palette_idx, ac, ar);
-            const ImVec2 a{origin.x + ac * (swatch + spacing),
-                           origin.y + ar * (swatch + spacing)};
-            const ImVec2 b{a.x + swatch, a.y + swatch};
+            const ImVec2 a{origin.x + ac * step_x, origin.y + ar * step_y};
+            const ImVec2 b{a.x + sw_x, a.y + sw_y};
             dl->AddRect(a, b, IM_COL32(255, 220, 80, 255), 0.0f, 0, 2.0f);
         }
         // Live drag rectangle overlay while the user is dragging.
@@ -183,10 +189,10 @@ void DrawPalettePanel(Document& doc) {
             const int max_c = std::max(Drag().start_col, hover_col);
             const int min_r = std::min(Drag().start_row, hover_row);
             const int max_r = std::max(Drag().start_row, hover_row);
-            const ImVec2 a{origin.x + min_c * (swatch + spacing) - 1.0f,
-                           origin.y + min_r * (swatch + spacing) - 1.0f};
-            const ImVec2 b{origin.x + (max_c + 1) * (swatch + spacing),
-                           origin.y + (max_r + 1) * (swatch + spacing)};
+            const ImVec2 a{origin.x + min_c * step_x - 1.0f,
+                           origin.y + min_r * step_y - 1.0f};
+            const ImVec2 b{origin.x + (max_c + 1) * step_x,
+                           origin.y + (max_r + 1) * step_y};
             dl->AddRect(a, b, IM_COL32(255, 220, 80, 255), 2.0f, 0, 1.5f);
         }
     }
