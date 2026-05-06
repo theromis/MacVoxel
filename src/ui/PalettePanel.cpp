@@ -52,6 +52,14 @@ DragState& Drag() {
     return s;
 }
 
+// The slot the user right-clicked to open the context menu. Captured at
+// popup-open time so menu actions don't depend on whatever the cursor
+// happens to be over while the popup is up.
+uint8_t& ContextSlot() {
+    static uint8_t s = 0;
+    return s;
+}
+
 // Clamp a (col, row) computed from raw mouse position to grid bounds so
 // drag sweeps that wander outside the panel still produce a valid rect.
 int Clamp(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
@@ -119,6 +127,20 @@ void DrawPalettePanel(Document& doc) {
             Drag().start_col = hover_col;
             Drag().start_row = hover_row;
             Drag().shift = ImGui::GetIO().KeyShift;
+        }
+        // Right-click opens a context menu scoped to the slot under the
+        // cursor. If that slot isn't already in the selection, replace
+        // the selection with it so menu actions read like "operate on
+        // what I just clicked".
+        if (grid_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            const uint8_t ctx = SlotIndexAt(hover_col, hover_row);
+            ContextSlot() = ctx;
+            if (!tool.selected_slots.test(ctx)) {
+                tool.selected_slots.reset();
+                tool.selected_slots.set(ctx);
+                tool.palette_idx = ctx;
+            }
+            ImGui::OpenPopup("palette_ctx");
         }
         if (ImGui::IsItemDeactivated() && Drag().active) {
             const int min_c = std::min(Drag().start_col, hover_col);
@@ -194,6 +216,23 @@ void DrawPalettePanel(Document& doc) {
             const ImVec2 b{origin.x + (max_c + 1) * step_x,
                            origin.y + (max_r + 1) * step_y};
             dl->AddRect(a, b, IM_COL32(255, 220, 80, 255), 2.0f, 0, 1.5f);
+        }
+
+        if (ImGui::BeginPopup("palette_ctx")) {
+            const uint8_t ctx = ContextSlot();
+            const size_t n_sel = tool.selected_slots.count();
+            ImGui::TextDisabled("idx %u  (%zu selected)", ctx, n_sel);
+            ImGui::Separator();
+            ImGui::MenuItem("Copy color", nullptr, false, false);
+            ImGui::MenuItem("Paste color", nullptr, false, false);
+            ImGui::Separator();
+            ImGui::MenuItem("Select voxels by color", nullptr, false, false);
+            ImGui::MenuItem("Paint voxels with selected color", nullptr, false, false);
+            ImGui::MenuItem("Paint voxels with random selected colors",
+                            nullptr, false, false);
+            ImGui::Separator();
+            ImGui::MenuItem("Make gradient", nullptr, false, false);
+            ImGui::EndPopup();
         }
     }
 
