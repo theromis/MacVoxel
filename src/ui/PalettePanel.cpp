@@ -65,15 +65,31 @@ void DrawPalettePanel(Document& doc) {
     ImGui::Begin("Palette");
 
     // -----------------------------------------------------------------
-    // Swatch grid (8 cols × 32 rows). Swatch size scales to fit the
-    // panel's horizontal space; the grid scrolls if the window is too
-    // short to display all 32 rows at the chosen swatch size.
+    // Swatch grid (8 cols × 32 rows). Cells scale to fit both the
+    // horizontal and vertical space available in the panel — whichever
+    // dimension is the limiter — clamped to a sane min/max so they
+    // stay clickable but don't get gigantic on a maximized window. A
+    // small fixed reservation at the bottom keeps the index label and
+    // color editor visible without overlapping the grid.
     // -----------------------------------------------------------------
     {
         const float spacing = 1.0f;
-        const float avail = ImGui::GetContentRegionAvail().x;
-        const float swatch = std::max(8.0f,
-            (avail - (kPaletteCols - 1) * spacing) / kPaletteCols);
+        const float kMinSwatch = 8.0f;
+        const float kMaxSwatch = 28.0f;
+        // Reserve room for the editor that follows the grid (separator,
+        // "Index N" line, and the ColorEdit4 row).
+        const float reserved =
+            ImGui::GetStyle().ItemSpacing.y * 2.0f +
+            ImGui::GetTextLineHeight() +
+            ImGui::GetFrameHeightWithSpacing() * 2.0f;
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const float sw_x =
+            (avail.x - (kPaletteCols - 1) * spacing) / kPaletteCols;
+        const float sw_y =
+            (std::max(64.0f, avail.y - reserved) -
+             (kPaletteRows - 1) * spacing) / kPaletteRows;
+        const float swatch = std::clamp(std::min(sw_x, sw_y),
+                                        kMinSwatch, kMaxSwatch);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const float total_w = kPaletteCols * (swatch + spacing) - spacing;
