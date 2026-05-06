@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bitset>
 #include <cstdint>
 
 namespace macvoxel {
@@ -28,6 +29,12 @@ struct ToolState {
     // Brush extent: edges of (2r-1) voxels per side, centered on the
     // hit cell (r=1 -> 1 voxel; r=2 -> 3x3x3; r=3 -> 5x5x5).
     int brush_radius = 1;
+    // Multi-selection of palette slots, driven by the Palette panel's
+    // click-drag / shift-click. The Material editor in the Render panel
+    // writes edits to every selected slot. `palette_idx` is always a
+    // member of this set when non-empty, and is the single "active"
+    // slot whose values the editor displays.
+    std::bitset<256> selected_slots{};
 };
 
 // Single global tool state — single-document app, single shared tool config.

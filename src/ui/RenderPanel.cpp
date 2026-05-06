@@ -103,17 +103,25 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
     ImGui::Spacing();
 
     // -----------------------------------------------------------------
-    // Material editor for the palette index currently selected in the
-    // Palette panel. Changes apply immediately and bump doc.version, so
-    // the path tracer rebuilds and re-accumulates.
+    // Material editor. The active palette index drives what the sliders
+    // *display*, but writes propagate to every selected palette slot —
+    // so a multi-select in the Palette panel turns this into a bulk
+    // editor. Index 0 (the empty slot) is intentionally excluded from
+    // writes; it's not paintable and has no material meaning.
     // -----------------------------------------------------------------
     ImGui::PushFont(Fonts().header);
     ImGui::TextUnformatted("Material");
     ImGui::PopFont();
     ImGui::Indent();
     {
-        const uint8_t idx = CurrentTool().palette_idx;
-        ImGui::Text("Index %u", idx);
+        ToolState& tool = CurrentTool();
+        const uint8_t idx = tool.palette_idx;
+        const size_t sel_count = tool.selected_slots.count();
+        if (sel_count > 1) {
+            ImGui::Text("Index %u  (+%zu more selected)", idx, sel_count - 1);
+        } else {
+            ImGui::Text("Index %u", idx);
+        }
 
         Material m = doc.palette.GetMaterial(idx);
         bool dirty = false;
@@ -150,7 +158,14 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
         if (ImGui::SliderFloat("Transparency", &m.transparency, 0.0f, 1.0f)) dirty = true;
         if (ImGui::SliderFloat("IoR",        &m.ior,        1.0f, 3.0f)) dirty = true;
         if (dirty) {
-            doc.palette.SetMaterial(idx, m);
+            for (size_t i = 1; i < tool.selected_slots.size(); ++i) {
+                if (tool.selected_slots.test(i)) {
+                    doc.palette.SetMaterial(static_cast<uint8_t>(i), m);
+                }
+            }
+            // Always write the active slot too — single-slot edits work
+            // even if the selection somehow lost the active idx.
+            if (idx != 0) doc.palette.SetMaterial(idx, m);
             ++doc.version;
         }
     }
