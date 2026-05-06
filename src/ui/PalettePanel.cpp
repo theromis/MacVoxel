@@ -259,7 +259,40 @@ void DrawPalettePanel(Document& doc) {
             ImGui::MenuItem("Paint voxels with random selected colors",
                             nullptr, false, false);
             ImGui::Separator();
-            ImGui::MenuItem("Make gradient", nullptr, false, false);
+            // Endpoints are the lowest- and highest-index selected slots;
+            // each selected slot in between gets the lerped color at its
+            // index-parametric position. Unselected indices in the gap
+            // are left alone — the user's selection defines the gradient
+            // stops. Needs ≥3 selected slots so there's an interior to
+            // fill; with ≥3 distinct indices, at least one intermediate
+            // is guaranteed selected.
+            int g_lo = -1, g_hi = -1;
+            for (int i = 1; i < 256; ++i) {
+                if (tool.selected_slots.test(i)) {
+                    if (g_lo < 0) g_lo = i;
+                    g_hi = i;
+                }
+            }
+            if (ImGui::MenuItem("Make gradient", nullptr, false, n_sel >= 3)) {
+                const Color c0 = doc.palette.Get(static_cast<uint8_t>(g_lo));
+                const Color c1 = doc.palette.Get(static_cast<uint8_t>(g_hi));
+                const float span = static_cast<float>(g_hi - g_lo);
+                bool any = false;
+                for (int i = g_lo + 1; i < g_hi; ++i) {
+                    if (!tool.selected_slots.test(i)) continue;
+                    const float t = (i - g_lo) / span;
+                    Color nc;
+                    nc.r = static_cast<uint8_t>(c0.r + (c1.r - c0.r) * t + 0.5f);
+                    nc.g = static_cast<uint8_t>(c0.g + (c1.g - c0.g) * t + 0.5f);
+                    nc.b = static_cast<uint8_t>(c0.b + (c1.b - c0.b) * t + 0.5f);
+                    nc.a = static_cast<uint8_t>(c0.a + (c1.a - c0.a) * t + 0.5f);
+                    if (!(doc.palette.Get(static_cast<uint8_t>(i)) == nc)) {
+                        doc.palette.Set(static_cast<uint8_t>(i), nc);
+                        any = true;
+                    }
+                }
+                if (any) ++doc.version;
+            }
             ImGui::EndPopup();
         }
     }
