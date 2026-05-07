@@ -348,8 +348,18 @@ fragment float4 raycast_fragment(
         _poolSlotsUsed = 0;
         _poolSlotsCapacity = 0;
     } else {
-        // Coarse-grid extents from chunk coords. Headroom isn't worth the
-        // complexity; if bounds grow during editing we'll wholesale-rebuild.
+        // Coarse-grid extents from chunk coords, inflated with headroom so
+        // edits that grow the model into nearby empty chunks don't fall
+        // outside the cached bounds and trigger another wholesale rebuild.
+        // Without this, dragging the brush / Face tool into empty space
+        // re-uploads the entire chunk pool every frame: two MTLBuffer
+        // allocations + a memcpy per chunk for the whole document, which
+        // tanks framerate on anything beyond a few-chunk model.
+        //
+        // Cost is one bigger coarse buffer (4 bytes per padded slot —
+        // trivial). The pool buffer is unaffected; growPoolToSlots: still
+        // amortizes new-slot growth via doubling.
+        constexpr int32_t kPaddingChunks = 4;
         int32_t min_cx = INT32_MAX, min_cy = INT32_MAX, min_cz = INT32_MAX;
         int32_t max_cx = INT32_MIN, max_cy = INT32_MIN, max_cz = INT32_MIN;
         for (const auto& [coord, chunk] : chunks) {
@@ -360,6 +370,8 @@ fragment float4 raycast_fragment(
             max_cy = std::max(max_cy, coord.y);
             max_cz = std::max(max_cz, coord.z);
         }
+        min_cx -= kPaddingChunks; min_cy -= kPaddingChunks; min_cz -= kPaddingChunks;
+        max_cx += kPaddingChunks; max_cy += kPaddingChunks; max_cz += kPaddingChunks;
         _coarseMin = simd::int3{min_cx, min_cy, min_cz};
         _coarseDim = simd::int3{max_cx - min_cx + 1,
                                 max_cy - min_cy + 1,
