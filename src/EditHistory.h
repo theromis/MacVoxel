@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <unordered_map>
 #include <vector>
 
 namespace macvoxel {
@@ -57,6 +58,11 @@ private:
     std::deque<EditOp> undo_;
     std::deque<EditOp> redo_;
     EditOp current_;
+    // Packed-coord → index into current_.changes for O(1) dedupe of
+    // same-cell rewrites within an op. The linear scan that lived here
+    // turned brush strokes into O(N²) work at large radii. Cleared on
+    // BeginOp / CommitOp / AbandonOp so it never outlives an op.
+    std::unordered_map<int64_t, size_t> current_index_;
     bool in_op_ = false;
 };
 
