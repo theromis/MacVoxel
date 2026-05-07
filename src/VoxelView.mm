@@ -8,7 +8,9 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <cstdio>
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "imgui.h"
 #include "imgui_impl_metal.h"
@@ -30,14 +32,53 @@
 #include "ui/ToolPanel.h"
 
 namespace {
-enum class DragMode { None, Orbit, Pan, Paint, Select };
+enum class DragMode { None, Orbit, Pan, Paint, Select, Shape };
 
 struct Vec3i { int32_t x, y, z; };
+struct LineHit { int32_t x, y, z; int face_axis; };
 
 constexpr Vec3i kInvalidCell{INT32_MIN, INT32_MIN, INT32_MIN};
 
 bool SameCell(const Vec3i& a, const Vec3i& b) {
     return a.x == b.x && a.y == b.y && a.z == b.z;
+}
+
+// Inverse of macvoxel::PackCellKey. The packed encoding stores 21-bit
+// fields with implicit two's-complement sign extension; reverse it with
+// the standard `(u ^ signBit) - signBit` sign-extend trick.
+inline void UnpackCellKey(int64_t key, int32_t* x, int32_t* y, int32_t* z) {
+    constexpr uint64_t kFieldMask = (1ull << 21) - 1ull;
+    constexpr uint32_t kSignBit = 1u << 20;
+    auto extend = [](uint64_t v) -> int32_t {
+        const uint32_t u = static_cast<uint32_t>(v & kFieldMask);
+        return static_cast<int32_t>((u ^ kSignBit) - kSignBit);
+    };
+    const uint64_t k = static_cast<uint64_t>(key);
+    *x = extend(k);
+    *y = extend(k >> 21);
+    *z = extend(k >> 42);
+}
+
+// Standard 3D Bresenham (Amanatides-style integer DDA): emits every cell
+// the segment passes through, inclusive of both endpoints, with no diagonal
+// gaps. Output is dm+1 cells where dm = max(|dx|, |dy|, |dz|).
+void Bresenham3D(int x0, int y0, int z0, int x1, int y1, int z1,
+                 std::vector<Vec3i>& out) {
+    out.clear();
+    const int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    const int dy = std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    const int dz = std::abs(z1 - z0), sz = z0 < z1 ? 1 : -1;
+    const int dm = std::max({dx, dy, dz});
+    int x = x0, y = y0, z = z0;
+    int ex = dm / 2, ey = dm / 2, ez = dm / 2;
+    out.reserve(static_cast<size_t>(dm) + 1);
+    out.push_back({x, y, z});
+    for (int i = 0; i < dm; ++i) {
+        ex -= dx; if (ex < 0) { ex += dm; x += sx; }
+        ey -= dy; if (ey < 0) { ey += dm; y += sy; }
+        ez -= dz; if (ez < 0) { ez += dm; z += sz; }
+        out.push_back({x, y, z});
+    }
 }
 }
 
@@ -61,6 +102,32 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     NSTrackingArea* _trackingArea;
     BOOL _imguiAlive;
     bool _wasPathTraced;
+    // Two-click tools (Line, Circle, …): between click 1 and click 2.
+    // Anchor cell + face axis are computed at click 1 (via the line-endpoint
+    // picker); the screen-space anchor point is used as one endpoint of the
+    // screen-space segment in Line's Project mode. The mode and tool are
+    // frozen at click 1 so switching either mid-stroke doesn't surprise the
+    // user; the per-frame sweep cancels the anchor when they change.
+    BOOL _hasAnchor;
+    Vec3i _anchorCell;
+    int _anchorFaceAxis;
+    macvoxel::ToolMode _anchorMode;
+    NSPoint _anchorScreen;
+    macvoxel::ToolKind _anchorTool;
+    // Face tool only: result of the click-time flood fill (all coplanar
+    // same-color cells whose face on (_anchorFaceAxis, _faceSign) is
+    // exposed) and the source color used for extrusions.
+    int _faceSign;
+    uint8_t _faceSeedColor;
+    std::vector<Vec3i> _faceSeedCells;
+    // Live voxel preview for shape tools (Line/Circle/Square): each entry
+    // is a cell touched during the current drag mapped to its original
+    // grid value (before any preview edits this drag). On every dragged
+    // event we restore these and re-stamp the new shape, so the document
+    // visibly tracks the cursor without polluting EditHistory. On mouseUp
+    // we roll back one last time and commit the final shape through the
+    // normal history path so the whole drag becomes a single undo step.
+    std::unordered_map<int64_t, uint8_t> _shapePreview;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -348,6 +415,23 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     ImGui_ImplOSX_NewFrame(self);
     ImGui::NewFrame();
 
+    // Cancel a pending shape anchor on Escape or when the user switches
+    // tools mid-stroke. ImGui owns keyDown via its hidden KeyEventResponder,
+    // so we read the IO-level state instead of overriding -keyDown:.
+    // Clearing _dragMode too means the upcoming mouseUp won't try to
+    // commit the (now anchor-less) shape.
+    if (_hasAnchor) {
+        if (macvoxel::CurrentTool().tool != _anchorTool ||
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            if (_dragMode == DragMode::Shape) {
+                [self rollbackShapePreview];
+                _dragMode = DragMode::None;
+            }
+            _hasAnchor = NO;
+            _faceSeedCells.clear();
+        }
+    }
+
     [self setupDockspace];
 
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
@@ -540,6 +624,51 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         } else {
             _dragMode = DragMode::None;
         }
+    } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Line ||
+               macvoxel::CurrentTool().tool == macvoxel::ToolKind::Circle ||
+               macvoxel::CurrentTool().tool == macvoxel::ToolKind::Square) {
+        // Click-and-drag shape tools — anchor on mouseDown, preview while
+        // dragging, commit on mouseUp at the release point.
+        const macvoxel::ToolMode mode = hasCommand ? macvoxel::ToolMode::Remove
+                                                    : macvoxel::CurrentTool().mode;
+        [self beginAnchorAtPoint:event.locationInWindow mode:mode];
+        if (_hasAnchor) {
+            _dragMode = DragMode::Shape;
+            // Track the cursor for the live preview while the button is
+            // held — mouseMoved doesn't fire during a drag.
+            _hoverWindowPoint = event.locationInWindow;
+            _hoverHasPoint = YES;
+            // Render the initial click-cell shape so a bare click (no
+            // drag) shows its placement before mouseUp commits.
+            [self refreshShapePreview];
+        } else {
+            _dragMode = DragMode::None;
+        }
+    } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Face) {
+        // Face tool: pick the clicked face, run a flood fill on the seed
+        // plane, then enter Shape drag for live extrude / inset preview.
+        Vec3i seed;
+        int axis = 2, sign = 1;
+        uint8_t color = 0;
+        if (![self pickFaceAtPoint:event.locationInWindow cell:&seed
+                              axis:&axis sign:&sign color:&color]) {
+            _dragMode = DragMode::None;
+            return;
+        }
+        _hasAnchor = YES;
+        _anchorCell = seed;
+        _anchorFaceAxis = axis;
+        _anchorMode = macvoxel::CurrentTool().mode;  // unused, kept for symmetry
+        _anchorScreen = event.locationInWindow;
+        _anchorTool = macvoxel::ToolKind::Face;
+        _faceSign = sign;
+        _faceSeedColor = color;
+        [self floodFaceFromCell:seed axis:axis sign:sign color:color
+                         output:_faceSeedCells];
+        _dragMode = DragMode::Shape;
+        _hoverWindowPoint = event.locationInWindow;
+        _hoverHasPoint = YES;
+        // No initial preview — d=0 with no drag means no extrusion yet.
     } else {
         _dragMode = DragMode::Paint;
         _paintMode = hasCommand ? macvoxel::ToolMode::Remove
@@ -578,13 +707,38 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
             }
             break;
         }
+        case DragMode::Shape:
+            // Re-render the live preview at the new cursor; the actual
+            // history entry happens on mouseUp at the release point.
+            _hoverWindowPoint = p;
+            _hoverHasPoint = YES;
+            [self refreshShapePreview];
+            break;
         case DragMode::None:  break;
     }
 }
 
-- (void)mouseUp:(NSEvent*)__unused event {
+- (void)mouseUp:(NSEvent*)event {
     if (_dragMode == DragMode::Paint) {
         macvoxel::CurrentHistory().CommitOp();
+    } else if (_dragMode == DragMode::Shape) {
+        // Wipe the live preview before the real commit so stampBrushAtX:
+        // sees the original grid contents and writes proper old/new pairs
+        // into EditHistory. Setting _dragMode to None first routes the
+        // commit*AtPoint stamps through the history branch.
+        [self rollbackShapePreview];
+        _dragMode = DragMode::None;
+        switch (_anchorTool) {
+            case macvoxel::ToolKind::Line:
+                [self commitLineAtPoint:event.locationInWindow]; break;
+            case macvoxel::ToolKind::Circle:
+                [self commitCircleAtPoint:event.locationInWindow]; break;
+            case macvoxel::ToolKind::Square:
+                [self commitSquareAtPoint:event.locationInWindow]; break;
+            case macvoxel::ToolKind::Face:
+                [self commitFaceAtPoint:event.locationInWindow]; break;
+            default: _hasAnchor = NO; break;
+        }
     }
     _dragMode = DragMode::None;
     _dragSkipCells.clear();
@@ -732,20 +886,34 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     if (ImGui::GetIO().WantCaptureMouse) return;
 
     const macvoxel::ToolState& t = macvoxel::CurrentTool();
-    if (t.tool != macvoxel::ToolKind::Brush) return;
+    const bool is_brush = t.tool == macvoxel::ToolKind::Brush;
+    const bool is_two_click = (t.tool == macvoxel::ToolKind::Line ||
+                               t.tool == macvoxel::ToolKind::Circle ||
+                               t.tool == macvoxel::ToolKind::Square);
+    if (!is_brush && !is_two_click) return;
 
+    auto color_for_mode = [](macvoxel::ToolMode m) {
+        switch (m) {
+            case macvoxel::ToolMode::Add:    return IM_COL32(120, 230, 140, 220);
+            case macvoxel::ToolMode::Remove: return IM_COL32(240, 110, 110, 220);
+            case macvoxel::ToolMode::Paint:  return IM_COL32(120, 180, 240, 220);
+        }
+        return IM_COL32(255, 255, 255, 220);
+    };
+
+    // Single-cell hover (Brush, or shape tools before mouseDown). Shape
+    // tools render a live voxel preview during the drag itself, so this
+    // overlay only shows the pre-click target indicator. Two-click tools
+    // accept empty-space anchors for Remove/Paint, so they use the
+    // line-endpoint picker; Brush keeps the stricter behavior.
     Vec3i cell;
-    if (![self computeTargetCellAtPoint:_hoverWindowPoint mode:t.mode into:&cell
-                                   face:nullptr]) {
-        return;
-    }
-    ImU32 color;
-    switch (t.mode) {
-        case macvoxel::ToolMode::Add:    color = IM_COL32(120, 230, 140, 220); break;
-        case macvoxel::ToolMode::Remove: color = IM_COL32(240, 110, 110, 220); break;
-        case macvoxel::ToolMode::Paint:  color = IM_COL32(120, 180, 240, 220); break;
-    }
-    [self drawCellWireAtX:cell.x y:cell.y z:cell.z color:color];
+    const BOOL ok = is_two_click
+        ? [self computeLineEndpointAtPoint:_hoverWindowPoint mode:t.mode
+                                      into:&cell face:nullptr]
+        : [self computeTargetCellAtPoint:_hoverWindowPoint mode:t.mode
+                                    into:&cell face:nullptr];
+    if (!ok) return;
+    [self drawCellWireAtX:cell.x y:cell.y z:cell.z color:color_for_mode(t.mode)];
 }
 
 - (void)drawSelectionOverlay {
@@ -998,24 +1166,12 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 }
 
 - (void)performEditAtPoint:(NSPoint)windowPoint mode:(macvoxel::ToolMode)mode {
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) return;
-
     Vec3i target;
     int face_axis = 2;
     if (![self computeTargetCellAtPoint:windowPoint mode:mode into:&target
                                    face:&face_axis]) {
         return;
     }
-    const int target_x = target.x;
-    const int target_y = target.y;
-    const int target_z = target.z;
-
-    macvoxel::ToolState& tool = macvoxel::CurrentTool();
-    const int size = std::max(1, tool.brush_size);
-    const int lo = -((size - 1) / 2);
-    const int hi = size / 2;
 
     // Drag-paint dedupe: only fire when the target cell changes. Without
     // this, every pointer-move event during a drag (many per frame) would
@@ -1026,10 +1182,30 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     }
     _lastDragEditCell = target;
 
+    [self stampBrushAtX:target.x y:target.y z:target.z
+              faceAxis:face_axis mode:mode];
+}
+
+// Stamp the current brush footprint at a specific cell. Extracted from
+// performEditAtPoint: so the Line tool can reuse it per voxel along the
+// segment while passing its own face_axis (anchor's axis for Straight mode,
+// per-step axis for Project mode).
+- (void)stampBrushAtX:(int)target_x y:(int)target_y z:(int)target_z
+             faceAxis:(int)face_axis mode:(macvoxel::ToolMode)mode {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return;
+
+    macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    const int size = std::max(1, tool.brush_size);
+    const int lo = -((size - 1) / 2);
+    const int hi = size / 2;
+
     macvoxel::EditHistory& history = macvoxel::CurrentHistory();
 
     const BOOL track_skip = (_dragMode == DragMode::Paint &&
                              mode == macvoxel::ToolMode::Add);
+    const BOOL preview = (_dragMode == DragMode::Shape);
     auto apply = [&](int x, int y, int z) {
         const uint8_t old_val = doc->grid.Get(x, y, z);
         uint8_t new_val = old_val;
@@ -1050,9 +1226,18 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         }
         if (new_val == old_val) return;
         doc->grid.Set(x, y, z, new_val);
-        history.Record(x, y, z, old_val, new_val);
-        if (track_skip) {
-            _dragSkipCells.insert(macvoxel::PackCellKey(x, y, z));
+        if (preview) {
+            // Snapshot the original value the *first* time this cell is
+            // touched during the drag; subsequent rollbacks restore that.
+            // After a rollback, old_val is again the original here, so
+            // try_emplace's no-overwrite-on-existing behavior is correct.
+            const int64_t key = macvoxel::PackCellKey(x, y, z);
+            _shapePreview.try_emplace(key, old_val);
+        } else {
+            history.Record(x, y, z, old_val, new_val);
+            if (track_skip) {
+                _dragSkipCells.insert(macvoxel::PackCellKey(x, y, z));
+            }
         }
     };
 
@@ -1094,6 +1279,618 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     }
 
     ++doc->version;
+}
+
+// ---------------------------------------------------------------------------
+// Line tool — two-click point-to-point. Click 1 stores an anchor; click 2
+// enumerates the line and stamps the brush at every cell.
+// ---------------------------------------------------------------------------
+
+// Endpoint picker for the Line tool. Like computeTargetCellAtPoint: but
+// also accepts empty-space clicks for Remove/Paint, falling through to the
+// same ground-plane fallback Add uses. Lets the user anchor a Remove or
+// Paint line on either side of the geometry it should pass through.
+// Per-step picking inside Project mode keeps the strict picker so empty
+// pixels between solid surfaces don't introduce phantom hits.
+- (BOOL)computeLineEndpointAtPoint:(NSPoint)windowPoint
+                              mode:(macvoxel::ToolMode)mode
+                              into:(Vec3i*)out
+                              face:(int*)out_face_axis {
+    if ([self computeTargetCellAtPoint:windowPoint mode:mode into:out
+                                  face:out_face_axis]) {
+        return YES;
+    }
+    if (mode == macvoxel::ToolMode::Add) return NO;
+    return [self computeTargetCellAtPoint:windowPoint
+                                     mode:macvoxel::ToolMode::Add
+                                     into:out face:out_face_axis];
+}
+
+- (void)enumerateLineFromAnchorTo:(NSPoint)cursor
+                          straight:(BOOL)straight
+                            output:(std::vector<LineHit>&)out {
+    out.clear();
+    if (!_hasAnchor) return;
+
+    if (straight) {
+        Vec3i endpoint;
+        int end_face = _anchorFaceAxis;
+        if (![self computeLineEndpointAtPoint:cursor mode:_anchorMode
+                                         into:&endpoint face:&end_face]) {
+            // Endpoint picker only fails when no usable cell exists at all
+            // (e.g., camera looking up so the ground-plane fallback is
+            // behind the camera). Show just the anchor.
+            out.push_back({_anchorCell.x, _anchorCell.y,
+                           _anchorCell.z, _anchorFaceAxis});
+            return;
+        }
+        std::vector<Vec3i> cells;
+        Bresenham3D(_anchorCell.x, _anchorCell.y, _anchorCell.z,
+                    endpoint.x, endpoint.y, endpoint.z, cells);
+        out.reserve(cells.size());
+        for (const Vec3i& c : cells) {
+            out.push_back({c.x, c.y, c.z, _anchorFaceAxis});
+        }
+        return;
+    }
+
+    // Project mode: walk the screen-space segment from the anchor click
+    // pixel to the cursor pixel, raycasting at each step. Each hit is the
+    // cell a single Brush click at that pixel would have produced.
+    const NSPoint s1 = _anchorScreen;
+    const NSPoint s2 = cursor;
+    const float dx = static_cast<float>(s2.x - s1.x);
+    const float dy = static_cast<float>(s2.y - s1.y);
+    // Oversample 2× so oblique screen-space lines don't skip voxels whose
+    // projection sits between integer pixels.
+    const int steps = std::max(1, static_cast<int>(
+        2.0f * std::max(std::fabs(dx), std::fabs(dy))));
+    std::unordered_set<int64_t> seen;
+    seen.reserve(static_cast<size_t>(steps) + 1);
+    for (int i = 0; i <= steps; ++i) {
+        const float u = static_cast<float>(i) / static_cast<float>(steps);
+        const NSPoint p{static_cast<CGFloat>(s1.x + dx * u),
+                        static_cast<CGFloat>(s1.y + dy * u)};
+        Vec3i cell;
+        int face_axis = _anchorFaceAxis;
+        if (![self computeTargetCellAtPoint:p mode:_anchorMode
+                                       into:&cell face:&face_axis]) {
+            continue;
+        }
+        const int64_t k = macvoxel::PackCellKey(cell.x, cell.y, cell.z);
+        if (!seen.insert(k).second) continue;
+        out.push_back({cell.x, cell.y, cell.z, face_axis});
+    }
+    // The anchor cell may not be among the per-step hits if the anchor
+    // started on the ground-plane fallback while the first stepped pixels
+    // hit different cells; ensure click 1's cell is always included so
+    // the line endpoint always reads as placed.
+    const int64_t anchor_k = macvoxel::PackCellKey(
+        _anchorCell.x, _anchorCell.y, _anchorCell.z);
+    if (seen.find(anchor_k) == seen.end()) {
+        out.insert(out.begin(), {_anchorCell.x, _anchorCell.y,
+                                 _anchorCell.z, _anchorFaceAxis});
+    }
+}
+
+// Restore every cell touched by the live shape preview to its original
+// value and drop the snapshot. Used between dragged frames to wipe the
+// previous shape before re-stamping the new one, and on Esc / mouseUp
+// before the final commit goes through the normal history path.
+- (void)rollbackShapePreview {
+    if (_shapePreview.empty()) return;
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) {
+        _shapePreview.clear();
+        return;
+    }
+    for (const auto& [key, orig] : _shapePreview) {
+        int32_t x, y, z;
+        UnpackCellKey(key, &x, &y, &z);
+        doc->grid.Set(x, y, z, orig);
+    }
+    _shapePreview.clear();
+    ++doc->version;
+}
+
+// Re-render the in-progress shape into the document at the current cursor.
+// Each cell's original value is preserved in `_shapePreview` so the next
+// frame can roll back. Stamps go through `stampBrushAtX:`, which detects
+// `_dragMode == Shape` and routes writes to the preview path instead of
+// EditHistory.
+- (void)refreshShapePreview {
+    if (!_hasAnchor || _dragMode != DragMode::Shape) return;
+    [self rollbackShapePreview];
+
+    const macvoxel::ToolState& t = macvoxel::CurrentTool();
+    std::vector<LineHit> hits;
+    switch (_anchorTool) {
+        case macvoxel::ToolKind::Line: {
+            const BOOL straight =
+                t.line_mode == macvoxel::LineMode::Straight;
+            [self enumerateLineFromAnchorTo:_hoverWindowPoint
+                                    straight:straight output:hits];
+            break;
+        }
+        case macvoxel::ToolKind::Circle:
+            [self enumerateCircleFromAnchorTo:_hoverWindowPoint
+                                         fill:t.circle_fill
+                                         even:t.circle_even
+                                       output:hits];
+            break;
+        case macvoxel::ToolKind::Square:
+            [self enumerateSquareFromAnchorTo:_hoverWindowPoint
+                                         fill:t.square_fill
+                                         even:t.square_even
+                                       output:hits];
+            break;
+        case macvoxel::ToolKind::Face: {
+            // Face tool doesn't share the brush-stamp pipeline; it writes
+            // directly via applyFaceExtrusion: which already routes through
+            // the preview snapshot when DragMode::Shape is active.
+            const int d = [self faceDragVoxelsAtCursor:_hoverWindowPoint];
+            [self applyFaceExtrusion:d];
+            return;
+        }
+        default: return;
+    }
+    for (const LineHit& h : hits) {
+        [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
+                       mode:_anchorMode];
+    }
+}
+
+- (void)beginAnchorAtPoint:(NSPoint)windowPoint mode:(macvoxel::ToolMode)mode {
+    Vec3i target;
+    int face_axis = 2;
+    if (![self computeLineEndpointAtPoint:windowPoint mode:mode into:&target
+                                     face:&face_axis]) {
+        return;
+    }
+    _hasAnchor = YES;
+    _anchorCell = target;
+    _anchorFaceAxis = face_axis;
+    _anchorMode = mode;
+    _anchorScreen = windowPoint;
+    _anchorTool = macvoxel::CurrentTool().tool;
+}
+
+- (void)commitLineAtPoint:(NSPoint)windowPoint {
+    if (!_hasAnchor) return;
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) { _hasAnchor = NO; return; }
+
+    const BOOL straight =
+        macvoxel::CurrentTool().line_mode == macvoxel::LineMode::Straight;
+    std::vector<LineHit> hits;
+    [self enumerateLineFromAnchorTo:windowPoint straight:straight output:hits];
+
+    if (!hits.empty()) {
+        macvoxel::CurrentHistory().BeginOp();
+        for (const LineHit& h : hits) {
+            [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
+                           mode:_anchorMode];
+        }
+        macvoxel::CurrentHistory().CommitOp();
+    }
+    _hasAnchor = NO;
+}
+
+// ---------------------------------------------------------------------------
+// Circle tool — two-click center-to-edge planar disc / ring.
+// ---------------------------------------------------------------------------
+
+// Project a 3D cell into the in-plane (u, v) coordinates of a face axis.
+// face_axis is the *normal* of the plane (0 = X, 1 = Y, 2 = Z), so the
+// in-plane axes are the other two.
+static inline void ProjectInPlane(int face_axis, int x, int y, int z,
+                                  int* u, int* v) {
+    switch (face_axis) {
+        case 0:  *u = y; *v = z; break;
+        case 1:  *u = x; *v = z; break;
+        default: *u = x; *v = y; break;
+    }
+}
+
+// Inverse of ProjectInPlane: write (i, j) offsets back into the (dx, dy, dz)
+// triple corresponding to the same face axis.
+static inline void OffsetInPlane(int face_axis, int i, int j,
+                                 int* dx, int* dy, int* dz) {
+    *dx = *dy = *dz = 0;
+    switch (face_axis) {
+        case 0:  *dy = i; *dz = j; break;
+        case 1:  *dx = i; *dz = j; break;
+        default: *dx = i; *dy = j; break;
+    }
+}
+
+- (void)enumerateCircleFromAnchorTo:(NSPoint)cursor
+                                fill:(BOOL)fill
+                                even:(BOOL)even
+                              output:(std::vector<LineHit>&)out {
+    out.clear();
+    if (!_hasAnchor) return;
+
+    Vec3i endpoint;
+    int end_face = _anchorFaceAxis;
+    if (![self computeLineEndpointAtPoint:cursor mode:_anchorMode
+                                     into:&endpoint face:&end_face]) {
+        out.push_back({_anchorCell.x, _anchorCell.y, _anchorCell.z,
+                       _anchorFaceAxis});
+        return;
+    }
+
+    const int face = _anchorFaceAxis;
+    int au, av, eu, ev;
+    ProjectInPlane(face, _anchorCell.x, _anchorCell.y, _anchorCell.z, &au, &av);
+    ProjectInPlane(face, endpoint.x, endpoint.y, endpoint.z, &eu, &ev);
+    const int du = eu - au;
+    const int dv = ev - av;
+
+    // Center offset: 0.0 places the disc center on the anchor cell (odd
+    // diameter); 0.5 places it on the corner shared by the four cells
+    // around the anchor (even diameter).
+    const float c = even ? 0.5f : 0.0f;
+    const float fdu = static_cast<float>(du) - c;
+    const float fdv = static_cast<float>(dv) - c;
+    const float radius2 = fdu * fdu + fdv * fdv;
+    const float radius = std::sqrt(radius2);
+    const int bound = static_cast<int>(std::ceil(radius)) + 1;
+
+    auto in_disc = [c, radius2](int i, int j) {
+        const float fi = static_cast<float>(i) - c;
+        const float fj = static_cast<float>(j) - c;
+        return (fi * fi + fj * fj) <= radius2;
+    };
+
+    out.reserve(static_cast<size_t>((2 * bound + 1) * (2 * bound + 1)));
+    for (int j = -bound; j <= bound; ++j) {
+        for (int i = -bound; i <= bound; ++i) {
+            if (!in_disc(i, j)) continue;
+            if (!fill) {
+                // Outline = boundary of disc: cell is in the disc but at
+                // least one 4-neighbor isn't. With Even toggled, the
+                // anchor cell may itself be an interior cell of the disc
+                // and is correctly skipped, matching the "outline excludes
+                // the start point" half of the Fill option.
+                if (in_disc(i + 1, j) && in_disc(i - 1, j) &&
+                    in_disc(i, j + 1) && in_disc(i, j - 1)) {
+                    continue;
+                }
+            }
+            int dx, dy, dz;
+            OffsetInPlane(face, i, j, &dx, &dy, &dz);
+            out.push_back({_anchorCell.x + dx, _anchorCell.y + dy,
+                           _anchorCell.z + dz, face});
+        }
+    }
+}
+
+- (void)commitCircleAtPoint:(NSPoint)windowPoint {
+    if (!_hasAnchor) return;
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) { _hasAnchor = NO; return; }
+
+    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    std::vector<LineHit> hits;
+    [self enumerateCircleFromAnchorTo:windowPoint
+                                 fill:tool.circle_fill
+                                 even:tool.circle_even
+                               output:hits];
+
+    if (!hits.empty()) {
+        macvoxel::CurrentHistory().BeginOp();
+        for (const LineHit& h : hits) {
+            [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
+                           mode:_anchorMode];
+        }
+        macvoxel::CurrentHistory().CommitOp();
+    }
+    _hasAnchor = NO;
+}
+
+// ---------------------------------------------------------------------------
+// Square tool — two-click center-to-edge-midpoint planar square / frame.
+// Same shape as the Circle tool but with a Chebyshev (max-norm) predicate
+// instead of Euclidean. The cursor's offset from the anchor is interpreted
+// as the *midpoint of an edge* of the square, so the half-side is the
+// dominant axis of the offset (max(|du|, |dv|)) and the square is always
+// centered on the anchor cell — distinguishing it from a Box tool where
+// the cursor would be at one corner.
+// ---------------------------------------------------------------------------
+
+- (void)enumerateSquareFromAnchorTo:(NSPoint)cursor
+                                fill:(BOOL)fill
+                                even:(BOOL)even
+                              output:(std::vector<LineHit>&)out {
+    out.clear();
+    if (!_hasAnchor) return;
+
+    Vec3i endpoint;
+    int end_face = _anchorFaceAxis;
+    if (![self computeLineEndpointAtPoint:cursor mode:_anchorMode
+                                     into:&endpoint face:&end_face]) {
+        out.push_back({_anchorCell.x, _anchorCell.y, _anchorCell.z,
+                       _anchorFaceAxis});
+        return;
+    }
+
+    const int face = _anchorFaceAxis;
+    int au, av, eu, ev;
+    ProjectInPlane(face, _anchorCell.x, _anchorCell.y, _anchorCell.z, &au, &av);
+    ProjectInPlane(face, endpoint.x, endpoint.y, endpoint.z, &eu, &ev);
+    const int du = eu - au;
+    const int dv = ev - av;
+
+    const float c = even ? 0.5f : 0.0f;
+    const float fdu = std::fabs(static_cast<float>(du) - c);
+    const float fdv = std::fabs(static_cast<float>(dv) - c);
+    const float half = std::max(fdu, fdv);
+    const int bound = static_cast<int>(std::ceil(half)) + 1;
+
+    auto in_square = [c, half](int i, int j) {
+        const float fi = std::fabs(static_cast<float>(i) - c);
+        const float fj = std::fabs(static_cast<float>(j) - c);
+        return std::max(fi, fj) <= half;
+    };
+
+    out.reserve(static_cast<size_t>((2 * bound + 1) * (2 * bound + 1)));
+    for (int j = -bound; j <= bound; ++j) {
+        for (int i = -bound; i <= bound; ++i) {
+            if (!in_square(i, j)) continue;
+            if (!fill) {
+                if (in_square(i + 1, j) && in_square(i - 1, j) &&
+                    in_square(i, j + 1) && in_square(i, j - 1)) {
+                    continue;
+                }
+            }
+            int dx, dy, dz;
+            OffsetInPlane(face, i, j, &dx, &dy, &dz);
+            out.push_back({_anchorCell.x + dx, _anchorCell.y + dy,
+                           _anchorCell.z + dz, face});
+        }
+    }
+}
+
+- (void)commitSquareAtPoint:(NSPoint)windowPoint {
+    if (!_hasAnchor) return;
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) { _hasAnchor = NO; return; }
+
+    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    std::vector<LineHit> hits;
+    [self enumerateSquareFromAnchorTo:windowPoint
+                                 fill:tool.square_fill
+                                 even:tool.square_even
+                               output:hits];
+
+    if (!hits.empty()) {
+        macvoxel::CurrentHistory().BeginOp();
+        for (const LineHit& h : hits) {
+            [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
+                           mode:_anchorMode];
+        }
+        macvoxel::CurrentHistory().CommitOp();
+    }
+    _hasAnchor = NO;
+}
+
+// ---------------------------------------------------------------------------
+// Face tool — click selects a coplanar same-color flood region whose face
+// on the clicked side is exposed; drag extrudes (positive, away from the
+// surface) or insets (negative, into the surface) by an integer number
+// of voxel layers along the face normal.
+// ---------------------------------------------------------------------------
+
+// Like computeTargetCellAtPoint:'s hit branch but exposes hit.sign too,
+// since the Face tool needs both axis and sign of the clicked face.
+- (BOOL)pickFaceAtPoint:(NSPoint)windowPoint
+                  cell:(Vec3i*)outCell
+                  axis:(int*)outAxis
+                  sign:(int*)outSign
+                 color:(uint8_t*)outColor {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return NO;
+    simd::float3 ray_origin_grid, ray_dir_grid;
+    if (![self gridRayAtPoint:windowPoint
+                       origin:&ray_origin_grid
+                    direction:&ray_dir_grid]) {
+        return NO;
+    }
+    macvoxel::RayHit hit;
+    if (!macvoxel::Raycast(doc->grid, ray_origin_grid, ray_dir_grid,
+                            4096.0f, &hit)) {
+        return NO;
+    }
+    if (hit.axis < 0) return NO;  // ray started inside a voxel — no face
+    outCell->x = hit.x;
+    outCell->y = hit.y;
+    outCell->z = hit.z;
+    *outAxis = hit.axis;
+    *outSign = hit.sign;
+    if (outColor) *outColor = hit.color;
+    return YES;
+}
+
+// Flood-fill in the plane perpendicular to `axis` through the seed cell.
+// Includes every cell that (a) has grid value `color` and (b) has its face
+// on the (axis, sign) side exposed (the cell at offset +sign along axis
+// is empty). 4-connectivity in the in-plane axes.
+- (void)floodFaceFromCell:(Vec3i)seed
+                     axis:(int)axis sign:(int)sign
+                    color:(uint8_t)color
+                   output:(std::vector<Vec3i>&)out {
+    out.clear();
+    if (color == 0) return;
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return;
+
+    const int u_axis = (axis == 0) ? 1 : 0;
+    const int v_axis = (axis == 2) ? 1 : 2;
+    const int seed_xyz[3] = {seed.x, seed.y, seed.z};
+    auto cell_at = [&](int u, int v) -> Vec3i {
+        int xyz[3] = {0, 0, 0};
+        xyz[axis] = seed_xyz[axis];
+        xyz[u_axis] = u;
+        xyz[v_axis] = v;
+        return Vec3i{xyz[0], xyz[1], xyz[2]};
+    };
+    int normal[3] = {0, 0, 0};
+    normal[axis] = sign;
+
+    std::unordered_set<int64_t> visited;
+    std::vector<std::pair<int, int>> stack;
+    const int seed_u = seed_xyz[u_axis];
+    const int seed_v = seed_xyz[v_axis];
+    stack.push_back({seed_u, seed_v});
+    visited.insert(macvoxel::PackCellKey(seed_u, seed_v, 0));
+    while (!stack.empty()) {
+        const std::pair<int, int> top = stack.back();
+        stack.pop_back();
+        const int u = top.first;
+        const int v = top.second;
+        const Vec3i c = cell_at(u, v);
+        if (doc->grid.Get(c.x, c.y, c.z) != color) continue;
+        if (doc->grid.Get(c.x + normal[0], c.y + normal[1],
+                          c.z + normal[2]) != 0) continue;
+        out.push_back(c);
+        const std::pair<int, int> nbrs[4] = {
+            {u + 1, v}, {u - 1, v}, {u, v + 1}, {u, v - 1}
+        };
+        for (const auto& n : nbrs) {
+            const int64_t key = macvoxel::PackCellKey(n.first, n.second, 0);
+            if (visited.insert(key).second) stack.push_back(n);
+        }
+    }
+}
+
+// Convert the cursor's screen-space drag (relative to the click) into a
+// signed integer voxel distance along the face normal. Projects the face
+// normal into NDC at the anchor cell's depth — the drag is then scaled
+// against that direction so one voxel of normal travel equals exactly the
+// pixel distance the camera sees per voxel at that depth. Looking exactly
+// edge-on to the face yields a degenerate direction and 0 voxels.
+- (int)faceDragVoxelsAtCursor:(NSPoint)cursor {
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0 || h <= 0) return 0;
+    const float aspect = w / h;
+    const simd::float4x4 vp =
+        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
+
+    const simd::float3 p0_grid{
+        static_cast<float>(_anchorCell.x) + 0.5f,
+        static_cast<float>(_anchorCell.y) + 0.5f,
+        static_cast<float>(_anchorCell.z) + 0.5f};
+    const simd::float3 p0_world{p0_grid.x, p0_grid.z, -p0_grid.y};
+    simd::float3 n_grid{0, 0, 0};
+    if (_anchorFaceAxis == 0)      n_grid.x = static_cast<float>(_faceSign);
+    else if (_anchorFaceAxis == 1) n_grid.y = static_cast<float>(_faceSign);
+    else                            n_grid.z = static_cast<float>(_faceSign);
+    const simd::float3 n_world{n_grid.x, n_grid.z, -n_grid.y};
+
+    auto to_ndc = [&](simd::float3 wp, simd::float2* ndc) -> bool {
+        const simd::float4 clip =
+            simd_mul(vp, simd::float4{wp.x, wp.y, wp.z, 1.0f});
+        if (clip.w <= 1e-6f) return false;
+        ndc->x = clip.x / clip.w;
+        ndc->y = clip.y / clip.w;
+        return true;
+    };
+    simd::float2 ndc0{}, ndc1{};
+    if (!to_ndc(p0_world, &ndc0)) return 0;
+    if (!to_ndc(p0_world + n_world, &ndc1)) return 0;
+    const simd::float2 dir{ndc1.x - ndc0.x, ndc1.y - ndc0.y};
+    const float dir_len2 = dir.x * dir.x + dir.y * dir.y;
+    if (dir_len2 < 1e-8f) return 0;
+
+    const NSPoint anchor_local = [self convertPoint:_anchorScreen fromView:nil];
+    const NSPoint cursor_local = [self convertPoint:cursor fromView:nil];
+    const simd::float2 drag{
+        static_cast<float>((cursor_local.x - anchor_local.x) / w * 2.0f),
+        static_cast<float>((cursor_local.y - anchor_local.y) / h * 2.0f)};
+    const float t = (drag.x * dir.x + drag.y * dir.y) / dir_len2;
+    return static_cast<int>(std::round(t));
+}
+
+// Apply the extrusion / inset to the document. Routes writes through the
+// preview snapshot during DragMode::Shape (so each frame's preview can be
+// rolled back) and directly through EditHistory otherwise.
+- (void)applyFaceExtrusion:(int)d {
+    if (d == 0 || _faceSeedCells.empty()) return;
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return;
+
+    int da[3] = {0, 0, 0};
+    da[_anchorFaceAxis] = _faceSign;
+    macvoxel::EditHistory& history = macvoxel::CurrentHistory();
+    const BOOL preview = (_dragMode == DragMode::Shape);
+    auto write = [&](int x, int y, int z, uint8_t new_val) {
+        const uint8_t old_val = doc->grid.Get(x, y, z);
+        if (new_val == old_val) return;
+        doc->grid.Set(x, y, z, new_val);
+        if (preview) {
+            const int64_t key = macvoxel::PackCellKey(x, y, z);
+            _shapePreview.try_emplace(key, old_val);
+        } else {
+            history.Record(x, y, z, old_val, new_val);
+        }
+    };
+
+    if (d > 0) {
+        // Extrude: fill empty cells at offsets 1..d along the face normal.
+        // Only fill cells that are currently empty; existing geometry in the
+        // way isn't overwritten (avoids surprising data loss).
+        for (int k = 1; k <= d; ++k) {
+            for (const Vec3i& v : _faceSeedCells) {
+                const int x = v.x + k * da[0];
+                const int y = v.y + k * da[1];
+                const int z = v.z + k * da[2];
+                if (doc->grid.Get(x, y, z) == 0) {
+                    write(x, y, z, _faceSeedColor);
+                }
+            }
+        }
+    } else {
+        // Inset: erase cells starting at the seed plane (offset 0) and
+        // walking |d| steps inward (against the face normal).
+        const int n = -d;
+        for (int k = 0; k < n; ++k) {
+            for (const Vec3i& v : _faceSeedCells) {
+                const int x = v.x - k * da[0];
+                const int y = v.y - k * da[1];
+                const int z = v.z - k * da[2];
+                write(x, y, z, 0);
+            }
+        }
+    }
+    ++doc->version;
+}
+
+- (void)commitFaceAtPoint:(NSPoint)windowPoint {
+    if (!_hasAnchor) { _faceSeedCells.clear(); return; }
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) {
+        _hasAnchor = NO;
+        _faceSeedCells.clear();
+        return;
+    }
+    const int d = [self faceDragVoxelsAtCursor:windowPoint];
+    if (d != 0) {
+        macvoxel::CurrentHistory().BeginOp();
+        [self applyFaceExtrusion:d];
+        macvoxel::CurrentHistory().CommitOp();
+    }
+    _hasAnchor = NO;
+    _faceSeedCells.clear();
 }
 
 @end

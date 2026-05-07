@@ -47,6 +47,12 @@ void DrawToolPanel() {
     ImGui::TextDisabled("Tool");
     tool_button(ICON_PAINT_BRUSH "  Brush", ToolKind::Brush);
     ImGui::SameLine();
+    tool_button(ICON_PENCIL1 "  Line", ToolKind::Line);
+    tool_button(ICON_SCOPE "  Circle", ToolKind::Circle);
+    ImGui::SameLine();
+    tool_button(ICON_SQUARE "  Square", ToolKind::Square);
+    tool_button(ICON_ARROW "  Face", ToolKind::Face);
+    ImGui::SameLine();
     tool_button(ICON_CROP "  Select", ToolKind::Select);
 
     ImGui::Spacing();
@@ -83,6 +89,38 @@ void DrawToolPanel() {
     dim_button("2D", false);
     ImGui::SameLine();
     dim_button("3D", true);
+
+    if (t.tool == ToolKind::Line) {
+        auto line_button = [&](const char* label, LineMode m) {
+            const bool active = t.line_mode == m;
+            AccentButtonColors(active);
+            if (ImGui::Button(label, ImVec2(80, 0))) t.line_mode = m;
+            if (active) ImGui::PopStyleColor(3);
+        };
+        line_button("Straight", LineMode::Straight);
+        ImGui::SameLine();
+        line_button("Project", LineMode::Project);
+    }
+
+    auto fill_even_row = [&](bool* fill, bool* even) {
+        auto toggle_button = [&](const char* label, bool* state) {
+            // Capture the pre-click value so the pop count matches the
+            // push count regardless of whether the click flipped the state.
+            const bool active = *state;
+            AccentButtonColors(active);
+            if (ImGui::Button(label, ImVec2(80, 0))) *state = !*state;
+            if (active) ImGui::PopStyleColor(3);
+        };
+        toggle_button("Fill", fill);
+        ImGui::SameLine();
+        toggle_button("Even", even);
+    };
+
+    if (t.tool == ToolKind::Circle) {
+        fill_even_row(&t.circle_fill, &t.circle_even);
+    } else if (t.tool == ToolKind::Square) {
+        fill_even_row(&t.square_fill, &t.square_even);
+    }
 
     // Footprint summary: edge length is fixed at (2r-1); cell count
     // depends on shape and dimensionality. Computed by sampling the

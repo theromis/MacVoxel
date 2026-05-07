@@ -9,7 +9,21 @@ namespace macvoxel {
 // Future tools (line, face/extrude, box, primitive) join this enum.
 enum class ToolKind {
     Brush,   // touch-to-edit a cell, plus drag-paint along the cursor path
+    Line,    // two-click point-to-point voxel line
+    Circle,  // two-click center-to-edge planar disc / ring
+    Square,  // two-click center-to-edge-midpoint planar square / frame
+    Face,    // click a face, drag to extrude / inset along its normal
     Select,  // drag to define a 3D AABB selection
+};
+
+// Line tool variants. Straight = 3D-Bresenham segment between the two clicks.
+// Project = walk the screen-space segment between click 1 and click 2,
+// raycast each step from the camera, and place where the rays hit — so the
+// line follows the contour of existing geometry, like clicking the brush
+// repeatedly along a straight path on the screen.
+enum class LineMode {
+    Straight,
+    Project,
 };
 
 // A mode is *how* a tool's edits modify cells: add new voxels, remove
@@ -43,6 +57,17 @@ struct ToolState {
     // 3D = volumetric (cube or sphere); 2D = one-cell-thick slab on
     // the plane of the clicked face (square or disc).
     bool brush_3d = true;
+    // Line tool variant; ignored when `tool` isn't ToolKind::Line.
+    LineMode line_mode = LineMode::Straight;
+    // Circle tool: Fill = filled disc (default) vs. outline-only ring;
+    // Even = even diameter (center sits between cells) vs. odd (center
+    // on a cell, default).
+    bool circle_fill = true;
+    bool circle_even = false;
+    // Square tool: same Fill / Even semantics as Circle, applied to a
+    // Chebyshev-norm "disc" (i.e., a square / hollow frame).
+    bool square_fill = true;
+    bool square_even = false;
     // Multi-selection of palette slots, driven by the Palette panel's
     // click-drag / shift-click. The Material editor in the Render panel
     // writes edits to every selected slot. `palette_idx` is always a

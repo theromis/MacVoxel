@@ -53,11 +53,29 @@ shippable per-tool.**
 	
 - **Line tool (S–M).** Two-click point-to-point. *Straight* mode = 3D Bresenham
   through cells; *project* mode = locks to nearest axis plane.
+- **Circle tool (S–M).** Two-click center-to-edge. First click sets the
+  center; second sets a point on the edge (defines the radius). Options:
+  *Fill* (on by default) — filled disc that includes the center vs. an
+  outline-only ring that excludes it. *Even* (off by default) — even
+  diameter (center sits between cells) vs. odd (center on a cell).
+  Same Straight / Project axis-handling questions as Line.
+- **Square tool (S).** Two-click center-to-edge. First click sets the
+  center; second sets a corner (or edge midpoint — TBD which feels more
+  natural). Same *Fill* (filled vs. outline) and *Even* (even vs. odd
+  side length) options as Circle.
 - **Face tool (M).** Pick a coplanar contiguous region; extrude / inset by a
   drag distance. Floods on the same material + same axis.
 - **Box / volume tool (S).** Two-click cuboid. Filled or hollow toggle.
-- **Brush / pattern tool (M).** Stamps a pre-captured selection at the cursor;
-  brush source is set from a Selection Verb (next phase).
+
+## Phase 12.5 — Insertable primitives
+
+Parametric shapes with an edit gizmo, committed to voxels on confirm. **L total.**
+
+- **Sphere / cylinder / cone / pyramid (M each).** Each gets a parameter set
+  (radius, height, axis…) and an in-scene gizmo.
+- **Commit-to-voxels on deselect.** The primitive becomes ordinary voxels.
+- **(Stretch) Procedural shader tools.** Noise terrain, spiral/coil generators
+  driven by small MSL snippets. **L.**
 
 ## Phase 13 — Selection upgrades
 
@@ -82,6 +100,30 @@ shippable per-tool.**
   Selection::voxels. Extend them to filter by the sparse set when
   present (need O(1) membership — promote the list to an
   unordered_set or maintain both side-by-side).
+- **Brush / pattern tool (M).** Stamps a pre-captured selection at the cursor;
+  brush source is set from a Selection Verb (next phase).
+
+## Phase 13.5 — Edit-volume foundation
+
+Establishes a bounded, visually-referenced edit volume. Today the editor
+treats the grid as implicitly infinite, so empty-space clicks can only
+fall back to the z=0 ground plane — there's no way to anchor an empty
+endpoint flush to a side wall, and no visual reference for where you're
+clicking in empty space.
+
+- **Faint floor grid (S).** Render integer-voxel grid lines on the z=0
+  plane (and optionally the camera-facing side walls, MagicaVoxel-style)
+  so the user can see where empty-space clicks will land.
+- **Bounded editable volume (M).** Cap the grid to MagicaVoxel's 256³
+  max object size. Edits outside the volume are clamped or rejected; the
+  bounds become the canonical volume the floor grid and the empty-endpoint
+  fallback both reference. .vox round-tripping should already match.
+- **Multi-plane empty-endpoint fallback (S, depends on the volume).**
+  Today the Line tool falls back to z=0 for empty clicks (so empty
+  endpoints only land on the floor). With a defined volume, an empty
+  click should fall back to whichever of the 3 camera-facing bounding
+  faces the ray hits first — XY, XZ, or YZ — letting the user anchor
+  empty Remove/Paint endpoints flush to any wall.
 
 ## Phase 14 — Renderer features
 
@@ -101,17 +143,7 @@ unless noted.**
 - **IBL / HDRI (L).** Replace the constant sky with an environment map; sample
   importance-weighted for the path tracer.
 
-## Phase 15 — Insertable primitives
-
-Parametric shapes with an edit gizmo, committed to voxels on confirm. **L total.**
-
-- **Sphere / cylinder / cone / pyramid (M each).** Each gets a parameter set
-  (radius, height, axis…) and an in-scene gizmo.
-- **Commit-to-voxels on deselect.** The primitive becomes ordinary voxels.
-- **(Stretch) Procedural shader tools.** Noise terrain, spiral/coil generators
-  driven by small MSL snippets. **L.**
-
-## Phase 16 — Scene graph + layers
+## Phase 15 — Scene graph + layers
 
 The biggest structural change. Every prior phase keeps the single-grid
 Document model; this one breaks it. **L–XL.**
@@ -125,7 +157,7 @@ This phase touches every renderer (the GPU layout assumes one coarse grid)
 and every tool (raycast / picking is currently per-grid). Plan for it as a
 phase boundary, not a side change.
 
-## Phase 17 — Advanced materials
+## Phase 16 — Advanced materials
 
 - **Sub-surface scattering (M).** Real SSS (random-walk inside the medium with
   scattering coefficient) rather than the accidental "SSS-y look" we get from

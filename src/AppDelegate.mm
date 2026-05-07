@@ -26,7 +26,7 @@
 
 - (void)applicationDidFinishLaunching:(NSNotification*)__unused notification {
     _doc = std::make_unique<macvoxel::Document>();
-    _doc->grid.Set(0, 0, 0, 1);  // single voxel so the panel has something to count
+    [self seedDocumentFromDefault];
     _doc->version = 1;
 
     [self buildMainMenu];
@@ -34,6 +34,29 @@
     [self updateWindowTitle];
     [self frameCameraIfPossible];
     [NSApp activateIgnoringOtherApps:YES];
+}
+
+// Replace the document's grid + palette with resources/default.vox if it
+// bundled successfully. The document remains "Untitled" — path is left
+// empty so the first save prompts for a destination. Falls back to a
+// single seed voxel if the bundle is missing the resource (development
+// builds, or a corrupted .app).
+- (void)seedDocumentFromDefault {
+    NSString* path = [[NSBundle mainBundle] pathForResource:@"default"
+                                                     ofType:@"vox"];
+    if (path != nil) {
+        const std::string p = [path UTF8String];
+        std::string err;
+        if (macvoxel::LoadVox(p, &_doc->grid, &_doc->palette, &err)) {
+            return;
+        }
+        fprintf(stderr,
+                "MacVoxel: failed to load bundled default.vox (%s); "
+                "falling back to single-voxel seed\n", err.c_str());
+    }
+    _doc->grid.Clear();
+    _doc->grid.Set(0, 0, 0, 1);
+    _doc->palette.ResetToDefault();
 }
 
 - (void)frameCameraIfPossible {
@@ -266,9 +289,7 @@
 }
 
 - (IBAction)newDocument:(id)__unused sender {
-    _doc->grid.Clear();
-    _doc->grid.Set(0, 0, 0, 1);
-    _doc->palette.ResetToDefault();
+    [self seedDocumentFromDefault];
     _doc->path.clear();
     ++_doc->version;
     macvoxel::CurrentHistory().Clear();
