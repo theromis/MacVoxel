@@ -1013,8 +1013,9 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     const int target_z = target.z;
 
     macvoxel::ToolState& tool = macvoxel::CurrentTool();
-    const int radius = std::max(1, tool.brush_radius);
-    const int span = radius - 1;
+    const int size = std::max(1, tool.brush_size);
+    const int lo = -((size - 1) / 2);
+    const int hi = size / 2;
 
     // Drag-paint dedupe: only fire when the target cell changes. Without
     // this, every pointer-move event during a drag (many per frame) would
@@ -1060,21 +1061,32 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     //  Circle+3D = sphere       |  Circle+2D = disc on face plane
     // For 2D modes the plane axis is the face the user clicked
     // (face_axis); the brush is one cell thick along that axis.
-    const float r2 = static_cast<float>(span) * static_cast<float>(span);
+    // Brush center: 0 for odd diameters, 0.5 for even diameters.
+    // The fractional center on even sizes makes the footprint sit
+    // between cells so it stays geometrically centered (and avoids
+    // the cardinal-tip "widows" we used to hand-fudge with +0.5).
+    const float c = (lo + hi) * 0.5f;
+    const float r2 = (size * 0.5f) * (size * 0.5f);
     const bool is_3d = tool.brush_3d;
     const bool is_circle = tool.brush_shape == macvoxel::BrushShape::Circle;
-    for (int dz = -span; dz <= span; ++dz) {
+    for (int dz = lo; dz <= hi; ++dz) {
         if (!is_3d && face_axis == 2 && dz != 0) continue;
-        for (int dy = -span; dy <= span; ++dy) {
+        for (int dy = lo; dy <= hi; ++dy) {
             if (!is_3d && face_axis == 1 && dy != 0) continue;
-            for (int dx = -span; dx <= span; ++dx) {
+            for (int dx = lo; dx <= hi; ++dx) {
                 if (!is_3d && face_axis == 0 && dx != 0) continue;
                 if (is_circle) {
-                    int d2 = 0;
-                    if (is_3d || face_axis != 0) d2 += dx * dx;
-                    if (is_3d || face_axis != 1) d2 += dy * dy;
-                    if (is_3d || face_axis != 2) d2 += dz * dz;
-                    if (static_cast<float>(d2) > r2) continue;
+                    float d2 = 0.0f;
+                    if (is_3d || face_axis != 0) {
+                        const float f = dx - c; d2 += f * f;
+                    }
+                    if (is_3d || face_axis != 1) {
+                        const float f = dy - c; d2 += f * f;
+                    }
+                    if (is_3d || face_axis != 2) {
+                        const float f = dz - c; d2 += f * f;
+                    }
+                    if (d2 > r2) continue;
                 }
                 apply(target_x + dx, target_y + dy, target_z + dz);
             }

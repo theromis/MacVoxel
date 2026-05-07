@@ -34,9 +34,11 @@ struct ToolState {
     ToolKind tool = ToolKind::Brush;
     ToolMode mode = ToolMode::Add;
     uint8_t palette_idx = 1;  // current color (0 is "empty"; never used here)
-    // Brush extent: edges of (2r-1) voxels per side, centered on the
-    // hit cell (r=1 -> 1 voxel; r=2 -> 3x3x3; r=3 -> 5x5x5).
-    int brush_radius = 1;
+    // Brush diameter in voxels. Odd sizes are symmetric around the
+    // target cell; even sizes extend one extra cell in the + direction
+    // (the brush "center" sits on a cell boundary). Footprint range is
+    // [-((size-1)/2), size/2] on each axis.
+    int brush_size = 1;
     BrushShape brush_shape = BrushShape::Square;
     // 3D = volumetric (cube or sphere); 2D = one-cell-thick slab on
     // the plane of the clicked face (square or disc).

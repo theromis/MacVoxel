@@ -59,9 +59,9 @@ void DrawToolPanel() {
 
     ImGui::Spacing();
 
-    int radius = t.brush_radius;
-    if (ImGui::SliderInt("Brush radius", &radius, 1, 8)) {
-        t.brush_radius = radius;
+    int size = t.brush_size;
+    if (ImGui::SliderInt("Brush size", &size, 1, 63)) {
+        t.brush_size = std::clamp(size, 1, 63);
     }
 
     auto shape_button = [&](const char* label, BrushShape s) {
@@ -88,17 +88,24 @@ void DrawToolPanel() {
     // depends on shape and dimensionality. Computed by sampling the
     // same predicate the editor uses so the label can't drift from
     // the actual brush.
-    const int span = std::max(0, t.brush_radius - 1);
-    const int edge = 2 * t.brush_radius - 1;
+    const int edge = std::max(1, t.brush_size);
+    const int lo = -((edge - 1) / 2);
+    const int hi = edge / 2;
+    // Brush center: 0 for odd diameters, 0.5 for even diameters
+    // (between cells, so the footprint stays geometrically symmetric).
+    // Distance threshold = D/2; with odd D this matches the old
+    // (span + 0.5) anti-widow expression exactly.
+    const float c = (lo + hi) * 0.5f;
+    const float r2 = (edge * 0.5f) * (edge * 0.5f);
     int cells = 0;
-    const float r2 = static_cast<float>(span) * static_cast<float>(span);
-    for (int dz = -span; dz <= span; ++dz) {
+    for (int dz = lo; dz <= hi; ++dz) {
         if (!t.brush_3d && dz != 0) continue;
-        for (int dy = -span; dy <= span; ++dy) {
-            for (int dx = -span; dx <= span; ++dx) {
+        for (int dy = lo; dy <= hi; ++dy) {
+            for (int dx = lo; dx <= hi; ++dx) {
                 if (t.brush_shape == BrushShape::Circle) {
-                    const int d2 = dx*dx + dy*dy + (t.brush_3d ? dz*dz : 0);
-                    if (static_cast<float>(d2) > r2) continue;
+                    const float fx = dx - c, fy = dy - c, fz = dz - c;
+                    const float d2 = fx*fx + fy*fy + (t.brush_3d ? fz*fz : 0.0f);
+                    if (d2 > r2) continue;
                 }
                 ++cells;
             }
