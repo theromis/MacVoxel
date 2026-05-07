@@ -1027,7 +1027,11 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         uint8_t new_val = old_val;
         switch (mode) {
             case macvoxel::ToolMode::Add:
-                new_val = tool.palette_idx;
+                // Only fill empty cells. Brushes wider than 1 voxel
+                // sweep over neighbors that may already be filled with
+                // other colors; Add must leave those alone (use Paint
+                // to recolor existing voxels).
+                if (old_val == 0) new_val = tool.palette_idx;
                 break;
             case macvoxel::ToolMode::Remove:
                 new_val = 0;
