@@ -65,30 +65,35 @@ void DrawToolPanel() {
 
     ImGui::Spacing();
 
-    int size = t.brush_size;
-    if (ImGui::SliderInt("Brush size", &size, 1, 63)) {
-        t.brush_size = std::clamp(size, 1, 63);
+    // Brush footprint controls don't apply to the Face tool — its seed
+    // region is a flood fill, not a stamped brush.
+    const bool show_brush_footprint = t.tool != ToolKind::Face;
+    if (show_brush_footprint) {
+        int size = t.brush_size;
+        if (ImGui::SliderInt("Brush size", &size, 1, 63)) {
+            t.brush_size = std::clamp(size, 1, 63);
+        }
+
+        auto shape_button = [&](const char* label, BrushShape s) {
+            const bool active = t.brush_shape == s;
+            AccentButtonColors(active);
+            if (ImGui::Button(label, ImVec2(80, 0))) t.brush_shape = s;
+            if (active) ImGui::PopStyleColor(3);
+        };
+        shape_button("Square", BrushShape::Square);
+        ImGui::SameLine();
+        shape_button("Circle", BrushShape::Circle);
+
+        auto dim_button = [&](const char* label, bool want_3d) {
+            const bool active = t.brush_3d == want_3d;
+            AccentButtonColors(active);
+            if (ImGui::Button(label, ImVec2(80, 0))) t.brush_3d = want_3d;
+            if (active) ImGui::PopStyleColor(3);
+        };
+        dim_button("2D", false);
+        ImGui::SameLine();
+        dim_button("3D", true);
     }
-
-    auto shape_button = [&](const char* label, BrushShape s) {
-        const bool active = t.brush_shape == s;
-        AccentButtonColors(active);
-        if (ImGui::Button(label, ImVec2(80, 0))) t.brush_shape = s;
-        if (active) ImGui::PopStyleColor(3);
-    };
-    shape_button("Square", BrushShape::Square);
-    ImGui::SameLine();
-    shape_button("Circle", BrushShape::Circle);
-
-    auto dim_button = [&](const char* label, bool want_3d) {
-        const bool active = t.brush_3d == want_3d;
-        AccentButtonColors(active);
-        if (ImGui::Button(label, ImVec2(80, 0))) t.brush_3d = want_3d;
-        if (active) ImGui::PopStyleColor(3);
-    };
-    dim_button("2D", false);
-    ImGui::SameLine();
-    dim_button("3D", true);
 
     if (t.tool == ToolKind::Line) {
         auto line_button = [&](const char* label, LineMode m) {
@@ -120,12 +125,51 @@ void DrawToolPanel() {
         fill_even_row(&t.circle_fill, &t.circle_even);
     } else if (t.tool == ToolKind::Square) {
         fill_even_row(&t.square_fill, &t.square_even);
+    } else if (t.tool == ToolKind::Face) {
+        // Extrude: which voxels qualify for the flood-filled seed region.
+        auto extrude_button = [&](const char* label, FaceExtrudeKind k) {
+            const bool active = t.face_extrude == k;
+            AccentButtonColors(active);
+            if (ImGui::Button(label, ImVec2(80, 0))) t.face_extrude = k;
+            if (active) ImGui::PopStyleColor(3);
+        };
+        ImGui::TextDisabled("Extrude");
+        extrude_button("Color##extrude", FaceExtrudeKind::Color);
+        ImGui::SameLine();
+        extrude_button("Geometry##extrude", FaceExtrudeKind::Geometry);
+
+        // With: source color for newly-extruded voxels.
+        auto with_button = [&](const char* label, FaceWithColor w) {
+            const bool active = t.face_with == w;
+            AccentButtonColors(active);
+            if (ImGui::Button(label, ImVec2(80, 0))) t.face_with = w;
+            if (active) ImGui::PopStyleColor(3);
+        };
+        ImGui::TextDisabled("With");
+        with_button("Geometry##with", FaceWithColor::Geometry);
+        ImGui::SameLine();
+        with_button("Palette##with", FaceWithColor::Palette);
+
+        // Connectivity for the flood fill.
+        auto connectivity_button = [&](const char* label, bool want_eight) {
+            const bool active = t.face_eight_connected == want_eight;
+            AccentButtonColors(active);
+            if (ImGui::Button(label, ImVec2(80, 0))) {
+                t.face_eight_connected = want_eight;
+            }
+            if (active) ImGui::PopStyleColor(3);
+        };
+        ImGui::TextDisabled("Connectivity");
+        connectivity_button("4-side", false);
+        ImGui::SameLine();
+        connectivity_button("8-side", true);
     }
 
     // Footprint summary: edge length is fixed at (2r-1); cell count
     // depends on shape and dimensionality. Computed by sampling the
     // same predicate the editor uses so the label can't drift from
-    // the actual brush.
+    // the actual brush. Hidden for Face since it doesn't stamp a brush.
+    if (show_brush_footprint) {
     const int edge = std::max(1, t.brush_size);
     const int lo = -((edge - 1) / 2);
     const int hi = edge / 2;
@@ -155,6 +199,7 @@ void DrawToolPanel() {
         ImGui::Text("brush  %d × %d  (%d cells, on face plane)", edge, edge,
                     cells);
     }
+    }  // end if (show_brush_footprint)
 
     ImGui::Spacing();
     if (ImGui::CollapsingHeader("Controls")) {

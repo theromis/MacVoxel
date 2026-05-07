@@ -26,6 +26,28 @@ enum class LineMode {
     Project,
 };
 
+// Face tool: how the click-time flood fill picks the seed region.
+//   Color    — only voxels matching the clicked voxel's color (default).
+//   Geometry — any non-empty voxel coplanar with the click, regardless
+//              of color. Useful for extruding a multi-color surface.
+enum class FaceExtrudeKind {
+    Color,
+    Geometry,
+};
+
+// Face tool: where the color of newly-extruded voxels comes from.
+//   Geometry — match each source seed voxel's color, per-column. With
+//              FaceExtrudeKind::Color this is uniform; with Geometry
+//              flood it preserves the surface's coloring outward.
+//   Palette  — use the currently-selected palette color for every new
+//              voxel, regardless of the source.
+// Ignored by Remove (no color is being introduced) and Paint (always
+// uses the palette color).
+enum class FaceWithColor {
+    Geometry,
+    Palette,
+};
+
 // A mode is *how* a tool's edits modify cells: add new voxels, remove
 // existing ones, or repaint without touching presence. Modes are
 // orthogonal to ToolKind so every modeling tool routes through the same
@@ -68,6 +90,12 @@ struct ToolState {
     // Chebyshev-norm "disc" (i.e., a square / hollow frame).
     bool square_fill = true;
     bool square_even = false;
+    // Face tool options.
+    FaceExtrudeKind face_extrude = FaceExtrudeKind::Color;
+    FaceWithColor face_with = FaceWithColor::Geometry;
+    // Use 8-connectivity (4 cardinals + 4 diagonals) instead of the
+    // 4-connectivity default when flood-filling the seed region.
+    bool face_eight_connected = false;
     // Multi-selection of palette slots, driven by the Palette panel's
     // click-drag / shift-click. The Material editor in the Render panel
     // writes edits to every selected slot. `palette_idx` is always a

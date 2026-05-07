@@ -116,9 +116,20 @@ void Bresenham3D(int x0, int y0, int z0, int x1, int y1, int z1,
     macvoxel::ToolKind _anchorTool;
     // Face tool only: result of the click-time flood fill (all coplanar
     // same-color cells whose face on (_anchorFaceAxis, _faceSign) is
-    // exposed) and the source color used for extrusions.
+    // exposed) and the source color used for extrusions. `_faceObservedDrag`
+    // is set the first time the cursor produces a non-zero voxel distance
+    // from the anchor; while it's still NO, a d=0 commit is treated as
+    // d=1 so a click without drag applies a single 1-voxel layer.
     int _faceSign;
     uint8_t _faceSeedColor;
+    BOOL _faceObservedDrag;
+    // The d value (normalized — signed for Add, |d| for Remove/Paint)
+    // currently materialised into `_shapePreview`, plus the `face_with`
+    // value at the time those layers were applied. Used so each frame
+    // only does O(seed_cells × Δd) work as the user drags through layer
+    // boundaries, instead of rebuilding the whole preview every frame.
+    int _faceAppliedD;
+    macvoxel::FaceWithColor _faceAppliedWith;
     std::vector<Vec3i> _faceSeedCells;
     // Live voxel preview for shape tools (Line/Circle/Square): each entry
     // is a cell touched during the current drag mapped to its original
@@ -663,12 +674,24 @@ void Bresenham3D(int x0, int y0, int z0, int x1, int y1, int z1,
         _anchorTool = macvoxel::ToolKind::Face;
         _faceSign = sign;
         _faceSeedColor = color;
-        [self floodFaceFromCell:seed axis:axis sign:sign color:color
+        _faceObservedDrag = NO;
+        _faceAppliedD = 0;
+        _faceAppliedWith = macvoxel::CurrentTool().face_with;
+        const macvoxel::ToolState& t = macvoxel::CurrentTool();
+        // FaceExtrudeKind::Geometry passes color=0 to the flood — that's
+        // the "any non-empty cell" sentinel inside floodFaceFromCell:.
+        const uint8_t flood_color =
+            (t.face_extrude == macvoxel::FaceExtrudeKind::Color) ? color : 0;
+        [self floodFaceFromCell:seed axis:axis sign:sign color:flood_color
+              eightConnectivity:t.face_eight_connected
                          output:_faceSeedCells];
         _dragMode = DragMode::Shape;
         _hoverWindowPoint = event.locationInWindow;
         _hoverHasPoint = YES;
-        // No initial preview — d=0 with no drag means no extrusion yet.
+        // Render the click-as-1-layer preview immediately. As soon as the
+        // user actually drags, refreshShapePreview will switch to using
+        // the live drag distance.
+        [self refreshShapePreview];
     } else {
         _dragMode = DragMode::Paint;
         _paintMode = hasCommand ? macvoxel::ToolMode::Remove
@@ -1378,6 +1401,10 @@ void Bresenham3D(int x0, int y0, int z0, int x1, int y1, int z1,
 // previous shape before re-stamping the new one, and on Esc / mouseUp
 // before the final commit goes through the normal history path.
 - (void)rollbackShapePreview {
+    // Always reset the Face short-circuit cache: even if there's nothing
+    // in `_shapePreview` to undo, the next refresh has to re-decide what
+    // to apply rather than trusting a stale "already applied d" value.
+    _faceAppliedD = 0;
     if (_shapePreview.empty()) return;
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
@@ -1401,6 +1428,34 @@ void Bresenham3D(int x0, int y0, int z0, int x1, int y1, int z1,
 // EditHistory.
 - (void)refreshShapePreview {
     if (!_hasAnchor || _dragMode != DragMode::Shape) return;
+
+    // Face tool: drive the preview incrementally. Only the layers that
+    // actually differ between the previous d and the new d get touched,
+    // so dragging through layer boundaries costs O(seed_cells × Δd)
+    // per frame rather than O(seed_cells × |d|).
+    if (_anchorTool == macvoxel::ToolKind::Face) {
+        // Click without drag previews as a single layer; once a non-zero
+        // d has been observed the override stops applying so dragging
+        // back to the anchor cleanly cancels.
+        int d = [self faceDragVoxelsAtCursor:_hoverWindowPoint];
+        if (d != 0) _faceObservedDrag = YES;
+        if (d == 0 && !_faceObservedDrag) d = 1;
+        // Remove/Paint don't care about drag sign — normalize to magnitude
+        // so the short-circuit and the diff driver see equivalent gestures
+        // as equivalent state.
+        if (_anchorMode == macvoxel::ToolMode::Remove ||
+            _anchorMode == macvoxel::ToolMode::Paint) {
+            d = std::abs(d);
+        }
+        const macvoxel::ToolState& t = macvoxel::CurrentTool();
+        if (d == _faceAppliedD && t.face_with == _faceAppliedWith) return;
+        [self transitionFaceTo:d];
+        return;
+    }
+
+    // Other shape tools: rebuild from scratch every refresh, since their
+    // hit list is a continuous function of cursor position with no clean
+    // discrete short-circuit.
     [self rollbackShapePreview];
 
     const macvoxel::ToolState& t = macvoxel::CurrentTool();
@@ -1425,14 +1480,6 @@ void Bresenham3D(int x0, int y0, int z0, int x1, int y1, int z1,
                                          even:t.square_even
                                        output:hits];
             break;
-        case macvoxel::ToolKind::Face: {
-            // Face tool doesn't share the brush-stamp pipeline; it writes
-            // directly via applyFaceExtrusion: which already routes through
-            // the preview snapshot when DragMode::Shape is active.
-            const int d = [self faceDragVoxelsAtCursor:_hoverWindowPoint];
-            [self applyFaceExtrusion:d];
-            return;
-        }
         default: return;
     }
     for (const LineHit& h : hits) {
@@ -1718,15 +1765,17 @@ static inline void OffsetInPlane(int face_axis, int i, int j,
 }
 
 // Flood-fill in the plane perpendicular to `axis` through the seed cell.
-// Includes every cell that (a) has grid value `color` and (b) has its face
-// on the (axis, sign) side exposed (the cell at offset +sign along axis
-// is empty). 4-connectivity in the in-plane axes.
+// Includes every cell that (a) is non-empty and matches `color` (or is any
+// non-empty cell when `color == 0` for FaceExtrudeKind::Geometry) and
+// (b) has its face on the (axis, sign) side exposed (the cell at offset
+// +sign along axis is empty). Uses 4- or 8-connectivity in the in-plane
+// axes per `eightConn`.
 - (void)floodFaceFromCell:(Vec3i)seed
                      axis:(int)axis sign:(int)sign
                     color:(uint8_t)color
+        eightConnectivity:(BOOL)eightConn
                    output:(std::vector<Vec3i>&)out {
     out.clear();
-    if (color == 0) return;
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
     if (doc == nullptr) return;
@@ -1744,6 +1793,16 @@ static inline void OffsetInPlane(int face_axis, int i, int j,
     int normal[3] = {0, 0, 0};
     normal[axis] = sign;
 
+    auto qualifies = [&](const Vec3i& c) -> bool {
+        const uint8_t v = doc->grid.Get(c.x, c.y, c.z);
+        if (v == 0) return false;
+        if (color != 0 && v != color) return false;
+        return doc->grid.Get(c.x + normal[0], c.y + normal[1],
+                             c.z + normal[2]) == 0;
+    };
+
+    if (!qualifies(seed)) return;
+
     std::unordered_set<int64_t> visited;
     std::vector<std::pair<int, int>> stack;
     const int seed_u = seed_xyz[u_axis];
@@ -1756,16 +1815,24 @@ static inline void OffsetInPlane(int face_axis, int i, int j,
         const int u = top.first;
         const int v = top.second;
         const Vec3i c = cell_at(u, v);
-        if (doc->grid.Get(c.x, c.y, c.z) != color) continue;
-        if (doc->grid.Get(c.x + normal[0], c.y + normal[1],
-                          c.z + normal[2]) != 0) continue;
+        if (!qualifies(c)) continue;
         out.push_back(c);
-        const std::pair<int, int> nbrs[4] = {
+        const std::pair<int, int> cardinals[4] = {
             {u + 1, v}, {u - 1, v}, {u, v + 1}, {u, v - 1}
         };
-        for (const auto& n : nbrs) {
+        for (const auto& n : cardinals) {
             const int64_t key = macvoxel::PackCellKey(n.first, n.second, 0);
             if (visited.insert(key).second) stack.push_back(n);
+        }
+        if (eightConn) {
+            const std::pair<int, int> diagonals[4] = {
+                {u + 1, v + 1}, {u + 1, v - 1},
+                {u - 1, v + 1}, {u - 1, v - 1}
+            };
+            for (const auto& n : diagonals) {
+                const int64_t key = macvoxel::PackCellKey(n.first, n.second, 0);
+                if (visited.insert(key).second) stack.push_back(n);
+            }
         }
     }
 }
@@ -1819,9 +1886,17 @@ static inline void OffsetInPlane(int face_axis, int i, int j,
     return static_cast<int>(std::round(t));
 }
 
-// Apply the extrusion / inset to the document. Routes writes through the
-// preview snapshot during DragMode::Shape (so each frame's preview can be
-// rolled back) and directly through EditHistory otherwise.
+// Apply the extrusion / inset / paint to the document. Routes writes
+// through the preview snapshot during DragMode::Shape (so each frame's
+// preview can be rolled back) and directly through EditHistory otherwise.
+//
+// Mode dispatch (mode is frozen at click in `_anchorMode`):
+//   Add    — signed d. Positive extrudes; negative insets (erases).
+//            Extrude color comes from `face_with` (read live so the user
+//            can flip Geometry/Palette mid-drag and see the change).
+//   Remove — |d| layers, always inset (drag direction ignored).
+//   Paint  — |d| inward layers, repaint existing voxels with the palette
+//            color. Empty cells are skipped (Paint never fills).
 - (void)applyFaceExtrusion:(int)d {
     if (d == 0 || _faceSeedCells.empty()) return;
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
@@ -1844,24 +1919,30 @@ static inline void OffsetInPlane(int face_axis, int i, int j,
         }
     };
 
-    if (d > 0) {
-        // Extrude: fill empty cells at offsets 1..d along the face normal.
-        // Only fill cells that are currently empty; existing geometry in the
-        // way isn't overwritten (avoids surprising data loss).
+    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    const macvoxel::ToolMode mode = _anchorMode;
+    const int n = std::abs(d);
+
+    if (mode == macvoxel::ToolMode::Add && d > 0) {
+        // Extrude outward: fill empty cells at offsets 1..d. Existing
+        // geometry isn't overwritten (avoids surprising data loss).
+        const BOOL with_geometry =
+            (tool.face_with == macvoxel::FaceWithColor::Geometry);
         for (int k = 1; k <= d; ++k) {
             for (const Vec3i& v : _faceSeedCells) {
                 const int x = v.x + k * da[0];
                 const int y = v.y + k * da[1];
                 const int z = v.z + k * da[2];
-                if (doc->grid.Get(x, y, z) == 0) {
-                    write(x, y, z, _faceSeedColor);
-                }
+                if (doc->grid.Get(x, y, z) != 0) continue;
+                const uint8_t color = with_geometry
+                    ? doc->grid.Get(v.x, v.y, v.z)  // source cell color
+                    : tool.palette_idx;
+                write(x, y, z, color);
             }
         }
-    } else {
-        // Inset: erase cells starting at the seed plane (offset 0) and
-        // walking |d| steps inward (against the face normal).
-        const int n = -d;
+    } else if (mode == macvoxel::ToolMode::Add && d < 0) {
+        // Inset (Add with negative drag): erase the seed plane and walk
+        // |d| steps inward.
         for (int k = 0; k < n; ++k) {
             for (const Vec3i& v : _faceSeedCells) {
                 const int x = v.x - k * da[0];
@@ -1870,8 +1951,154 @@ static inline void OffsetInPlane(int face_axis, int i, int j,
                 write(x, y, z, 0);
             }
         }
+    } else if (mode == macvoxel::ToolMode::Remove) {
+        // Always inset, magnitude only — drag direction is ignored.
+        for (int k = 0; k < n; ++k) {
+            for (const Vec3i& v : _faceSeedCells) {
+                const int x = v.x - k * da[0];
+                const int y = v.y - k * da[1];
+                const int z = v.z - k * da[2];
+                write(x, y, z, 0);
+            }
+        }
+    } else if (mode == macvoxel::ToolMode::Paint) {
+        // Repaint existing voxels at the seed plane and |d|-1 layers in.
+        // Skips empty cells (Paint mode never fills).
+        for (int k = 0; k < n; ++k) {
+            for (const Vec3i& v : _faceSeedCells) {
+                const int x = v.x - k * da[0];
+                const int y = v.y - k * da[1];
+                const int z = v.z - k * da[2];
+                if (doc->grid.Get(x, y, z) != 0) {
+                    write(x, y, z, tool.palette_idx);
+                }
+            }
+        }
     }
     ++doc->version;
+}
+
+// Apply or rollback a single Face-tool layer at `offset` along the face
+// normal. These are the incremental hot-path helpers used during the
+// live preview — they only touch one layer's worth of cells (seed_cells
+// many) instead of the full O(seed × |d|) the bulk applyFaceExtrusion:
+// would do. Always write to `_shapePreview` (preconditions: drag in
+// progress with `_dragMode == DragMode::Shape`).
+- (void)applyFaceLayerAtOffset:(int)offset {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return;
+
+    int da[3] = {0, 0, 0};
+    da[_anchorFaceAxis] = _faceSign;
+    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    const macvoxel::ToolMode mode = _anchorMode;
+    auto write = [&](int x, int y, int z, uint8_t new_val) {
+        const uint8_t old_val = doc->grid.Get(x, y, z);
+        if (new_val == old_val) return;
+        doc->grid.Set(x, y, z, new_val);
+        const int64_t key = macvoxel::PackCellKey(x, y, z);
+        _shapePreview.try_emplace(key, old_val);
+    };
+
+    for (const Vec3i& v : _faceSeedCells) {
+        const int x = v.x + offset * da[0];
+        const int y = v.y + offset * da[1];
+        const int z = v.z + offset * da[2];
+        if (mode == macvoxel::ToolMode::Add && offset > 0) {
+            if (doc->grid.Get(x, y, z) != 0) continue;
+            const uint8_t color =
+                (tool.face_with == macvoxel::FaceWithColor::Geometry)
+                    ? doc->grid.Get(v.x, v.y, v.z)
+                    : tool.palette_idx;
+            write(x, y, z, color);
+        } else if (mode == macvoxel::ToolMode::Add && offset <= 0) {
+            write(x, y, z, 0);
+        } else if (mode == macvoxel::ToolMode::Remove) {
+            write(x, y, z, 0);
+        } else if (mode == macvoxel::ToolMode::Paint) {
+            if (doc->grid.Get(x, y, z) != 0) {
+                write(x, y, z, tool.palette_idx);
+            }
+        }
+    }
+    ++doc->version;
+}
+
+- (void)rollbackFaceLayerAtOffset:(int)offset {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return;
+    int da[3] = {0, 0, 0};
+    da[_anchorFaceAxis] = _faceSign;
+    for (const Vec3i& v : _faceSeedCells) {
+        const int x = v.x + offset * da[0];
+        const int y = v.y + offset * da[1];
+        const int z = v.z + offset * da[2];
+        const int64_t key = macvoxel::PackCellKey(x, y, z);
+        auto it = _shapePreview.find(key);
+        if (it == _shapePreview.end()) continue;
+        doc->grid.Set(x, y, z, it->second);
+        _shapePreview.erase(it);
+    }
+    ++doc->version;
+}
+
+// Move the Face preview from `_faceAppliedD` to `new_d` by adding /
+// removing only the layers that differ. Falls back to a full rebuild
+// when the preview's "direction" flips (Add positive ↔ negative drag)
+// or `face_with` changes — those rarely happen during a drag, so the
+// full-rebuild fallback's O(seed × |d|) cost is acceptable there.
+//
+// For Remove/Paint, `new_d` is expected pre-normalized to a non-negative
+// magnitude (always inward), so a sign flip is impossible.
+- (void)transitionFaceTo:(int)new_d {
+    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    const macvoxel::ToolMode mode = _anchorMode;
+
+    bool full_rebuild = false;
+    if (mode == macvoxel::ToolMode::Add) {
+        if (tool.face_with != _faceAppliedWith) full_rebuild = true;
+        if (_faceAppliedD != 0 && new_d != 0 &&
+            ((_faceAppliedD > 0) != (new_d > 0))) {
+            full_rebuild = true;
+        }
+    }
+    if (full_rebuild) {
+        [self rollbackShapePreview];  // resets _faceAppliedD to 0
+        [self applyFaceExtrusion:new_d];
+        _faceAppliedD = new_d;
+        _faceAppliedWith = tool.face_with;
+        return;
+    }
+
+    const int abs_old = std::abs(_faceAppliedD);
+    const int abs_new = std::abs(new_d);
+    int dir_sign;  // +1 = outward (Add d>0), -1 = inward (Add d<0, Remove, Paint)
+    if (mode == macvoxel::ToolMode::Add) {
+        if (_faceAppliedD == 0 && new_d == 0) return;
+        dir_sign = (_faceAppliedD != 0 ? _faceAppliedD : new_d) > 0 ? +1 : -1;
+    } else {
+        dir_sign = -1;
+    }
+    // Map a 0-based layer index to the offset along the face normal:
+    //   outward  (idx 0,1,2,...)  → offsets +1, +2, +3, ...
+    //   inward   (idx 0,1,2,...)  → offsets  0, -1, -2, ...
+    auto offset_for_idx = [dir_sign](int idx) {
+        return dir_sign > 0 ? idx + 1 : -idx;
+    };
+
+    if (abs_new > abs_old) {
+        for (int idx = abs_old; idx < abs_new; ++idx) {
+            [self applyFaceLayerAtOffset:offset_for_idx(idx)];
+        }
+    } else if (abs_new < abs_old) {
+        for (int idx = abs_old - 1; idx >= abs_new; --idx) {
+            [self rollbackFaceLayerAtOffset:offset_for_idx(idx)];
+        }
+    }
+    _faceAppliedD = new_d;
+    _faceAppliedWith = tool.face_with;
 }
 
 - (void)commitFaceAtPoint:(NSPoint)windowPoint {
@@ -1883,7 +2110,9 @@ static inline void OffsetInPlane(int face_axis, int i, int j,
         _faceSeedCells.clear();
         return;
     }
-    const int d = [self faceDragVoxelsAtCursor:windowPoint];
+    int d = [self faceDragVoxelsAtCursor:windowPoint];
+    if (d != 0) _faceObservedDrag = YES;
+    if (d == 0 && !_faceObservedDrag) d = 1;
     if (d != 0) {
         macvoxel::CurrentHistory().BeginOp();
         [self applyFaceExtrusion:d];
