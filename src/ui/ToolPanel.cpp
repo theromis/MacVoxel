@@ -63,9 +63,53 @@ void DrawToolPanel() {
     if (ImGui::SliderInt("Brush radius", &radius, 1, 8)) {
         t.brush_radius = radius;
     }
+
+    auto shape_button = [&](const char* label, BrushShape s) {
+        const bool active = t.brush_shape == s;
+        AccentButtonColors(active);
+        if (ImGui::Button(label, ImVec2(80, 0))) t.brush_shape = s;
+        if (active) ImGui::PopStyleColor(3);
+    };
+    shape_button("Square", BrushShape::Square);
+    ImGui::SameLine();
+    shape_button("Circle", BrushShape::Circle);
+
+    auto dim_button = [&](const char* label, bool want_3d) {
+        const bool active = t.brush_3d == want_3d;
+        AccentButtonColors(active);
+        if (ImGui::Button(label, ImVec2(80, 0))) t.brush_3d = want_3d;
+        if (active) ImGui::PopStyleColor(3);
+    };
+    dim_button("2D", false);
+    ImGui::SameLine();
+    dim_button("3D", true);
+
+    // Footprint summary: edge length is fixed at (2r-1); cell count
+    // depends on shape and dimensionality. Computed by sampling the
+    // same predicate the editor uses so the label can't drift from
+    // the actual brush.
+    const int span = std::max(0, t.brush_radius - 1);
     const int edge = 2 * t.brush_radius - 1;
-    ImGui::Text("brush  %d × %d × %d  (%d cells)", edge, edge, edge,
-                edge * edge * edge);
+    int cells = 0;
+    const float r2 = static_cast<float>(span) * static_cast<float>(span);
+    for (int dz = -span; dz <= span; ++dz) {
+        if (!t.brush_3d && dz != 0) continue;
+        for (int dy = -span; dy <= span; ++dy) {
+            for (int dx = -span; dx <= span; ++dx) {
+                if (t.brush_shape == BrushShape::Circle) {
+                    const int d2 = dx*dx + dy*dy + (t.brush_3d ? dz*dz : 0);
+                    if (static_cast<float>(d2) > r2) continue;
+                }
+                ++cells;
+            }
+        }
+    }
+    if (t.brush_3d) {
+        ImGui::Text("brush  %d × %d × %d  (%d cells)", edge, edge, edge, cells);
+    } else {
+        ImGui::Text("brush  %d × %d  (%d cells, on face plane)", edge, edge,
+                    cells);
+    }
 
     ImGui::Spacing();
     if (ImGui::CollapsingHeader("Controls")) {

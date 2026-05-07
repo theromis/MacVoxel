@@ -22,6 +22,14 @@ enum class ToolMode {
     Paint,
 };
 
+// Shape of the brush footprint. Square = axis-aligned cube/slab;
+// Circle = sphere/disc. Combines with `brush_3d` to produce four
+// footprints: cube, sphere, square slab, disc.
+enum class BrushShape {
+    Square,
+    Circle,
+};
+
 struct ToolState {
     ToolKind tool = ToolKind::Brush;
     ToolMode mode = ToolMode::Add;
@@ -29,6 +37,10 @@ struct ToolState {
     // Brush extent: edges of (2r-1) voxels per side, centered on the
     // hit cell (r=1 -> 1 voxel; r=2 -> 3x3x3; r=3 -> 5x5x5).
     int brush_radius = 1;
+    BrushShape brush_shape = BrushShape::Square;
+    // 3D = volumetric (cube or sphere); 2D = one-cell-thick slab on
+    // the plane of the clicked face (square or disc).
+    bool brush_3d = true;
     // Multi-selection of palette slots, driven by the Palette panel's
     // click-drag / shift-click. The Material editor in the Render panel
     // writes edits to every selected slot. `palette_idx` is always a

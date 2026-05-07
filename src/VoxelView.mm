@@ -735,7 +735,8 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     if (t.tool != macvoxel::ToolKind::Brush) return;
 
     Vec3i cell;
-    if (![self computeTargetCellAtPoint:_hoverWindowPoint mode:t.mode into:&cell]) {
+    if (![self computeTargetCellAtPoint:_hoverWindowPoint mode:t.mode into:&cell
+                                   face:nullptr]) {
         return;
     }
     ImU32 color;
@@ -933,7 +934,8 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 
 - (BOOL)computeTargetCellAtPoint:(NSPoint)windowPoint
                             mode:(macvoxel::ToolMode)mode
-                            into:(Vec3i*)out {
+                            into:(Vec3i*)out
+                            face:(int*)out_face_axis {
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
     if (doc == nullptr) return NO;
@@ -963,10 +965,12 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     int target_x = 0;
     int target_y = 0;
     int target_z = 0;
+    int face_axis = 2;  // ground-plane fallback faces +Z
     if (hit_voxel) {
         target_x = hit.x;
         target_y = hit.y;
         target_z = hit.z;
+        if (hit.axis >= 0) face_axis = hit.axis;
         if (mode == macvoxel::ToolMode::Add) {
             if (hit.axis < 0) return NO;  // ray started inside a voxel
             if (hit.axis == 0) target_x += hit.sign;
@@ -989,6 +993,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     }
 
     *out = Vec3i{target_x, target_y, target_z};
+    if (out_face_axis) *out_face_axis = face_axis;
     return YES;
 }
 
@@ -998,7 +1003,9 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     if (doc == nullptr) return;
 
     Vec3i target;
-    if (![self computeTargetCellAtPoint:windowPoint mode:mode into:&target]) {
+    int face_axis = 2;
+    if (![self computeTargetCellAtPoint:windowPoint mode:mode into:&target
+                                   face:&face_axis]) {
         return;
     }
     const int target_x = target.x;
@@ -1048,9 +1055,27 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         }
     };
 
+    // Footprint shape combines BrushShape × dim:
+    //  Square+3D = cube         |  Square+2D = slab on face plane
+    //  Circle+3D = sphere       |  Circle+2D = disc on face plane
+    // For 2D modes the plane axis is the face the user clicked
+    // (face_axis); the brush is one cell thick along that axis.
+    const float r2 = static_cast<float>(span) * static_cast<float>(span);
+    const bool is_3d = tool.brush_3d;
+    const bool is_circle = tool.brush_shape == macvoxel::BrushShape::Circle;
     for (int dz = -span; dz <= span; ++dz) {
+        if (!is_3d && face_axis == 2 && dz != 0) continue;
         for (int dy = -span; dy <= span; ++dy) {
+            if (!is_3d && face_axis == 1 && dy != 0) continue;
             for (int dx = -span; dx <= span; ++dx) {
+                if (!is_3d && face_axis == 0 && dx != 0) continue;
+                if (is_circle) {
+                    int d2 = 0;
+                    if (is_3d || face_axis != 0) d2 += dx * dx;
+                    if (is_3d || face_axis != 1) d2 += dy * dy;
+                    if (is_3d || face_axis != 2) d2 += dz * dz;
+                    if (static_cast<float>(d2) > r2) continue;
+                }
                 apply(target_x + dx, target_y + dy, target_z + dz);
             }
         }
