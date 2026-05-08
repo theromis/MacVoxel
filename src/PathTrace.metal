@@ -406,22 +406,23 @@ float pdf_ggx_vndf(float3 n, float3 omega_o, float3 omega_i, float roughness) {
     return D * G1_o / max(4.0 * cos_o, 1e-8);
 }
 
-// Luminance proxy for the unshadowed direct-lighting integrand. RIS
-// uses this as the resampling target distribution, and the BSDF-MIS
-// branch evaluates the same expression so both sides agree on what
-// "ideal NEE pdf" looks like.
+// Luminance proxy for the unshadowed direct-lighting integrand in
+// solid-angle measure. RIS uses this as the resampling target, and
+// nee_pdf_solid_for_arrival evaluates the same expression so both
+// sides agree on what "ideal NEE pdf" looks like.
 //
 // In solid-angle measure, the unshadowed integrand at x toward y is
-// proportional to ‖Le‖ · cos_x · cos_y / dist² — the geometry term
-// G_solid plus the BSDF-independent radiance scale. We scalarize Le
-// via Rec. 709 luminance so target_pdf is a single float that mixes
-// channel weights naturally.
-inline float nee_target_pdf_solid(float3 le, float cos_x, float cos_y,
-                                  float dist2)
+// proportional to ‖Le‖ · cos_x. The cos_y / dist² Jacobian belongs
+// in the source pdf (which already has it — `prob · (1/3) · dist² /
+// cos_y` is just the area pdf converted to solid angle), and putting
+// it on both sides gives the wrong measure on target — the
+// `target / source` ratio then includes spurious `dist⁴ / cos²_y`
+// terms that cause distant / grazing lights to firefly.
+inline float nee_target_pdf_solid(float3 le, float cos_x)
 {
-    if (cos_x <= 0.0 || cos_y <= 0.0 || dist2 <= 0.0) return 0.0;
+    if (cos_x <= 0.0) return 0.0;
     float Le_lum = dot(le, float3(0.299, 0.587, 0.114));
-    return Le_lum * cos_x * cos_y / dist2;
+    return Le_lum * cos_x;
 }
 
 // Solid-angle pdf NEE would have assigned to the BSDF-sampled
@@ -438,8 +439,7 @@ float nee_pdf_solid_for_arrival(constant PathUniforms& u,
                                 int3 hit_cell,
                                 float3 n_x_prev,
                                 float3 omega,
-                                float3 n_y,
-                                float dist2)
+                                float3 n_y)
 {
     if (u.light_count == 0u) return 0.0;
     float cos_y = dot(n_y, -omega);
@@ -447,8 +447,7 @@ float nee_pdf_solid_for_arrival(constant PathUniforms& u,
     if (cos_x <= 0.0 || cos_y <= 0.0) return 0.0;
     for (uint i = 0u; i < u.light_count; ++i) {
         if (all(int3(lights[i].pos.xyz) == hit_cell)) {
-            return nee_target_pdf_solid(lights[i].le.xyz,
-                                        cos_x, cos_y, dist2);
+            return nee_target_pdf_solid(lights[i].le.xyz, cos_x);
         }
     }
     return 0.0;
@@ -577,7 +576,7 @@ NEELight nee_sample_light(float3 x,
         // luminance. Equal denominators across iterations let us do
         // weighted reservoir sampling with one rand1 per candidate.
         float source_pdf_solid = prob_li * (1.0 / 3.0) * dist2 / cos_y;
-        float target = nee_target_pdf_solid(L.le.xyz, cos_x, cos_y, dist2);
+        float target = nee_target_pdf_solid(L.le.xyz, cos_x);
         if (source_pdf_solid <= 0.0 || target <= 0.0) continue;
         float w_i = target / source_pdf_solid;
 
@@ -872,11 +871,9 @@ fragment float4 pt_fragment(
                 if      (h.axis == 0) n_y.x = float(h.sign);
                 else if (h.axis == 1) n_y.y = float(h.sign);
                 else if (h.axis == 2) n_y.z = float(h.sign);
-                float3 d = h.point - ray_origin;
-                float dist2 = dot(d, d);
                 float pdf_light = nee_pdf_solid_for_arrival(
                     u, lights, h.cell_coord, prev_normal,
-                    ray_dir, n_y, dist2);
+                    ray_dir, n_y);
                 float w_bsdf = mis_power(prev_bsdf_pdf, pdf_light);
                 radiance += throughput * Le * w_bsdf;
             }
