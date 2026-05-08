@@ -230,28 +230,25 @@ float3 atmosphere_transmittance(float3 p, float3 omega) {
 
 // Nishita single-scatter sky radiance for view direction `view_dir`
 // and sun direction `sun_dir` (both unit-length, atmosphere frame =
-// grid frame since grid Z is up). `sun_radiance_surface` is the
-// user's per-direction sun radiance reaching the surface (already
-// divided by the sun's solid angle); `sun_cos_half_angle` lets us
-// recover the surface irradiance, which is what the in-scattering
-// integral actually wants — the sun cone integral
-// ∫_cone σ·ρ·phase·L_radiance·T dω ≈ σ·ρ·phase·L_radiance·T·Ω
-// trades a per-direction radiance for an integrated irradiance. So
-// we multiply by sun_solid_angle once on entry, then un-attenuate to
-// TOA, and use that as the in-scattering source in the integrand.
+// grid frame since grid Z is up). `sun_radiance_in` is the user's
+// per-direction sun radiance, treated here as the TOA value: the
+// sun-cone integral ∫_cone σ·ρ·phase·L·T dω ≈ σ·ρ·phase·L·T·Ω
+// trades the per-direction radiance for an irradiance via the
+// solid angle. We do NOT un-attenuate to TOA from a surface-irradiance
+// calibration — at low sun elevation, T_surface_to_sun.b → 0 and the
+// reciprocal blows up the blue channel, producing an intense blue cast
+// (and a worse one as elevation drops). Treating the user's value as
+// TOA means the sky dims & reddens naturally at sunset, which is the
+// physically right behavior for single-scatter Nishita.
 float3 nishita_sky_radiance(float3 view_dir, float3 sun_dir,
-                            float3 sun_radiance_surface,
+                            float3 sun_radiance_in,
                             float sun_cos_half_angle)
 {
     float3 origin = float3(0.0, 0.0, kEarthRadius);
     float t_top = ray_outer_sphere_t(origin, view_dir, kAtmosphereTop);
     if (t_top <= 0.0) return float3(0.0);
     float sun_solid_angle = 6.2831853 * (1.0 - sun_cos_half_angle);
-    float3 sun_irradiance_surface =
-        sun_radiance_surface * sun_solid_angle;
-    float3 t_surface_to_sun = atmosphere_transmittance(origin, sun_dir);
-    float3 sun_irradiance_TOA = sun_irradiance_surface /
-                                max(t_surface_to_sun, float3(1e-6));
+    float3 sun_irradiance_TOA = sun_radiance_in * sun_solid_angle;
 
     float cos_theta = dot(view_dir, sun_dir);
     float cos_theta2 = cos_theta * cos_theta;
