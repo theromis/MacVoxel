@@ -48,6 +48,24 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     return a.x == b.x && a.y == b.y && a.z == b.z;
 }
 
+// Per-cell edit arithmetic: return the new cell value given the old
+// value, the tool mode, and the active palette color. Add only fills
+// empty cells (so a wide brush doesn't recolor neighbors), Remove
+// always clears, Paint only repaints existing voxels. Caller checks
+// `new == old` to decide whether to actually write.
+inline uint8_t ComputeNewCellValue(uint8_t old_val, macvoxel::ToolMode mode,
+                                   uint8_t palette_idx) {
+    switch (mode) {
+        case macvoxel::ToolMode::Add:
+            return (old_val == 0) ? palette_idx : old_val;
+        case macvoxel::ToolMode::Remove:
+            return 0;
+        case macvoxel::ToolMode::Paint:
+            return (old_val != 0) ? palette_idx : old_val;
+    }
+    return old_val;
+}
+
 // (axis, sign) for face index 0..5. axis/2 = X|Y|Z; sign +1 for "max"
 // face, -1 for "min" face. Layout matches kFaceArrowOrder below.
 inline void GenFaceAxisSign(int face, int* axis, int* sign) {
@@ -1460,22 +1478,8 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     const BOOL preview = (_dragMode == DragMode::Shape);
     auto apply = [&](int x, int y, int z) {
         const uint8_t old_val = doc->grid.Get(x, y, z);
-        uint8_t new_val = old_val;
-        switch (mode) {
-            case macvoxel::ToolMode::Add:
-                // Only fill empty cells. Brushes wider than 1 voxel
-                // sweep over neighbors that may already be filled with
-                // other colors; Add must leave those alone (use Paint
-                // to recolor existing voxels).
-                if (old_val == 0) new_val = tool.palette_idx;
-                break;
-            case macvoxel::ToolMode::Remove:
-                new_val = 0;
-                break;
-            case macvoxel::ToolMode::Paint:
-                if (old_val != 0) new_val = tool.palette_idx;
-                break;
-        }
+        const uint8_t new_val = ComputeNewCellValue(old_val, mode,
+                                                    tool.palette_idx);
         if (new_val == old_val) return;
         doc->grid.Set(x, y, z, new_val);
         if (preview) {
@@ -1530,6 +1534,36 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         }
     }
 
+    ++doc->version;
+}
+
+// Single-cell stamp pipeline for the Generator tool. Each cell from a
+// generator kernel is a "this exact cell should be filled" instruction —
+// brush size / shape / 2D / 3D options must NOT expand the footprint
+// (the kernel already produced the final cell list). Routes to
+// _shapePreview when `preview` is YES and EditHistory otherwise; the
+// caller is expected to BeginOp/CommitOp around a non-preview batch.
+- (void)stampGeneratorCells:(const std::vector<macvoxel::shapes::Vec3i>&)cells
+                        mode:(macvoxel::ToolMode)mode
+                     preview:(BOOL)preview {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr || cells.empty()) return;
+
+    const uint8_t palette_idx = macvoxel::CurrentTool().palette_idx;
+    macvoxel::EditHistory& history = macvoxel::CurrentHistory();
+    for (const macvoxel::shapes::Vec3i& c : cells) {
+        const uint8_t old_val = doc->grid.Get(c.x, c.y, c.z);
+        const uint8_t new_val = ComputeNewCellValue(old_val, mode, palette_idx);
+        if (new_val == old_val) continue;
+        doc->grid.Set(c.x, c.y, c.z, new_val);
+        if (preview) {
+            const int64_t key = macvoxel::PackCellKey(c.x, c.y, c.z);
+            _shapePreview.try_emplace(key, old_val);
+        } else {
+            history.Record(c.x, c.y, c.z, old_val, new_val);
+        }
+    }
     ++doc->version;
 }
 
@@ -1713,10 +1747,35 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                                       fill:t.box_fill
                                     output:hits];
             break;
-        case macvoxel::ToolKind::Generator:
-            [self enumerateGeneratorFromAnchorTo:_hoverWindowPoint
-                                          output:hits];
-            break;
+        case macvoxel::ToolKind::Generator: {
+            // Engine emits final cells; brush footprint must NOT apply,
+            // so this path bypasses the per-hit stampBrushAtX loop and
+            // writes through stampGeneratorCells instead.
+            Vec3i endpoint = _anchorCell;
+            int end_face = _anchorFaceAxis;
+            [self computeLineEndpointAtPoint:_hoverWindowPoint
+                                        mode:_anchorMode
+                                        into:&endpoint face:&end_face];
+            macvoxel::generators::Bounds3i b{
+                std::min(_anchorCell.x, endpoint.x),
+                std::min(_anchorCell.y, endpoint.y),
+                std::min(_anchorCell.z, endpoint.z),
+                std::max(_anchorCell.x, endpoint.x),
+                std::max(_anchorCell.y, endpoint.y),
+                std::max(_anchorCell.z, endpoint.z),
+            };
+            macvoxel::generators::Params p =
+                macvoxel::CurrentGeneratorState().params;
+            p.palette_idx = macvoxel::CurrentTool().palette_idx;
+            std::vector<macvoxel::shapes::Vec3i> cells;
+            [_generatorEngine
+                generateInto:cells
+                        kind:macvoxel::CurrentGeneratorState().active_kind
+                      bounds:b
+                      params:p];
+            [self stampGeneratorCells:cells mode:_anchorMode preview:YES];
+            return;
+        }
         default: return;
     }
     for (const LineHit& h : hits) {
@@ -1929,49 +1988,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 // ---------------------------------------------------------------------------
-// Generator tool — click-drag-out an AABB, hand it to the GPU compute
-// kernel for the active GeneratorState kind, stamp the resulting cells
-// the same way the Box tool does. P12.5.C will replace this drag-then-
-// commit flow with a persistent gizmo + face handles + click-outside-
-// to-commit; for now this gives a working end-to-end Ellipsoid tool
-// with full live preview through the existing _shapePreview machinery.
+// Generator tool — click-drag-out an AABB; mouseup promotes the preview
+// into a persistent gizmo (face arrows for resize, click-outside to
+// commit, Esc to cancel). The drag-out phase's stamping happens in
+// refreshShapePreview's Generator case, which calls the engine and
+// stampGeneratorCells: directly — bypassing the brush-footprint
+// expansion that stampBrushAtX: does for Line / Circle / Square / Box.
 // ---------------------------------------------------------------------------
-
-- (void)enumerateGeneratorFromAnchorTo:(NSPoint)cursor
-                                output:(std::vector<LineHit>&)out {
-    out.clear();
-    if (!_hasAnchor) return;
-
-    Vec3i endpoint;
-    int end_face = _anchorFaceAxis;
-    if (![self computeLineEndpointAtPoint:cursor mode:_anchorMode
-                                     into:&endpoint face:&end_face]) {
-        out.push_back({_anchorCell.x, _anchorCell.y, _anchorCell.z,
-                       _anchorFaceAxis});
-        return;
-    }
-
-    macvoxel::generators::Bounds3i b{
-        std::min(_anchorCell.x, endpoint.x),
-        std::min(_anchorCell.y, endpoint.y),
-        std::min(_anchorCell.z, endpoint.z),
-        std::max(_anchorCell.x, endpoint.x),
-        std::max(_anchorCell.y, endpoint.y),
-        std::max(_anchorCell.z, endpoint.z),
-    };
-    macvoxel::generators::Params p = macvoxel::CurrentGeneratorState().params;
-    p.palette_idx = macvoxel::CurrentTool().palette_idx;
-
-    std::vector<Vec3i> cells;
-    [_generatorEngine generateInto:cells
-                              kind:macvoxel::CurrentGeneratorState().active_kind
-                            bounds:b
-                            params:p];
-    out.reserve(cells.size());
-    for (const Vec3i& c : cells) {
-        out.push_back({c.x, c.y, c.z, _anchorFaceAxis});
-    }
-}
 
 // Promote the current drag-out preview into a persistent gizmo. The
 // preview cells stay applied to the grid; _genBounds captures the box
@@ -2012,21 +2035,14 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
     macvoxel::generators::Params p = macvoxel::CurrentGeneratorState().params;
     p.palette_idx = macvoxel::CurrentTool().palette_idx;
-    std::vector<Vec3i> cells;
+    std::vector<macvoxel::shapes::Vec3i> cells;
     [_generatorEngine generateInto:cells
                               kind:macvoxel::CurrentGeneratorState().active_kind
                             bounds:_genBounds
                             params:p];
-    // Stamp through the existing brush+preview routing. _dragMode isn't
-    // Shape here (we left it in mouseUp), so we briefly re-enter Shape
-    // mode just for the stamp pass — the gizmo doesn't otherwise care.
-    const DragMode saved = _dragMode;
-    _dragMode = DragMode::Shape;
-    for (const Vec3i& c : cells) {
-        [self stampBrushAtX:c.x y:c.y z:c.z faceAxis:_anchorFaceAxis
-                       mode:macvoxel::CurrentTool().mode];
-    }
-    _dragMode = saved;
+    [self stampGeneratorCells:cells
+                         mode:macvoxel::CurrentTool().mode
+                      preview:YES];
 }
 
 // Commit the current gizmo's preview through EditHistory as a single
