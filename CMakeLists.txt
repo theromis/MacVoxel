@@ -90,6 +90,7 @@ set(APP_RESOURCES
     resources/SF-Symbols-Export.ttf
     resources/default.vox
     src/Generators.metal
+    src/PathTrace.metal
 )
 set_source_files_properties(${APP_RESOURCES}
     PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
