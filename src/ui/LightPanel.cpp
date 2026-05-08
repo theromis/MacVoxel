@@ -95,10 +95,10 @@ void DrawLightPanel() {
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
             "Multiplier on the linear-space sun colour. 0 disables the "
-            "sun entirely (default). Until NEE-for-sun ships, surfaces "
-            "lit primarily by a small sun will be noisy — the sun is "
-            "currently only reached via random BSDF samples that happen "
-            "to point into its angular cone.");
+            "sun entirely (default). The sun is direct-sampled per "
+            "surface bounce via NEE (uniform-cone sample + shadow ray) "
+            "and MIS-weighted against the BSDF on emitter arrival, so "
+            "even a tiny sun gives clean surface lighting.");
     }
     ImGui::Unindent();
 

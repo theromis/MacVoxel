@@ -615,6 +615,81 @@ NEELight nee_sample_light(float3 x,
     return r;
 }
 
+// Sun NEE: uniform cone sample around `u.sun_dir_grid` of half-angle
+// acos(u.sun_cos_half_angle). pdf_solid = 1 / (2π · (1 − cos_half))
+// — uniform on the cone. Returns a NEELight-shaped result so the
+// existing nee_diffuse_mis / nee_ggx_mis helpers can MIS-weight it
+// against the BSDF without duplicating the BRDF math; cos_y / dist2
+// are placeholders (unused by the MIS helpers).
+//
+// No-ops cheaply when the sun is off (intensity = 0 → sun_radiance
+// is (0, 0, 0)) or when the cone is degenerate (cos_half >= 1).
+// Rejects samples that point through the virtual ground plane from
+// above-ground surfaces — keeps the sun from "shining through the
+// floor" when the cone dips below the horizon.
+NEELight nee_sample_sun(float3 x,
+                        float3 n_x,
+                        constant PathUniforms& u,
+                        device const uint* coarse_grid,
+                        device const Chunk* chunk_pool,
+                        thread uint& rng)
+{
+    NEELight r;
+    r.visible = false;
+    r.omega_i = float3(0.0);
+    r.le = float3(0.0);
+    r.cos_x = 0.0;
+    r.cos_y = 0.0;
+    r.dist2 = 0.0;
+    r.pdf_solid = 0.0;
+    if (u.sun_cos_half_angle >= 1.0) return r;
+    if (max(u.sun_radiance.x,
+            max(u.sun_radiance.y, u.sun_radiance.z)) <= 0.0) return r;
+
+    // Uniform-on-cone direction sample: pick cos_theta in
+    // [cos_half, 1], azimuth uniform around the sun's local Z.
+    float u1 = rand1(rng);
+    float u2 = rand1(rng);
+    float cos_theta = mix(u.sun_cos_half_angle, 1.0, u1);
+    float sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+    float phi = 6.2831853 * u2;
+
+    // TBN around sun_dir.
+    float3 sz = u.sun_dir_grid;
+    float3 helper = abs(sz.x) > 0.5 ? float3(0, 1, 0) : float3(1, 0, 0);
+    float3 sx = normalize(cross(sz, helper));
+    float3 sy = cross(sz, sx);
+    float3 omega = sin_theta * cos(phi) * sx +
+                   sin_theta * sin(phi) * sy +
+                   cos_theta * sz;
+
+    float cos_x = dot(omega, n_x);
+    if (cos_x <= 0.0) return r;
+
+    // Ground-plane occlusion: the path tracer treats z=0 as a virtual
+    // ground (matches the editor's empty-click fallback). Surfaces
+    // above the ground can't see sun samples that would punch through
+    // the floor.
+    if (omega.z < 0.0 && x.z > 0.0) return r;
+
+    // Shadow ray to "infinity." DDA returns hit=true if the ray hits
+    // a real cell along the way; hit=false means it escaped the grid
+    // (= sun unblocked).
+    DDAHit s = dda_traverse(x + n_x * 1e-3, omega, u,
+                            coarse_grid, chunk_pool, 0u);
+    if (s.hit) return r;
+
+    r.visible   = true;
+    r.omega_i   = omega;
+    r.le        = u.sun_radiance;
+    r.cos_x     = cos_x;
+    r.cos_y     = 1.0;   // unused — sun is a directional light
+    r.dist2     = 0.0;   // unused
+    float sun_solid_angle = 6.2831853 * (1.0 - u.sun_cos_half_angle);
+    r.pdf_solid = 1.0 / sun_solid_angle;
+    return r;
+}
+
 // MIS-weighted NEE for a Lambertian shading point. Caller multiplies by
 // throughput. f = albedo / π. Estimator: w · f · Le · cos_x / pdf_solid.
 float3 nee_diffuse_mis(NEELight L, float3 albedo, float3 n_x) {
@@ -844,6 +919,11 @@ fragment float4 pt_fragment(
                             coarse_grid, chunk_pool, rng);
                         radiance += throughput *
                             nee_diffuse_mis(nee, kGroundAlbedo, kGroundNormal);
+                        NEELight nee_s = nee_sample_sun(
+                            g_point, kGroundNormal, u,
+                            coarse_grid, chunk_pool, rng);
+                        radiance += throughput *
+                            nee_diffuse_mis(nee_s, kGroundAlbedo, kGroundNormal);
                     }
                     ray_origin = g_point + kGroundNormal * 1e-3;
                     ray_dir = cosine_hemi(kGroundNormal, rng);
@@ -857,12 +937,19 @@ fragment float4 pt_fragment(
             // Sun disc: the ray escaped to the sky; check whether its
             // direction lies inside the sun cone. sun_radiance is
             // (0,0,0) when intensity is 0, so this is a no-op for the
-            // disabled state. NEE-for-sun is a follow-up — until then,
-            // surfaces lit "by the sun" only get its contribution
-            // through random BSDF samples that happen to hit the cone,
-            // so small suns will read as noisy.
-            if (dot(ray_dir, u.sun_dir_grid) >= u.sun_cos_half_angle) {
-                radiance += throughput * u.sun_radiance;
+            // disabled state. MIS against sun-NEE on non-delta paths
+            // — same shape as the BSDF-arrives-at-emissive-voxel branch.
+            if (u.sun_cos_half_angle < 1.0 &&
+                dot(ray_dir, u.sun_dir_grid) >= u.sun_cos_half_angle) {
+                if (b == 0u || prev_is_delta) {
+                    radiance += throughput * u.sun_radiance;
+                } else {
+                    float sun_solid_angle =
+                        6.2831853 * (1.0 - u.sun_cos_half_angle);
+                    float pdf_sun = 1.0 / sun_solid_angle;
+                    float w_bsdf = mis_power(prev_bsdf_pdf, pdf_sun);
+                    radiance += throughput * u.sun_radiance * w_bsdf;
+                }
             }
             radiance += throughput * u.sky_color;
             break;
@@ -922,6 +1009,11 @@ fragment float4 pt_fragment(
                         coarse_grid, chunk_pool, rng);
                     radiance += throughput *
                         nee_ggx_mis(nee, omega_o, normal, albedo, r);
+                    NEELight nee_s = nee_sample_sun(
+                        h.point, normal, u,
+                        coarse_grid, chunk_pool, rng);
+                    radiance += throughput *
+                        nee_ggx_mis(nee_s, omega_o, normal, albedo, r);
                 }
                 float3 m = ggx_sample_vndf(normal, omega_o, r, rng);
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
@@ -934,6 +1026,11 @@ fragment float4 pt_fragment(
                         coarse_grid, chunk_pool, rng);
                     radiance += throughput *
                         nee_diffuse_mis(nee, albedo, normal);
+                    NEELight nee_s = nee_sample_sun(
+                        h.point, normal, u,
+                        coarse_grid, chunk_pool, rng);
+                    radiance += throughput *
+                        nee_diffuse_mis(nee_s, albedo, normal);
                 }
                 ray_dir = cosine_hemi(normal, rng);
                 prev_bsdf_pdf = pdf_lambert(normal, ray_dir);
@@ -980,6 +1077,11 @@ fragment float4 pt_fragment(
                         coarse_grid, chunk_pool, rng);
                     radiance += throughput *
                         nee_ggx_mis(nee, omega_o, normal, f0_glass, rough);
+                    NEELight nee_s = nee_sample_sun(
+                        h.point, normal, u,
+                        coarse_grid, chunk_pool, rng);
+                    radiance += throughput *
+                        nee_ggx_mis(nee_s, omega_o, normal, f0_glass, rough);
                 }
                 ray_origin = h.point + normal * 1e-3;
                 ray_dir = ray_dir - 2.0 * dot(ray_dir, m) * m;
@@ -1003,6 +1105,12 @@ fragment float4 pt_fragment(
                                 coarse_grid, chunk_pool, rng);
                             radiance += throughput *
                                 nee_ggx_mis(nee, omega_o, normal,
+                                            f0_glass, rough);
+                            NEELight nee_s = nee_sample_sun(
+                                h.point, normal, u,
+                                coarse_grid, chunk_pool, rng);
+                            radiance += throughput *
+                                nee_ggx_mis(nee_s, omega_o, normal,
                                             f0_glass, rough);
                         }
                         ray_origin = h.point + normal * 1e-3;
@@ -1038,6 +1146,11 @@ fragment float4 pt_fragment(
                             coarse_grid, chunk_pool, rng);
                         radiance += throughput *
                             nee_diffuse_mis(nee, albedo, normal);
+                        NEELight nee_s = nee_sample_sun(
+                            h.point, normal, u,
+                            coarse_grid, chunk_pool, rng);
+                        radiance += throughput *
+                            nee_diffuse_mis(nee_s, albedo, normal);
                     }
                     ray_origin = h.point + normal * 1e-3;
                     ray_dir = cosine_hemi(normal, rng);
@@ -1053,6 +1166,11 @@ fragment float4 pt_fragment(
                                                 coarse_grid, chunk_pool,
                                                 rng);
                 radiance += throughput * nee_diffuse_mis(nee, albedo, normal);
+                NEELight nee_s = nee_sample_sun(h.point, normal, u,
+                                                coarse_grid, chunk_pool,
+                                                rng);
+                radiance += throughput *
+                    nee_diffuse_mis(nee_s, albedo, normal);
             }
             ray_origin = h.point + normal * 1e-3;
             ray_dir = cosine_hemi(normal, rng);
