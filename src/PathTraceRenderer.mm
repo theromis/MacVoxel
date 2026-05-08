@@ -647,17 +647,34 @@ struct DisplayUniforms {
         const float ce = std::cos(elev);
         u.sun_dir_grid = simd::float3{
             ce * std::cos(azim), ce * std::sin(azim), std::sin(elev)};
-        u.sun_cos_half_angle = std::cos(
+        const float cos_half = std::cos(
             std::max(0.0f, rs.sun_angular_diameter_deg) * 0.5f
             * (3.14159265f / 180.0f));
-        // sRGB → linear before multiplying by intensity, so HDR sun
-        // works in the same colour space as the path tracer's
-        // throughput accumulation.
-        const float intensity = std::max(0.0f, rs.sun_intensity);
+        u.sun_cos_half_angle = cos_half;
+        // sun_intensity is an *irradiance* scale (the integrated
+        // strength reaching a surface facing the sun) — the per-direction
+        // radiance the shader uses is `color × intensity / solid_angle`,
+        // so the per-pixel surface contribution comes out independent of
+        // angular size:
+        //
+        //     ∫_cone (albedo/π) · radiance · cos_x dω
+        //   = (albedo/π) · (color · intensity / solid_angle) · cos_x · solid_angle
+        //   = (albedo/π) · color · intensity · cos_x
+        //
+        // So `intensity` at a fixed value lights surfaces equally whether
+        // the sun is 0.5° or 20° — angular size only changes the disc's
+        // visible size in the sky and the BSDF-side variance pattern.
+        // sRGB → linear before the intensity multiply so HDR sun colours
+        // mix with the path tracer's linear throughput accumulation.
+        const float solid_angle =
+            6.2831853f * (1.0f - cos_half);
+        const float radiance_scale = (solid_angle > 1e-12f)
+            ? (std::max(0.0f, rs.sun_intensity) / solid_angle)
+            : 0.0f;
         u.sun_radiance = simd::float3{
-            std::pow(rs.sun_color[0], 2.2f) * intensity,
-            std::pow(rs.sun_color[1], 2.2f) * intensity,
-            std::pow(rs.sun_color[2], 2.2f) * intensity,
+            std::pow(rs.sun_color[0], 2.2f) * radiance_scale,
+            std::pow(rs.sun_color[1], 2.2f) * radiance_scale,
+            std::pow(rs.sun_color[2], 2.2f) * radiance_scale,
         };
         u._pad7 = 0.0f;
     }

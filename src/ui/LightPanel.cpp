@@ -88,17 +88,24 @@ void DrawLightPanel() {
     ImGui::SliderFloat("Angular size",
                        &rs.sun_angular_diameter_deg, 0.1f, 30.0f, "%.2f°");
     ImGui::ColorEdit3("Color", rs.sun_color);
-    // Logarithmic so the slider feels right both for a stylized sun
-    // (intensity 1–10) and a physically-plausible one (100+).
-    ImGui::SliderFloat("Intensity##sun", &rs.sun_intensity, 0.0f, 200.0f,
+    // Intensity is irradiance, not radiance — the per-direction
+    // radiance the shader actually uses is `color × intensity /
+    // solid_angle`, which decouples surface brightness from angular
+    // size. So intensity=1 lights a perpendicular white surface to
+    // ≈ 1/π linear (≈ 0.55 display after ACES + sRGB) regardless of
+    // whether the sun is 1° or 20°. Range 0–10 covers "subtle accent"
+    // through "noon overcast"; logarithmic for fine control near zero.
+    ImGui::SliderFloat("Intensity##sun", &rs.sun_intensity, 0.0f, 10.0f,
                        "%.2f", ImGuiSliderFlags_Logarithmic);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
-            "Multiplier on the linear-space sun colour. 0 disables the "
-            "sun entirely (default). The sun is direct-sampled per "
-            "surface bounce via NEE (uniform-cone sample + shadow ray) "
-            "and MIS-weighted against the BSDF on emitter arrival, so "
-            "even a tiny sun gives clean surface lighting.");
+            "Irradiance scale — the integrated lighting strength reaching "
+            "a surface facing the sun. Independent of angular size, so "
+            "a 1° sun and a 10° sun at intensity=1 light surfaces "
+            "identically (only the visible disc size changes). 0 "
+            "disables the sun (default). The sun is direct-sampled via "
+            "NEE on every non-delta bounce and MIS-weighted against the "
+            "BSDF, so even a tiny sun converges cleanly.");
     }
     ImGui::Unindent();
 
