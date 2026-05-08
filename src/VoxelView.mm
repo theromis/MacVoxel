@@ -1,6 +1,7 @@
 #import "VoxelView.h"
 
 #import "AppDelegate.h"
+#import "GeneratorEngine.h"
 #import "PathTraceRenderer.h"
 #import "RaycastRenderer.h"
 
@@ -50,6 +51,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     id<MTLCommandQueue> _commandQueue;
     RaycastRenderer* _raycastRenderer;
     PathTraceRenderer* _pathTraceRenderer;
+    GeneratorEngine* _generatorEngine;
     macvoxel::Camera _camera;
     DragMode _dragMode;
     macvoxel::ToolMode _paintMode;
@@ -141,6 +143,27 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
                                                        colorFormat:self.colorPixelFormat];
     if (_pathTraceRenderer == nil) {
         return nil;
+    }
+    _generatorEngine = [[GeneratorEngine alloc] initWithDevice:device
+                                                  commandQueue:_commandQueue];
+    if (_generatorEngine == nil) {
+        return nil;
+    }
+    // Smoke test: run a 16-cell ellipsoid through the GPU and log the cell
+    // count, so a build that compiles but breaks the round-trip fails
+    // loudly rather than silently. Removed when Commit B wires the engine
+    // into the panel.
+    {
+        std::vector<macvoxel::shapes::Vec3i> cells;
+        macvoxel::generators::Bounds3i b{0, 0, 0, 15, 15, 15};
+        macvoxel::generators::Params p{};
+        [_generatorEngine generateInto:cells
+                                  kind:macvoxel::generators::Kind::Ellipsoid
+                                bounds:b
+                                params:p];
+        fprintf(stderr,
+                "MacVoxel: generator smoke test — ellipsoid in 16³ box "
+                "produced %zu cells\n", cells.size());
     }
 
     [self setupImGuiWithDevice:device];
