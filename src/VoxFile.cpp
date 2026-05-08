@@ -560,6 +560,43 @@ void AppendId(std::vector<uint8_t>* out, const char tag[4]) {
     out->push_back(static_cast<uint8_t>(tag[3]));
 }
 
+// MATL DICT entries: int32 length-prefixed UTF-8 strings. AppendU32 is
+// byte-identical to the int32 the reader expects for non-negative
+// lengths (we only emit short keys / printable values).
+void AppendString(std::vector<uint8_t>* out, const std::string& s) {
+    AppendU32(out, static_cast<uint32_t>(s.size()));
+    out->insert(out->end(), s.begin(), s.end());
+}
+
+bool MaterialIsDefault(const Material& m) {
+    return m.type == MaterialType::Diffuse &&
+           m.roughness == 1.0f &&
+           m.metallic == 0.0f &&
+           m.emission == 0.0f &&
+           m.emissionPower == 1 &&
+           m.transparency == 0.0f &&
+           m.ior == 1.5f;
+}
+
+// %g formatting with the C-locale-default decimal point. Adequate
+// precision for the loader's strtof — exact bit-equality isn't needed,
+// just round-trip-stability for the values the editor surfaces.
+std::string FormatFloat(float v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%g", static_cast<double>(v));
+    return buf;
+}
+
+const char* MatlTypeString(MaterialType t) {
+    switch (t) {
+        case MaterialType::Metal:    return "_metal";
+        case MaterialType::Glass:    return "_glass";
+        case MaterialType::Emissive: return "_emit";
+        case MaterialType::Diffuse:  return "_diffuse";
+    }
+    return "_diffuse";
+}
+
 }  // namespace
 
 bool SaveVox(const std::string& path,
@@ -639,6 +676,45 @@ bool SaveVox(const std::string& path,
     children.push_back(0);
     children.push_back(0);
     children.push_back(0);
+
+    // MATL chunks — one per non-default palette slot. Skipping defaults
+    // keeps file size down and is round-trip-safe (a missing MATL on
+    // load gets the Material struct's defaults, which is what we'd
+    // write back). Emissive carries _emit + _flux on top of the common
+    // keys; Glass adds _alpha; everything else gets type / rough /
+    // metal / ior.
+    for (int i = 1; i <= 255; ++i) {
+        const Material m = palette.GetMaterial(static_cast<uint8_t>(i));
+        if (MaterialIsDefault(m)) continue;
+
+        std::vector<std::pair<std::string, std::string>> kv;
+        kv.emplace_back("_type", MatlTypeString(m.type));
+        kv.emplace_back("_rough", FormatFloat(m.roughness));
+        kv.emplace_back("_metal", FormatFloat(m.metallic));
+        kv.emplace_back("_ior", FormatFloat(m.ior - 1.0f));
+        if (m.type == MaterialType::Glass) {
+            kv.emplace_back("_alpha", FormatFloat(m.transparency));
+        }
+        if (m.type == MaterialType::Emissive) {
+            kv.emplace_back("_emit", FormatFloat(m.emission));
+            kv.emplace_back(
+                "_flux",
+                FormatFloat(static_cast<float>(m.emissionPower - 1)));
+        }
+
+        std::vector<uint8_t> body;
+        AppendU32(&body, static_cast<uint32_t>(i));     // material id
+        AppendU32(&body, static_cast<uint32_t>(kv.size()));
+        for (const auto& [k, v] : kv) {
+            AppendString(&body, k);
+            AppendString(&body, v);
+        }
+
+        AppendId(&children, "MATL");
+        AppendU32(&children, static_cast<uint32_t>(body.size()));
+        AppendU32(&children, 0);
+        children.insert(children.end(), body.begin(), body.end());
+    }
 
     std::vector<uint8_t> file;
     AppendId(&file, "VOX ");
