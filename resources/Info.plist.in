@@ -28,5 +28,27 @@
     <string>NSApplication</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
+    <!--
+        Declare .vox so NSDocumentController activates its recents-tracking
+        + persistence machinery. Without this entry, noteNewRecentDocumentURL:
+        is silently dropped and File > Open Recent never populates.
+        LSHandlerRank=Alternate keeps us in the "Open With" list without
+        trying to seize default-handler status from MagicaVoxel.
+    -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>MagicaVoxel Document</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>vox</string>
+            </array>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+        </dict>
+    </array>
 </dict>
 </plist>
