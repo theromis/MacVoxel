@@ -41,6 +41,9 @@ src/
 ├── PathTraceRenderer.mm   Path tracer (render mode). Same GPU layout as the
 │                          ray-cast renderer; trades responsiveness for
 │                          progressive accumulation, GGX, Beer-Lambert, etc.
+├── PathTrace.metal        MSL source for pt_fragment + display_fragment.
+│                          Shipped in the bundle's Resources/, loaded as a
+│                          string at init via newLibraryWithSource:.
 ├── CliRender.mm           Headless `MacVoxel render` subcommand. Bypasses
 │                          NSApplicationMain and drives PathTraceRenderer
 │                          directly for deterministic CLI/CI renders.
@@ -50,6 +53,10 @@ src/
 │                          per Kind, atomic-append output buffer, sync
 │                          dispatch + readback. Each kernel is a thread-per-
 │                          cell scan over the AABB.
+├── Generators.metal       MSL source for every generator kernel. Same
+│                          bundle-resource + newLibraryWithSource: pattern
+│                          as PathTrace.metal; new kinds add a kernel here
+│                          plus an entry in GeneratorEngine.mm's name table.
 ├── ToolState.{h,cpp}      Active tool, brush size, palette index, etc.
 ├── GeneratorState.{h,cpp} Active generator kind + Params (mirrors ToolState).
 ├── EditHistory.{h,cpp}    Stroke-grained undo/redo.
@@ -154,10 +161,11 @@ These came up repeatedly during development and are worth not relitigating:
 
 ## Path tracer specifics (because most recent work has been here)
 
-`src/PathTraceRenderer.mm` carries a long inline MSL shader (`kShaderSource`)
-plus the Obj-C++ resource management for it. The shader has grown enough that
-edits are touchy — it's worth reading the whole bounce loop before changing
-the medium / glass paths.
+`src/PathTrace.metal` is the path-tracer shader (vertex, path-trace
+fragment, display fragment); `src/PathTraceRenderer.mm` is the Obj-C++
+resource management around it. The shader has grown enough that edits
+are touchy — read the whole bounce loop before changing the medium /
+glass paths.
 
 Key invariants in the shader:
 
@@ -234,12 +242,13 @@ Lives in:
   back.
 
 Adding a new built-in is small: write the kernel function in
-`kGenLibrarySource` (output protocol = thread-per-cell, atomic append on
-match), add the enum entry, add a name in `KernelNameForKind`, add a panel
-button, and any per-kind parameters go on `Params`. The eventual
-user-authored shader path plugs into the same dispatch — that's a richer
-project (runtime MSL compile + source editor + error reporting + hot
-reload) but the engine doesn't need restructuring for it.
+`src/Generators.metal` (output protocol = thread-per-cell, atomic append
+on match), add the `Kind` enum entry, add the kernel function name in
+`KernelNameForKind` in `GeneratorEngine.mm`, add a panel button in
+`GeneratorPanel.cpp`, and any per-kind parameters go on `Params`. The
+eventual user-authored shader path plugs into the same dispatch — that's
+a richer project (runtime MSL compile + source editor + error reporting
++ hot reload) but the engine doesn't need restructuring for it.
 
 Invariants:
 - Generators don't touch the document, AppKit, or ImGui. They take
