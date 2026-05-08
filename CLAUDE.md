@@ -168,11 +168,15 @@ Key invariants in the shader:
 
 ## What the path tracer doesn't have yet
 
-- Next-event estimation / direct light sampling. Every contribution comes from
-  paths that randomly bounce their way to an emissive cell, so small lights
-  are noisy and indirect contribution from emissives is slow to converge.
-- Tonemapping / exposure. Bright emissives blow out.
-- Sun + sky model. The sky is a hardcoded constant color.
+- Exposure control. ACES tonemap exists (toggleable via RenderState) and tames
+  the highlight roll-off, but there's no user-facing exposure / EV slider, so
+  scenes with very bright emissives still need careful authoring.
+- Sun + sky model. The sky is a hardcoded constant `(0.65, 0.75, 0.95)` — no
+  HDRI, no sun disc, no procedural gradient.
+- Light importance sampling beyond uniform. NEE / MIS are in place
+  (`nee_sample_light`, `nee_diffuse_mis`, `nee_ggx_mis`) but pick lights
+  uniformly across the full per-emissive-voxel list and uniformly across the 3
+  visible faces. No power-weighted or distance-weighted sampling.
 
 These are all real upgrades but each is a project. Don't slip them in alongside
 unrelated changes.
