@@ -61,6 +61,7 @@ set(APP_SOURCES
     src/Palette.cpp
     src/VoxFile.cpp
     src/Raycast.cpp
+    src/Shapes.cpp
     src/ToolState.cpp
     src/EditHistory.cpp
     src/Selection.cpp
