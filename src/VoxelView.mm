@@ -1062,6 +1062,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     if (!_hoverHasPoint) return;
     if (_dragMode != DragMode::None) return;
     if (ImGui::GetIO().WantCaptureMouse) return;
+    // Generator gizmo is the cursor indicator while it's live; the
+    // would-place-cell wireframe would compete with it and read as
+    // a stray duplicate.
+    if (_genGizmoActive) return;
 
     const macvoxel::ToolState& t = macvoxel::CurrentTool();
     const bool is_brush = t.tool == macvoxel::ToolKind::Brush;
