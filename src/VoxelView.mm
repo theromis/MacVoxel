@@ -633,6 +633,24 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     return YES;
 }
 
+// Absorb keys we use as drag modifiers so they don't continue up the
+// responder chain to NSApplication.noResponderFor: — which beeps for
+// every keyDown that nobody handled. (Space is held to enable pan;
+// without this override, every key-repeat tick beeps.) ImGui sees the
+// key independently via its local event monitor, which fires before
+// the responder chain, so [self mouseDown:]'s ImGui::IsKeyDown(Space)
+// check stays correct.
+//
+// Reached via NSResponder.noResponderFor: bouncing from the
+// KeyEventResponder's [super keyDown:] up through nextResponder. Any
+// key we don't claim falls through to super, preserving normal
+// responder-chain walking for menu shortcuts etc.
+- (void)keyDown:(NSEvent*)event {
+    constexpr unsigned short kKeyCodeSpace = 49;  // kVK_Space (HIToolbox)
+    if (event.keyCode == kKeyCodeSpace) return;
+    [super keyDown:event];
+}
+
 // Re-register the tracking area whenever the view's bounds change so
 // mouseMoved fires for hover highlight.
 - (void)updateTrackingAreas {
