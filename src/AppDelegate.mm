@@ -169,6 +169,21 @@
     [menu addItemWithTitle:@"Open…"
                     action:@selector(openDocument:)
              keyEquivalent:@"o"];
+
+    // Open Recent submenu — AppKit auto-injects the recent files list
+    // above the "Clear Menu" item. Population is driven by our
+    // noteNewRecentDocumentURL: calls in openDocumentAtURL: and
+    // saveDocumentAs:. clearRecentDocuments: routes through the
+    // responder chain to NSDocumentController; target=nil suffices.
+    NSMenuItem* openRecentItem = [menu addItemWithTitle:@"Open Recent"
+                                                  action:nil
+                                           keyEquivalent:@""];
+    NSMenu* recentMenu = [[NSMenu alloc] initWithTitle:@"Open Recent"];
+    [recentMenu addItemWithTitle:@"Clear Menu"
+                          action:@selector(clearRecentDocuments:)
+                   keyEquivalent:@""];
+    [openRecentItem setSubmenu:recentMenu];
+
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
     [menu addItemWithTitle:@"Save" action:@selector(saveDocument:) keyEquivalent:@"s"];
@@ -303,16 +318,24 @@
     panel.allowsMultipleSelection = NO;
     panel.canChooseDirectories = NO;
     if ([panel runModal] != NSModalResponseOK) return;
-    NSURL* url = panel.URL;
-    if (url == nil) return;
+    [self openDocumentAtURL:panel.URL];
+}
 
+// Path-based open used by openDocument:, application:openURLs: (which
+// AppKit calls when the user clicks an Open Recent item or a file in
+// Finder), and any future drag-and-drop wiring. Registers successful
+// opens with NSDocumentController so they show up in Open Recent next
+// time around — the framework persists the URL list across launches
+// for free.
+- (BOOL)openDocumentAtURL:(NSURL*)url {
+    if (url == nil || _doc == nullptr) return NO;
     const std::string path = [[url path] UTF8String];
     macvoxel::Document fresh;
     std::string err;
     if (!macvoxel::LoadVox(path, &fresh.grid, &fresh.palette, &err)) {
         [self showAlertTitle:@"Open Failed"
                      message:[NSString stringWithUTF8String:err.c_str()]];
-        return;
+        return NO;
     }
     fresh.path = path;
     fresh.version = _doc->version + 1;
@@ -320,6 +343,18 @@
     macvoxel::CurrentHistory().Clear();
     [self updateWindowTitle];
     [self frameCameraIfPossible];
+    [[NSDocumentController sharedDocumentController]
+        noteNewRecentDocumentURL:url];
+    return YES;
+}
+
+// Called by AppKit on Open Recent click and on Finder file-open. We're
+// a single-document app, so take the first URL and ignore the rest.
+- (void)application:(NSApplication*)__unused sender
+           openURLs:(NSArray<NSURL*>*)urls {
+    for (NSURL* url in urls) {
+        if ([self openDocumentAtURL:url]) break;
+    }
 }
 
 - (IBAction)saveDocument:(id)sender {
@@ -351,6 +386,8 @@
     }
     _doc->path = path;
     [self updateWindowTitle];
+    [[NSDocumentController sharedDocumentController]
+        noteNewRecentDocumentURL:url];
 }
 
 - (IBAction)undo:(id)__unused sender {
