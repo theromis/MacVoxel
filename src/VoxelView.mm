@@ -453,6 +453,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     _camera.Frame(target_world, static_cast<float>(maxExtent));
 }
 
+- (void)invalidateRenderers {
+    [_raycastRenderer invalidate];
+    [_pathTraceRenderer invalidate];
+}
+
 // ---------------------------------------------------------------------------
 // MTKViewDelegate
 // ---------------------------------------------------------------------------

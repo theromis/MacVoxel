@@ -24,11 +24,18 @@
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-- (void)applicationDidFinishLaunching:(NSNotification*)__unused notification {
+// Document setup runs in willFinishLaunching: so it's complete before
+// AppKit dispatches application:openURLs: for files passed at cold-
+// launch (Finder Open With, drag-onto-icon). Without this split, the
+// open-URL fired before _doc existed, openDocumentAtURL: bailed, and
+// the user got default.vox instead of the file they asked for.
+- (void)applicationWillFinishLaunching:(NSNotification*)__unused notification {
     _doc = std::make_unique<macvoxel::Document>();
     [self seedDocumentFromDefault];
     _doc->version = 1;
+}
 
+- (void)applicationDidFinishLaunching:(NSNotification*)__unused notification {
     [self buildMainMenu];
     [self buildMainWindow];
     [self updateWindowTitle];
@@ -63,6 +70,17 @@
     VoxelView* view = (VoxelView*)self.window.contentView;
     if ([view isKindOfClass:[VoxelView class]]) {
         [view frameCameraToDocument];
+    }
+}
+
+// No-op when the window hasn't been built yet — cold-launch via
+// application:openURLs: replaces the doc before the window exists,
+// and that's fine: the renderers don't have any cached state yet
+// because they haven't run a frame.
+- (void)invalidateRenderersIfPossible {
+    VoxelView* view = (VoxelView*)self.window.contentView;
+    if ([view isKindOfClass:[VoxelView class]]) {
+        [view invalidateRenderers];
     }
 }
 
@@ -308,6 +326,7 @@
     _doc->path.clear();
     ++_doc->version;
     macvoxel::CurrentHistory().Clear();
+    [self invalidateRenderersIfPossible];
     [self updateWindowTitle];
     [self frameCameraIfPossible];
 }
@@ -341,6 +360,7 @@
     fresh.version = _doc->version + 1;
     *_doc = std::move(fresh);
     macvoxel::CurrentHistory().Clear();
+    [self invalidateRenderersIfPossible];
     [self updateWindowTitle];
     [self frameCameraIfPossible];
     [[NSDocumentController sharedDocumentController]

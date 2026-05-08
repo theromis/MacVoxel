@@ -39,4 +39,12 @@ namespace macvoxel { struct Document; }
 // (coarse grid + chunk pool capacity, in bytes).
 - (size_t)lastGPUBytes;
 
+// Drop the GPU cache so the next encode does a wholesale rebuild
+// instead of an incremental dirty-chunk update. Call when the
+// document is replaced wholesale (load, new) — the dirty-chunk set
+// only tracks what's been *changed*, not what no longer exists, so
+// without this the previous file's chunks linger on the GPU as
+// zombies.
+- (void)invalidate;
+
 @end

@@ -327,6 +327,10 @@ fragment float4 raycast_fragment(
     return bytes;
 }
 
+- (void)invalidate {
+    _cacheValid = NO;
+}
+
 // ---------------------------------------------------------------------------
 // GPU upload. The hot path is incremental: drain the grid's dirty-chunk
 // set and update only the affected slots in the chunk pool. Wholesale
