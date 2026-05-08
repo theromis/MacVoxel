@@ -153,19 +153,18 @@ unless noted.**
 
 ## Phase 14.5 — Sampling upgrades (the ReSTIR path)
 
-Voxel scenes have a lot of small emissive cells, and the path tracer
-currently samples them uniformly across the light list and uniformly
-across the 3 visible faces. That's a lot of bad samples on big scenes.
-This phase is the natural evolution from the existing NEE + MIS work:
-each step is shippable on its own, and each enables the next.
+Voxel scenes have a lot of small emissive cells. The path tracer's
+NEE used to sample them uniformly across the light list and uniformly
+across the 3 visible faces — a lot of bad samples on big scenes.
+Power-weighted NEE shipped in P14.5.A; the rest of this phase is the
+natural evolution from there.
 
-- **Power-weighted NEE (S–M).** Pre-build a CDF over the emissive light
-  list weighted by `effective_emission × area`; sample with binary
-  search instead of `idx = rng % light_count`. Update the PDF in
-  `nee_pdf_solid_for_arrival` to match (currently hard-codes
-  `1 / (N × 3)` — the "single home for the area pdf" cleanup the
-  Hater flagged makes this swap less error-prone). Big variance
-  reduction on emitter-heavy scenes; close to free at runtime.
+- ~~**Power-weighted NEE (S–M).**~~ Shipped in P14.5.A. CDF over per-
+  light max-channel power packed into `GpuLight.pos.w` / `le.w`,
+  binary-search sample, matching prob in `nee_pdf_solid_for_arrival`
+  (which now linear-scans `lights[]` to find the matching cell on the
+  BSDF-arrives-at-emitter MIS branch — emitter hits are rare, scan
+  cost is fine).
 - **ReSTIR DI (M–L).** Bitterli et al. 2020. Each pixel keeps a small
   *reservoir* of the best-so-far direct-lighting sample seen across
   recent frames + neighbors; resampled importance sampling means the
@@ -249,7 +248,8 @@ Pure-math primitives are done; the natural next forks are:
   selection + 90° rotations are quick wins.
 - **Phase 12.5+ Maze / Perlin / Fractal** — fun, but each needs an MSL
   RNG primitive and a richer Params shape, so M-sized rather than S.
-- **Phase 14.5 power-weighted NEE** — ~50 lines, real visible win on
-  emitter-heavy scenes, prereq for the ReSTIR DI / GI work later.
+- **Phase 14.5 ReSTIR DI** — the next step now that power-weighted
+  NEE has shipped. Three passes (candidate / temporal / spatial),
+  per-pixel reservoir, replaces the current direct-light NEE.
 
 Pick by what feels most fun; nothing is on a deadline.

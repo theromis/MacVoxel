@@ -202,10 +202,13 @@ Key invariants in the shader:
   scenes with very bright emissives still need careful authoring.
 - Sun + sky model. The sky is a hardcoded constant `(0.65, 0.75, 0.95)` — no
   HDRI, no sun disc, no procedural gradient.
-- Light importance sampling beyond uniform. NEE / MIS are in place
-  (`nee_sample_light`, `nee_diffuse_mis`, `nee_ggx_mis`) but pick lights
-  uniformly across the full per-emissive-voxel list and uniformly across the 3
-  visible faces. No power-weighted or distance-weighted sampling.
+- Distance / cosine-weighted light sampling. Power-weighted picks
+  bright emitters more often (CDF-by-max-channel built per resource
+  rebuild, stored in GpuLight's `pos.w` / `le.w`), but a tiny faraway
+  light still beats out a huge close one with the same intrinsic
+  power. ReSTIR DI is the long-term answer; cheaper interim wins
+  (cosine-weighted face pick, distance-attenuated reservoir) are
+  also viable.
 
 These are all real upgrades but each is a project. Don't slip them in alongside
 unrelated changes.
