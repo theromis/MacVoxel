@@ -155,6 +155,46 @@ unless noted.**
 - **IBL / HDRI (L).** Replace the constant sky with an environment map; sample
   importance-weighted for the path tracer.
 
+## Phase 14.5 — Sampling upgrades (the ReSTIR path)
+
+Voxel scenes have a lot of small emissive cells, and the path tracer
+currently samples them uniformly across the light list and uniformly
+across the 3 visible faces. That's a lot of bad samples on big scenes.
+This phase is the natural evolution from the existing NEE + MIS work:
+each step is shippable on its own, and each enables the next.
+
+- **Power-weighted NEE (S–M).** Pre-build a CDF over the emissive light
+  list weighted by `effective_emission × area`; sample with binary
+  search instead of `idx = rng % light_count`. Update the PDF in
+  `nee_pdf_solid_for_arrival` to match (currently hard-codes
+  `1 / (N × 3)` — the "single home for the area pdf" cleanup the
+  Hater flagged makes this swap less error-prone). Big variance
+  reduction on emitter-heavy scenes; close to free at runtime.
+- **ReSTIR DI (M–L).** Bitterli et al. 2020. Each pixel keeps a small
+  *reservoir* of the best-so-far direct-lighting sample seen across
+  recent frames + neighbors; resampled importance sampling means the
+  pixel converges toward the *actually-bright* nearby lights rather
+  than rolling the dice fresh every sample. Three passes: candidate
+  generation, temporal reuse (reservoir from last frame, jitter
+  account), spatial reuse (small-radius gather from neighbors).
+  Replaces the current direct-light NEE for the diffuse / glossy
+  branches. Plays nicely with GPU SIMT (every pixel does the same
+  number of resampling steps), unlike MLT's divergent chains.
+- **ReSTIR GI (L).** Ouyang 2021. Same reservoir trick applied to the
+  *first indirect bounce*: keep a reservoir of "good first-bounce
+  scatter directions" from neighbors. Big win on diffuse-bounce GI
+  in interiors lit by small windows / portals — exactly the kind of
+  scene a voxel architectural model wants to render.
+
+The Metropolis Light Transport alternative (Veach 97 / Kelemen 02 /
+PSSMLT) is the other branch of the family tree — it's right when you
+need *hard* light transport (caustics through specific path topologies,
+small lights reachable only through tight apertures) and you're willing
+to take an offline-quality renderer with chain-divergence-fights-SIMT
+costs. For an interactive voxel app with many small emissives, ReSTIR
+is the better fit; if a future project genuinely needs caustics,
+revisit then.
+
 ## Phase 15 — Scene graph + layers
 
 The biggest structural change. Every prior phase keeps the single-grid
