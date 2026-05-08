@@ -34,7 +34,7 @@ struct PathUniforms {
     uint32_t glass_mode;  // 0 = Probabilistic, 1 = Absorption
     uint32_t power_weighted_nee;  // 0 = uniform NEE, 1 = power CDF
     uint32_t nee_ris_count;       // RIS candidate count (≥ 1)
-    uint32_t _pad5;
+    uint32_t atmospheric_sky;     // 0 = constant sky tint, 1 = Nishita
     uint32_t _pad6;
     simd::float3 sun_dir_grid;    // grid-space, unit-length
     float sun_cos_half_angle;     // cos(angular_diameter / 2)
@@ -129,6 +129,7 @@ struct DisplayUniforms {
     bool _lastPowerWeightedNee;
     float _lastSkyIntensity;
     int _lastNeeRisCount;
+    bool _lastAtmosphericSky;
     // Hash of the sun parameters (elev / azim / diameter / color /
     // intensity). Cheaper to fingerprint than to compare each field.
     uint64_t _lastSunHash;
@@ -500,6 +501,11 @@ struct DisplayUniforms {
         _lastNeeRisCount = ris_m;
         _wantsClear = YES;
     }
+    const bool atmo = macvoxel::CurrentRenderState().atmospheric_sky;
+    if (atmo != _lastAtmosphericSky) {
+        _lastAtmosphericSky = atmo;
+        _wantsClear = YES;
+    }
     {
         const auto& rs = macvoxel::CurrentRenderState();
         uint64_t h = 0xcbf29ce484222325ull;  // FNV-1a 64
@@ -636,6 +642,8 @@ struct DisplayUniforms {
         macvoxel::CurrentRenderState().power_weighted_nee ? 1u : 0u;
     u.nee_ris_count = static_cast<uint32_t>(std::max(
         1, macvoxel::CurrentRenderState().nee_ris_count));
+    u.atmospheric_sky =
+        macvoxel::CurrentRenderState().atmospheric_sky ? 1u : 0u;
     {
         const auto& rs = macvoxel::CurrentRenderState();
         // Convert UI elevation/azimuth (degrees) to a unit-length

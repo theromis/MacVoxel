@@ -61,12 +61,24 @@ void DrawLightPanel() {
     ImGui::TextUnformatted("Sky");
     ImGui::PopFont();
     ImGui::Indent();
-    // Multiplier on the hardcoded sky tint. Drop to 0 to kill ambient
+    ImGui::Checkbox("Atmospheric (Nishita)", &rs.atmospheric_sky);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Single-scatter Nishita atmospheric scattering: per-pixel "
+            "Rayleigh + Mie integral driven by the sun direction. Gives "
+            "a natural blue zenith / warm horizon gradient and a sun "
+            "halo for free; bottom-line cost is ~256 atmosphere ops "
+            "per missed sky ray.\n\n"
+            "When off, the sky is the simpler constant tint × intensity "
+            "below.");
+    }
+    ImGui::BeginDisabled(rs.atmospheric_sky);
+    // Multiplier on the constant sky tint. Drop to 0 to kill ambient
     // hemisphere fill so emitter contributions read clearly; raise
-    // above 1 for an HDR-like overcast. Replaced once the sun/sky
-    // model in Phase 14 ships.
+    // above 1 for an HDR-like overcast. Ignored when Atmospheric is on.
     ImGui::SliderFloat("Intensity##sky", &rs.sky_intensity, 0.0f, 4.0f,
                        "%.2f");
+    ImGui::EndDisabled();
     ImGui::Unindent();
 
     ImGui::Spacing();

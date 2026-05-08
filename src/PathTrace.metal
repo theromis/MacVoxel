@@ -17,7 +17,7 @@ struct PathUniforms {
     uint     glass_mode;
     uint     power_weighted_nee;  // 0 = uniform, 1 = power CDF
     uint     nee_ris_count;       // RIS candidate count (≥ 1)
-    uint     _pad5;
+    uint     atmospheric_sky;     // 0 = constant sky tint, 1 = Nishita
     uint     _pad6;
     float3   sun_dir_grid;        // grid-space, unit-length
     float    sun_cos_half_angle;  // cos(angular_diameter / 2)
@@ -149,6 +149,120 @@ constant int kMaxSteps = 4096;
 constant uint kChunkBits = 4;
 constant uint kChunkMask = 15u;
 constant uint kChunkSize = 16u;
+
+// ---------------------------------------------------------------------------
+// Nishita single-scatter atmosphere
+// ---------------------------------------------------------------------------
+// Per-pixel sky integral: for each escaping view ray, march along it
+// through the atmosphere, accumulate in-scattering from the sun at each
+// step. Two species: Rayleigh (wavelength-dependent, blue-scatters) and
+// Mie (broadband, forward-scatters → sun halo). Earth-like constants;
+// the scene grid is treated as sitting at sea level so all view rays
+// originate at altitude 0.
+
+constant float  kEarthRadius      = 6371000.0;
+constant float  kAtmosphereTop    = 6471000.0;        // +100 km
+constant float3 kRayleighSigma    = float3(5.802e-6, 13.558e-6, 33.1e-6);
+constant float  kMieSigmaScatter  = 3.996e-6;
+constant float  kMieSigmaAbsorb   = 4.4e-6;
+constant float  kRayleighScaleH   = 8000.0;
+constant float  kMieScaleH        = 1200.0;
+constant float  kMieG             = 0.76;
+constant int    kSkyViewSamples   = 32;
+constant int    kSkySunSamples    = 8;
+
+// Distance along `dir` from `p` (atmosphere-frame, Earth at origin) to
+// the far intersection with a sphere of `radius`. Returns -1 when the
+// ray misses (shouldn't happen for sea-level viewer + outer sphere).
+float ray_outer_sphere_t(float3 p, float3 dir, float radius) {
+    float b = dot(p, dir);
+    float c = dot(p, p) - radius * radius;
+    float disc = b * b - c;
+    if (disc < 0.0) return -1.0;
+    return -b + sqrt(disc);
+}
+
+float atmosphere_altitude(float3 p) {
+    return length(p) - kEarthRadius;
+}
+
+// Per-channel transmittance along `omega` from `p` to where the ray
+// exits the atmosphere top. Returns 0 when the ray points into the
+// Earth (occluded by horizon).
+float3 atmosphere_transmittance(float3 p, float3 omega) {
+    float t_top = ray_outer_sphere_t(p, omega, kAtmosphereTop);
+    if (t_top <= 0.0) return float3(0.0);
+    // Reject when the segment dips below the surface — equivalent to
+    // hitting the ground / horizon, which would block the sun.
+    float t_ground = ray_outer_sphere_t(p, omega, kEarthRadius);
+    if (t_ground > 0.0 && t_ground < t_top) return float3(0.0);
+
+    float dt = t_top / float(kSkySunSamples);
+    float3 od_r = float3(0.0);
+    float  od_m = 0.0;
+    for (int i = 0; i < kSkySunSamples; ++i) {
+        float t = (float(i) + 0.5) * dt;
+        float h = atmosphere_altitude(p + omega * t);
+        if (h < 0.0) return float3(0.0);
+        od_r += kRayleighSigma * exp(-h / kRayleighScaleH) * dt;
+        od_m += (kMieSigmaScatter + kMieSigmaAbsorb)
+              * exp(-h / kMieScaleH) * dt;
+    }
+    return exp(-od_r - float3(od_m));
+}
+
+// Nishita single-scatter sky radiance for view direction `view_dir`
+// and sun direction `sun_dir` (both unit-length, atmosphere frame =
+// grid frame since grid Z is up). `sun_irradiance` is the user's
+// per-direction sun radiance reaching the surface — we un-attenuate
+// it once by the surface-to-sun transmittance to get the
+// top-of-atmosphere radiance the integral actually wants.
+float3 nishita_sky_radiance(float3 view_dir, float3 sun_dir,
+                            float3 sun_irradiance)
+{
+    float3 origin = float3(0.0, 0.0, kEarthRadius);
+    float t_top = ray_outer_sphere_t(origin, view_dir, kAtmosphereTop);
+    if (t_top <= 0.0) return float3(0.0);
+
+    // Reverse the surface-level sun attenuation so the Nishita
+    // integral's in-scattering uses true top-of-atmosphere sun
+    // radiance. Without this, sky brightness would be physically
+    // under-reported when the user dials a low sun_intensity.
+    float3 t_surface_to_sun = atmosphere_transmittance(origin, sun_dir);
+    float3 sun_radiance_TOA = sun_irradiance /
+                              max(t_surface_to_sun, float3(1e-6));
+
+    float cos_theta = dot(view_dir, sun_dir);
+    float cos_theta2 = cos_theta * cos_theta;
+    const float kInvPi = 0.31830988618;
+    float phase_r = (3.0 * 0.25 * kInvPi) * (1.0 + cos_theta2);
+    float g = kMieG;
+    float g2 = g * g;
+    float phase_m = (3.0 * 0.125 * kInvPi) * (1.0 - g2)
+                  * (1.0 + cos_theta2)
+                  / ((2.0 + g2) * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5));
+
+    float dt = t_top / float(kSkyViewSamples);
+    float3 luminance = float3(0.0);
+    float3 view_t = float3(1.0);
+    for (int i = 0; i < kSkyViewSamples; ++i) {
+        float t = (float(i) + 0.5) * dt;
+        float3 p = origin + view_dir * t;
+        float h = atmosphere_altitude(p);
+        if (h < 0.0) break;
+        float density_r = exp(-h / kRayleighScaleH);
+        float density_m = exp(-h / kMieScaleH);
+        float3 t_to_sun = atmosphere_transmittance(p, sun_dir);
+        float3 in_scatter = kRayleighSigma * density_r * phase_r
+                          + float3(kMieSigmaScatter * density_m * phase_m);
+        luminance += view_t * in_scatter * t_to_sun * sun_radiance_TOA * dt;
+        float3 ext = kRayleighSigma * density_r
+                   + float3((kMieSigmaScatter + kMieSigmaAbsorb)
+                            * density_m);
+        view_t *= exp(-ext * dt);
+    }
+    return luminance;
+}
 
 struct DDAHit {
     bool   hit;
@@ -951,7 +1065,16 @@ fragment float4 pt_fragment(
                     radiance += throughput * u.sun_radiance * w_bsdf;
                 }
             }
-            radiance += throughput * u.sky_color;
+            // Sky background: Nishita atmospheric scattering when the
+            // toggle is on (driven by sun direction + sun radiance),
+            // otherwise the constant tinted fill from u.sky_color.
+            if (u.atmospheric_sky != 0u) {
+                radiance += throughput *
+                    nishita_sky_radiance(ray_dir, u.sun_dir_grid,
+                                         u.sun_radiance);
+            } else {
+                radiance += throughput * u.sky_color;
+            }
             break;
         }
         float3 albedo = palette[h.cell_val].rgb;

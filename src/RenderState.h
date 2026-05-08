@@ -82,6 +82,15 @@ struct RenderState {
     float sun_angular_diameter_deg = 5.0f; // visible disc; real sun ≈ 0.53°
     float sun_color[3] = {1.0f, 0.95f, 0.85f};  // sRGB warm white
     float sun_intensity = 0.0f;            // 0 = sun disabled
+    // Replace the constant sky tint with single-scatter Nishita
+    // atmospheric scattering. Rayleigh + Mie species at Earth-like
+    // scale heights produce the natural blue-zenith / warm-horizon
+    // gradient + sun halo + sunset reddening from `sun_direction`
+    // alone. Per-pixel atmospheric integral is moderately expensive
+    // (~256 ops per missed sky ray) but offline-render-friendly.
+    // When off, falls back to the constant `sky_color × sky_intensity`
+    // tint.
+    bool atmospheric_sky = false;
 };
 
 RenderState& CurrentRenderState();
