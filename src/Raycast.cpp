@@ -1,5 +1,6 @@
 #include "Raycast.h"
 
+#include "CellKey.h"
 #include "VoxelGrid.h"
 
 #include <cmath>

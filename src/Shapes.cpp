@@ -6,7 +6,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "Raycast.h"
+#include "CellKey.h"
 #include "VoxelGrid.h"
 
 namespace macvoxel::shapes {

@@ -18,6 +18,7 @@
 #include "imgui_internal.h"  // DockBuilder API
 
 #include "Camera.h"
+#include "CellKey.h"
 #include "Document.h"
 #include "EditHistory.h"
 #include "Raycast.h"
@@ -42,22 +43,6 @@ constexpr Vec3i kInvalidCell{INT32_MIN, INT32_MIN, INT32_MIN};
 
 bool SameCell(const Vec3i& a, const Vec3i& b) {
     return a.x == b.x && a.y == b.y && a.z == b.z;
-}
-
-// Inverse of macvoxel::PackCellKey. The packed encoding stores 21-bit
-// fields with implicit two's-complement sign extension; reverse it with
-// the standard `(u ^ signBit) - signBit` sign-extend trick.
-inline void UnpackCellKey(int64_t key, int32_t* x, int32_t* y, int32_t* z) {
-    constexpr uint64_t kFieldMask = (1ull << 21) - 1ull;
-    constexpr uint32_t kSignBit = 1u << 20;
-    auto extend = [](uint64_t v) -> int32_t {
-        const uint32_t u = static_cast<uint32_t>(v & kFieldMask);
-        return static_cast<int32_t>((u ^ kSignBit) - kSignBit);
-    };
-    const uint64_t k = static_cast<uint64_t>(key);
-    *x = extend(k);
-    *y = extend(k >> 21);
-    *z = extend(k >> 42);
 }
 }
 
@@ -1023,18 +1008,10 @@ inline void UnpackCellKey(int64_t key, int32_t* x, int32_t* y, int32_t* z) {
         { 0.0f, -1.0f,  0.0f},
     };
 
-    auto pack = [](int32_t x, int32_t y, int32_t z) {
-        // 21 bits per axis (range ±2^20 ≈ ±1M voxels), masked so
-        // negatives don't bleed into adjacent fields.
-        const uint64_t ux = uint64_t(static_cast<uint32_t>(x)) & 0x1FFFFFu;
-        const uint64_t uy = uint64_t(static_cast<uint32_t>(y)) & 0x1FFFFFu;
-        const uint64_t uz = uint64_t(static_cast<uint32_t>(z)) & 0x1FFFFFu;
-        return (ux << 42) | (uy << 21) | uz;
-    };
-    std::unordered_set<uint64_t> selected_set;
+    std::unordered_set<int64_t> selected_set;
     selected_set.reserve(sel.voxels.size() * 2);
     for (const auto& v : sel.voxels) {
-        selected_set.insert(pack(v[0], v[1], v[2]));
+        selected_set.insert(macvoxel::PackCellKey(v[0], v[1], v[2]));
     }
 
     const simd::float3 cam = _camera.Position();
@@ -1051,9 +1028,10 @@ inline void UnpackCellKey(int64_t key, int32_t* x, int32_t* y, int32_t* z) {
         const simd::float3 center_world{
             cmin.x + 0.5f, cmin.z + 0.5f, -(cmin.y + 0.5f)};
         for (int f = 0; f < 6; ++f) {
-            if (selected_set.count(pack(v[0] + kNeighbor[f][0],
-                                        v[1] + kNeighbor[f][1],
-                                        v[2] + kNeighbor[f][2]))) {
+            if (selected_set.count(macvoxel::PackCellKey(
+                    v[0] + kNeighbor[f][0],
+                    v[1] + kNeighbor[f][1],
+                    v[2] + kNeighbor[f][2]))) {
                 continue;  // interior face
             }
             const simd::float3 to_cam = cam - center_world;
@@ -1392,7 +1370,7 @@ inline void UnpackCellKey(int64_t key, int32_t* x, int32_t* y, int32_t* z) {
     }
     for (const auto& [key, orig] : _shapePreview) {
         int32_t x, y, z;
-        UnpackCellKey(key, &x, &y, &z);
+        macvoxel::UnpackCellKey(key, &x, &y, &z);
         doc->grid.Set(x, y, z, orig);
     }
     _shapePreview.clear();

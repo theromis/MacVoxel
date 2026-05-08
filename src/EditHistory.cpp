@@ -1,20 +1,9 @@
 #include "EditHistory.h"
 
+#include "CellKey.h"
 #include "VoxelGrid.h"
 
 namespace macvoxel {
-
-namespace {
-// Same packing scheme as Raycast.h's PackCellKey: 21 bits per axis is
-// plenty for any voxel grid we'll see.
-inline int64_t PackKey(int32_t x, int32_t y, int32_t z) {
-    constexpr uint64_t kMask = (1ull << 21) - 1ull;
-    return static_cast<int64_t>(
-        (static_cast<uint64_t>(x) & kMask) |
-        ((static_cast<uint64_t>(y) & kMask) << 21) |
-        ((static_cast<uint64_t>(z) & kMask) << 42));
-}
-}  // namespace
 
 void EditHistory::BeginOp() {
     // Starting a new op invalidates redo (a typical undo-stack convention:
@@ -32,7 +21,7 @@ void EditHistory::Record(int32_t x, int32_t y, int32_t z,
     // pre-op value. Drag-paint commonly revisits a cell as the brush
     // sweeps over it. The hash map keeps the lookup O(1) — a linear
     // scan here used to make wide brush strokes O(N²).
-    const int64_t key = PackKey(x, y, z);
+    const int64_t key = PackCellKey(x, y, z);
     auto it = current_index_.find(key);
     if (it != current_index_.end()) {
         current_.changes[it->second].new_val = new_val;
