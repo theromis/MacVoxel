@@ -107,6 +107,17 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     // we roll back one last time and commit the final shape through the
     // normal history path so the whole drag becomes a single undo step.
     std::unordered_map<int64_t, uint8_t> _shapePreview;
+    // Generator gizmo state. After the user releases the mouse from a
+    // Generator-tool drag-out, the box stays visible (along with its
+    // _shapePreview cells) until they confirm. Clicking outside the box
+    // commits the preview through EditHistory; Esc rolls it back without
+    // a commit. The bounds + active-kind cache lets the per-frame loop
+    // detect param/kind changes from the panel and re-run the engine.
+    BOOL _genGizmoActive;
+    macvoxel::generators::Bounds3i _genBounds;
+    macvoxel::generators::Kind _genLastKind;
+    macvoxel::generators::Bounds3i _genLastBounds;
+    macvoxel::generators::Params _genLastParams;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -417,6 +428,17 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         }
     }
 
+    // Same logic for an active Generator gizmo: Esc cancels the live
+    // preview without writing history, switching tools cancels too. The
+    // ImGui IsKeyPressed read happens after NewFrame so it sees this
+    // frame's keyboard input.
+    if (_genGizmoActive) {
+        if (macvoxel::CurrentTool().tool != macvoxel::ToolKind::Generator ||
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            [self cancelGenGizmo];
+        }
+    }
+
     [self setupDockspace];
 
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
@@ -430,8 +452,29 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         macvoxel::DrawToolPanel();
         macvoxel::DrawGeneratorPanel();
         macvoxel::DrawPalettePanel(*doc);
+        // Gizmo refresh: the panel may have changed the active kind or
+        // parameters; the tool's palette index may have changed too.
+        // Detect any of those (plus a bounds change from a future face
+        // handle) and re-run the engine.
+        if (_genGizmoActive) {
+            const auto& gs = macvoxel::CurrentGeneratorState();
+            const uint8_t cur_palette = macvoxel::CurrentTool().palette_idx;
+            const bool dirty =
+                gs.active_kind != _genLastKind ||
+                std::memcmp(&_genBounds, &_genLastBounds,
+                            sizeof(_genBounds)) != 0 ||
+                cur_palette != _genLastParams.palette_idx;
+            if (dirty) {
+                [self refreshGenGizmoPreview];
+                _genLastKind = gs.active_kind;
+                _genLastBounds = _genBounds;
+                _genLastParams = gs.params;
+                _genLastParams.palette_idx = cur_palette;
+            }
+        }
         [self drawSelectionOverlay];
         [self drawHoverOverlay];
+        [self drawGenGizmo];
 
         if (macvoxel::ConsumeSaveRenderClick()) {
             [self runSaveRenderPanel];
@@ -596,6 +639,12 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     } else if (hasOption) {
         _dragMode = DragMode::Orbit;
         _lastDragLocation = event.locationInWindow;
+    } else if (_genGizmoActive) {
+        // Gizmo confirmation: any unmodified click commits the live
+        // preview and exits gizmo mode. Face-arrow handles in P12.5.C2
+        // will pre-empt this with a hit-test before falling through.
+        [self commitGenGizmo];
+        _dragMode = DragMode::None;
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Select) {
         _dragMode = DragMode::Select;
         Vec3i pick;
@@ -722,26 +771,34 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     if (_dragMode == DragMode::Paint) {
         macvoxel::CurrentHistory().CommitOp();
     } else if (_dragMode == DragMode::Shape) {
-        // Wipe the live preview before the real commit so stampBrushAtX:
-        // sees the original grid contents and writes proper old/new pairs
-        // into EditHistory. Setting _dragMode to None first routes the
-        // commit*AtPoint stamps through the history branch.
-        [self rollbackShapePreview];
-        _dragMode = DragMode::None;
-        switch (_anchorTool) {
-            case macvoxel::ToolKind::Line:
-                [self commitLineAtPoint:event.locationInWindow]; break;
-            case macvoxel::ToolKind::Circle:
-                [self commitCircleAtPoint:event.locationInWindow]; break;
-            case macvoxel::ToolKind::Square:
-                [self commitSquareAtPoint:event.locationInWindow]; break;
-            case macvoxel::ToolKind::Box:
-                [self commitBoxAtPoint:event.locationInWindow]; break;
-            case macvoxel::ToolKind::Generator:
-                [self commitGeneratorAtPoint:event.locationInWindow]; break;
-            case macvoxel::ToolKind::Face:
-                [self commitFaceAtPoint:event.locationInWindow]; break;
-            default: _hasAnchor = NO; break;
+        if (_anchorTool == macvoxel::ToolKind::Generator) {
+            // Generator tool: don't roll back or commit. Promote the
+            // current preview to a persistent gizmo — the user reviews
+            // the result, then clicks anywhere to commit or hits Esc to
+            // cancel. (Face handles for resizing land in P12.5.C2.)
+            _dragMode = DragMode::None;
+            [self enterGenGizmoFromCursor:event.locationInWindow];
+        } else {
+            // Wipe the live preview before the real commit so
+            // stampBrushAtX: sees the original grid contents and writes
+            // proper old/new pairs into EditHistory. Setting _dragMode
+            // to None first routes the commit*AtPoint stamps through
+            // the history branch.
+            [self rollbackShapePreview];
+            _dragMode = DragMode::None;
+            switch (_anchorTool) {
+                case macvoxel::ToolKind::Line:
+                    [self commitLineAtPoint:event.locationInWindow]; break;
+                case macvoxel::ToolKind::Circle:
+                    [self commitCircleAtPoint:event.locationInWindow]; break;
+                case macvoxel::ToolKind::Square:
+                    [self commitSquareAtPoint:event.locationInWindow]; break;
+                case macvoxel::ToolKind::Box:
+                    [self commitBoxAtPoint:event.locationInWindow]; break;
+                case macvoxel::ToolKind::Face:
+                    [self commitFaceAtPoint:event.locationInWindow]; break;
+                default: _hasAnchor = NO; break;
+            }
         }
     }
     _dragMode = DragMode::None;
@@ -1060,6 +1117,62 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
             stroke_edges(screen, valid, kFaceEdges[f], 4,
                          voxel_color, 1.0f);
         }
+    }
+}
+
+// Generator gizmo overlay: a 12-edge AABB outline around _genBounds.
+// Face-arrow handles for resizing the box land in P12.5.C2; for now the
+// outline alone communicates "this is what will be committed."
+- (void)drawGenGizmo {
+    if (!_genGizmoActive) return;
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0.0f || h <= 0.0f) return;
+    const float aspect = w / h;
+    const simd::float4x4 vp =
+        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
+
+    // Voxels span [c, c+1] in grid space, so the gizmo's outer surfaces
+    // sit at min and max+1 along each axis.
+    const simd::float3 box_min{static_cast<float>(_genBounds.x0),
+                               static_cast<float>(_genBounds.y0),
+                               static_cast<float>(_genBounds.z0)};
+    const simd::float3 box_max{static_cast<float>(_genBounds.x1 + 1),
+                               static_cast<float>(_genBounds.y1 + 1),
+                               static_cast<float>(_genBounds.z1 + 1)};
+    const simd::float3 corners_grid[8] = {
+        {box_min.x, box_min.y, box_min.z}, {box_max.x, box_min.y, box_min.z},
+        {box_max.x, box_max.y, box_min.z}, {box_min.x, box_max.y, box_min.z},
+        {box_min.x, box_min.y, box_max.z}, {box_max.x, box_min.y, box_max.z},
+        {box_max.x, box_max.y, box_max.z}, {box_min.x, box_max.y, box_max.z},
+    };
+    ImVec2 screen[8];
+    bool valid[8];
+    for (int i = 0; i < 8; ++i) {
+        const simd::float3 g = corners_grid[i];
+        const simd::float3 wpos{g.x, g.z, -g.y};
+        const simd::float4 clip =
+            simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
+        valid[i] = clip.w > 0.001f;
+        if (valid[i]) {
+            const float ndc_x = clip.x / clip.w;
+            const float ndc_y = clip.y / clip.w;
+            screen[i].x = (ndc_x * 0.5f + 0.5f) * w;
+            screen[i].y = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;
+        }
+    }
+    static const int kEdges[12][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0},
+        {4, 5}, {5, 6}, {6, 7}, {7, 4},
+        {0, 4}, {1, 5}, {2, 6}, {3, 7},
+    };
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const ImU32 color = IM_COL32(120, 200, 255, 230);
+    for (int i = 0; i < 12; ++i) {
+        const int a = kEdges[i][0];
+        const int b = kEdges[i][1];
+        if (!valid[a] || !valid[b]) continue;
+        dl->AddLine(screen[a], screen[b], color, 1.5f);
     }
 }
 
@@ -1720,24 +1833,95 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     }
 }
 
-- (void)commitGeneratorAtPoint:(NSPoint)windowPoint {
+// Promote the current drag-out preview into a persistent gizmo. The
+// preview cells stay applied to the grid; _genBounds captures the box
+// for the next refresh; _hasAnchor goes away because the gizmo state
+// machine takes over from here.
+- (void)enterGenGizmoFromCursor:(NSPoint)windowPoint {
     if (!_hasAnchor) return;
+    Vec3i endpoint = _anchorCell;
+    int end_face = _anchorFaceAxis;
+    [self computeLineEndpointAtPoint:windowPoint mode:_anchorMode
+                                into:&endpoint face:&end_face];
+    _genBounds = macvoxel::generators::Bounds3i{
+        std::min(_anchorCell.x, endpoint.x),
+        std::min(_anchorCell.y, endpoint.y),
+        std::min(_anchorCell.z, endpoint.z),
+        std::max(_anchorCell.x, endpoint.x),
+        std::max(_anchorCell.y, endpoint.y),
+        std::max(_anchorCell.z, endpoint.z),
+    };
+    _genGizmoActive = YES;
+    _genLastKind = macvoxel::CurrentGeneratorState().active_kind;
+    _genLastBounds = _genBounds;
+    _genLastParams = macvoxel::CurrentGeneratorState().params;
+    _genLastParams.palette_idx = macvoxel::CurrentTool().palette_idx;
+    _hasAnchor = NO;
+}
+
+// Roll back the live preview, run the engine for the current bounds +
+// kind + params, and re-stamp the result. Called whenever the gizmo
+// config changes (kind / bounds / params) while gizmo is active.
+- (void)refreshGenGizmoPreview {
+    if (!_genGizmoActive) return;
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) { _hasAnchor = NO; return; }
+    if (doc == nullptr) return;
 
-    std::vector<LineHit> hits;
-    [self enumerateGeneratorFromAnchorTo:windowPoint output:hits];
+    [self rollbackShapePreview];
 
-    if (!hits.empty()) {
-        macvoxel::CurrentHistory().BeginOp();
-        for (const LineHit& h : hits) {
-            [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
-                           mode:_anchorMode];
-        }
-        macvoxel::CurrentHistory().CommitOp();
+    macvoxel::generators::Params p = macvoxel::CurrentGeneratorState().params;
+    p.palette_idx = macvoxel::CurrentTool().palette_idx;
+    std::vector<Vec3i> cells;
+    [_generatorEngine generateInto:cells
+                              kind:macvoxel::CurrentGeneratorState().active_kind
+                            bounds:_genBounds
+                            params:p];
+    // Stamp through the existing brush+preview routing. _dragMode isn't
+    // Shape here (we left it in mouseUp), so we briefly re-enter Shape
+    // mode just for the stamp pass — the gizmo doesn't otherwise care.
+    const DragMode saved = _dragMode;
+    _dragMode = DragMode::Shape;
+    for (const Vec3i& c : cells) {
+        [self stampBrushAtX:c.x y:c.y z:c.z faceAxis:_anchorFaceAxis
+                       mode:macvoxel::CurrentTool().mode];
     }
-    _hasAnchor = NO;
+    _dragMode = saved;
+}
+
+// Commit the current gizmo's preview through EditHistory as a single
+// undo step, then exit gizmo state. The grid already shows the result
+// (the preview is live), so we just need to record old/new pairs.
+- (void)commitGenGizmo {
+    if (!_genGizmoActive) return;
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) {
+        _genGizmoActive = NO;
+        _shapePreview.clear();
+        return;
+    }
+    if (!_shapePreview.empty()) {
+        macvoxel::EditHistory& history = macvoxel::CurrentHistory();
+        history.BeginOp();
+        for (const auto& [key, orig] : _shapePreview) {
+            int32_t x, y, z;
+            macvoxel::UnpackCellKey(key, &x, &y, &z);
+            const uint8_t cur = doc->grid.Get(x, y, z);
+            history.Record(x, y, z, orig, cur);
+        }
+        history.CommitOp();
+    }
+    _shapePreview.clear();
+    _genGizmoActive = NO;
+}
+
+// Discard the current gizmo without writing to history. Restores every
+// previewed cell to its pre-preview value.
+- (void)cancelGenGizmo {
+    if (!_genGizmoActive) return;
+    [self rollbackShapePreview];
+    _genGizmoActive = NO;
 }
 
 // ---------------------------------------------------------------------------
