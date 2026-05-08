@@ -704,14 +704,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         return;
     }
     const NSEventModifierFlags m = event.modifierFlags;
-    const BOOL hasOption = (m & NSEventModifierFlagOption) != 0;
-    const BOOL hasShift = (m & NSEventModifierFlagShift) != 0;
     const BOOL hasCommand = (m & NSEventModifierFlagCommand) != 0;
-    if (hasOption && hasShift) {
+    // Space + left-click = pan (the alt to middle-click on trackpads
+    // and one-button mice). Camera orbit lives on right-click via
+    // rightMouseDown:; pan also lives on otherMouseDown: (middle).
+    if (ImGui::IsKeyDown(ImGuiKey_Space)) {
         _dragMode = DragMode::Pan;
-        _lastDragLocation = event.locationInWindow;
-    } else if (hasOption) {
-        _dragMode = DragMode::Orbit;
         _lastDragLocation = event.locationInWindow;
     } else if (_genGizmoActive) {
         // Click on a face arrow handle → enter resize drag. Any other
@@ -922,6 +920,45 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     }
     _dragMode = DragMode::None;
     _dragSkipCells.clear();
+}
+
+// Right-click drives camera orbit, middle (other) click drives pan. Both
+// share the dragged-delta math in mouseDragged: by routing through the
+// same _dragMode state machine — the dragged callbacks just forward to
+// the left-button mouseDragged:, since the Orbit / Pan switch cases
+// don't care which button generated the event.
+- (void)rightMouseDown:(NSEvent*)event {
+    if (ImGui::GetIO().WantCaptureMouse) {
+        _dragMode = DragMode::None;
+        return;
+    }
+    _dragMode = DragMode::Orbit;
+    _lastDragLocation = event.locationInWindow;
+}
+
+- (void)rightMouseDragged:(NSEvent*)event {
+    [self mouseDragged:event];
+}
+
+- (void)rightMouseUp:(NSEvent*)__unused event {
+    if (_dragMode == DragMode::Orbit) _dragMode = DragMode::None;
+}
+
+- (void)otherMouseDown:(NSEvent*)event {
+    if (ImGui::GetIO().WantCaptureMouse) {
+        _dragMode = DragMode::None;
+        return;
+    }
+    _dragMode = DragMode::Pan;
+    _lastDragLocation = event.locationInWindow;
+}
+
+- (void)otherMouseDragged:(NSEvent*)event {
+    [self mouseDragged:event];
+}
+
+- (void)otherMouseUp:(NSEvent*)__unused event {
+    if (_dragMode == DragMode::Pan) _dragMode = DragMode::None;
 }
 
 - (void)scrollWheel:(NSEvent*)event {

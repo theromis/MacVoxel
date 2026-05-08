@@ -60,10 +60,10 @@ void DrawToolPanel() {
 
     ImGui::Spacing();
     ImGui::TextDisabled("Mode");
+    // Stacked vertically — narrow Tool-panel widths used to overflow
+    // the row when all three were laid out side-by-side.
     mode_button(ICON_CUBE "  Add", ToolMode::Add);
-    ImGui::SameLine();
     mode_button(ICON_ERASER "  Remove", ToolMode::Remove);
-    ImGui::SameLine();
     mode_button(ICON_PAINT "  Paint", ToolMode::Paint);
 
     ImGui::Spacing();
@@ -216,8 +216,8 @@ void DrawToolPanel() {
         ImGui::BulletText("Click voxel face: apply current mode");
         ImGui::BulletText("Cmd + click: remove (override mode)");
         ImGui::BulletText("Drag: continuous brush along path");
-        ImGui::BulletText("Option + drag: orbit camera");
-        ImGui::BulletText("Option + Shift + drag: pan");
+        ImGui::BulletText("Right-drag: orbit camera");
+        ImGui::BulletText("Middle-drag or Space + drag: pan");
         ImGui::BulletText("Scroll / pinch: zoom");
         ImGui::BulletText("Cmd+Z / Cmd+Shift+Z: undo / redo");
         ImGui::BulletText("Cmd+C / Cmd+V / Backspace: copy / paste / delete sel");
