@@ -183,7 +183,15 @@ float ray_outer_sphere_t(float3 p, float3 dir, float radius) {
 }
 
 float atmosphere_altitude(float3 p) {
-    return length(p) - kEarthRadius;
+    // Numerically stable form of `length(p) - kEarthRadius`. The
+    // naïve subtraction loses ~7 digits to catastrophic cancellation
+    // for float32 with our Earth-radius values, occasionally flipping
+    // the sign of h on rays that start at the surface — which used to
+    // make atmosphere_transmittance return 0 spuriously and blow up
+    // sun_radiance_TOA via the safety divide.
+    float r2 = dot(p, p);
+    float er2 = kEarthRadius * kEarthRadius;
+    return (r2 - er2) / (sqrt(r2) + kEarthRadius);
 }
 
 // Per-channel transmittance along `omega` from `p` to where the ray
@@ -192,18 +200,27 @@ float atmosphere_altitude(float3 p) {
 float3 atmosphere_transmittance(float3 p, float3 omega) {
     float t_top = ray_outer_sphere_t(p, omega, kAtmosphereTop);
     if (t_top <= 0.0) return float3(0.0);
-    // Reject when the segment dips below the surface — equivalent to
-    // hitting the ground / horizon, which would block the sun.
+    // Reject when the segment genuinely dips below the surface
+    // (= hits the ground / horizon). The 1 m tolerance keeps
+    // surface-origin rays going to an above-horizon sun safe — those
+    // have t_ground of mathematical 0 but float32 might compute
+    // anything in [-ε, +ε] due to the catastrophic cancellation in
+    // |p|² − r².
     float t_ground = ray_outer_sphere_t(p, omega, kEarthRadius);
-    if (t_ground > 0.0 && t_ground < t_top) return float3(0.0);
+    if (t_ground > 1.0 && t_ground < t_top) return float3(0.0);
 
     float dt = t_top / float(kSkySunSamples);
     float3 od_r = float3(0.0);
     float  od_m = 0.0;
     for (int i = 0; i < kSkySunSamples; ++i) {
         float t = (float(i) + 0.5) * dt;
-        float h = atmosphere_altitude(p + omega * t);
-        if (h < 0.0) return float3(0.0);
+        // Clamp altitude at 0 — the ray is mathematically always at
+        // h ≥ 0 (we already rejected sub-horizon-passing rays via the
+        // t_ground check), but the numerically-stable altitude_at can
+        // still produce tiny negative values for samples near the
+        // surface, which without the clamp would give a non-physical
+        // density > 1.
+        float h = max(atmosphere_altitude(p + omega * t), 0.0);
         od_r += kRayleighSigma * exp(-h / kRayleighScaleH) * dt;
         od_m += (kMieSigmaScatter + kMieSigmaAbsorb)
               * exp(-h / kMieScaleH) * dt;
@@ -223,19 +240,18 @@ float3 nishita_sky_radiance(float3 view_dir, float3 sun_dir,
     float3 origin = float3(0.0, 0.0, kEarthRadius);
     float t_top = ray_outer_sphere_t(origin, view_dir, kAtmosphereTop);
     if (t_top <= 0.0) return float3(0.0);
-
-    // Reverse the surface-level sun attenuation so the Nishita
-    // integral's in-scattering uses true top-of-atmosphere sun
-    // radiance. Without this, sky brightness would be physically
-    // under-reported when the user dials a low sun_intensity.
-    float3 t_surface_to_sun = atmosphere_transmittance(origin, sun_dir);
+    float3 t_surface_to_sun =
+        atmosphere_transmittance(origin, sun_dir);
     float3 sun_radiance_TOA = sun_irradiance /
                               max(t_surface_to_sun, float3(1e-6));
 
     float cos_theta = dot(view_dir, sun_dir);
     float cos_theta2 = cos_theta * cos_theta;
     const float kInvPi = 0.31830988618;
-    float phase_r = (3.0 * 0.25 * kInvPi) * (1.0 + cos_theta2);
+    // Rayleigh phase: 3/(16π) · (1 + cos²θ). Integrates to 1 over the
+    // sphere — the factor is /16, not /4, which the original landing
+    // got wrong and produced a sky 4× too bright.
+    float phase_r = (3.0 / 16.0) * kInvPi * (1.0 + cos_theta2);
     float g = kMieG;
     float g2 = g * g;
     float phase_m = (3.0 * 0.125 * kInvPi) * (1.0 - g2)
@@ -248,8 +264,7 @@ float3 nishita_sky_radiance(float3 view_dir, float3 sun_dir,
     for (int i = 0; i < kSkyViewSamples; ++i) {
         float t = (float(i) + 0.5) * dt;
         float3 p = origin + view_dir * t;
-        float h = atmosphere_altitude(p);
-        if (h < 0.0) break;
+        float h = max(atmosphere_altitude(p), 0.0);
         float density_r = exp(-h / kRayleighScaleH);
         float density_m = exp(-h / kMieScaleH);
         float3 t_to_sun = atmosphere_transmittance(p, sun_dir);
