@@ -47,7 +47,6 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
     ImGui::Checkbox("Path traced", &rs.path_traced);
     if (rs.path_traced) {
         ImGui::Checkbox("ACES tonemap", &rs.aces_tonemap);
-        ImGui::SliderInt("Bounces", &rs.max_bounces, 1, 8);
 
         const char* kGlassNames[] = {"Probabilistic", "Absorption"};
         int gm = static_cast<int>(rs.glass_mode);

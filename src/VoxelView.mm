@@ -30,6 +30,7 @@
 #include "ToolState.h"
 #include "ui/Fonts.h"
 #include "ui/GeneratorPanel.h"
+#include "ui/LightPanel.h"
 #include "ui/ModelPanel.h"
 #include "ui/PalettePanel.h"
 #include "ui/RenderPanel.h"
@@ -425,6 +426,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             ImGui::DockBuilderDockWindow("Palette", left_bottom);
             ImGui::DockBuilderDockWindow("Model", right_top);
             ImGui::DockBuilderDockWindow("Render", right_bottom);
+            ImGui::DockBuilderDockWindow("Light", right_bottom);   // tab w/ Render
             ImGui::DockBuilderFinish(dock_id);
         }
     }
@@ -526,6 +528,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         stats.gpu_bytes = [_raycastRenderer lastGPUBytes];
         macvoxel::DrawModelPanel(*doc, stats);
         macvoxel::DrawRenderPanel(*doc, stats);
+        macvoxel::DrawLightPanel();
         macvoxel::DrawToolPanel();
         macvoxel::DrawGeneratorPanel();
         macvoxel::DrawPalettePanel(*doc);

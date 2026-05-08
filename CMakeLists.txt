@@ -69,6 +69,7 @@ set(APP_SOURCES
     src/Selection.cpp
     src/Clipboard.cpp
     src/ui/GeneratorPanel.cpp
+    src/ui/LightPanel.cpp
     src/ui/ModelPanel.cpp
     src/ui/ToolPanel.cpp
     src/ui/PalettePanel.cpp
