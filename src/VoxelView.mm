@@ -755,6 +755,26 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             // held — mouseMoved doesn't fire during a drag.
             _hoverWindowPoint = event.locationInWindow;
             _hoverHasPoint = YES;
+            // Generator tool: activate the gizmo immediately so the
+            // AABB outline is visible from the first click rather than
+            // appearing only after release. _genBounds starts as the
+            // anchor cell alone; refreshShapePreview's Generator case
+            // grows it as the user drags.
+            if (macvoxel::CurrentTool().tool ==
+                macvoxel::ToolKind::Generator) {
+                _genBounds = macvoxel::generators::Bounds3i{
+                    _anchorCell.x, _anchorCell.y, _anchorCell.z,
+                    _anchorCell.x, _anchorCell.y, _anchorCell.z,
+                };
+                _genGizmoActive = YES;
+                _genLastKind =
+                    macvoxel::CurrentGeneratorState().active_kind;
+                _genLastBounds = _genBounds;
+                _genLastParams =
+                    macvoxel::CurrentGeneratorState().params;
+                _genLastParams.palette_idx =
+                    macvoxel::CurrentTool().palette_idx;
+            }
             // Render the initial click-cell shape so a bare click (no
             // drag) shows its placement before mouseUp commits.
             [self refreshShapePreview];
@@ -868,12 +888,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         _genActiveDragFace = -1;
     } else if (_dragMode == DragMode::Shape) {
         if (_anchorTool == macvoxel::ToolKind::Generator) {
-            // Generator tool: don't roll back or commit. Promote the
-            // current preview to a persistent gizmo — the user reviews
-            // the result, then clicks anywhere to commit or hits Esc to
-            // cancel. (Face handles for resizing land in P12.5.C2.)
+            // Gizmo went live on mouseDown and refreshShapePreview kept
+            // _genBounds in sync with the drag, so the box is already
+            // in the right state. Just stop dragging and let the gizmo
+            // hold position until the user commits, cancels, or grabs
+            // a face handle.
             _dragMode = DragMode::None;
-            [self enterGenGizmoFromCursor:event.locationInWindow];
+            _hasAnchor = NO;
         } else {
             // Wipe the live preview before the real commit so
             // stampBrushAtX: sees the original grid contents and writes
@@ -1774,6 +1795,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                       bounds:b
                       params:p];
             [self stampGeneratorCells:cells mode:_anchorMode preview:YES];
+            // Keep gizmo state synced with the drag so drawGenGizmo
+            // sees the live bounds and the per-frame change-detector
+            // doesn't redundantly re-fire on the next frame.
+            _genBounds = b;
+            _genLastKind = macvoxel::CurrentGeneratorState().active_kind;
+            _genLastBounds = b;
+            _genLastParams = p;
             return;
         }
         default: return;
@@ -1988,39 +2016,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 // ---------------------------------------------------------------------------
-// Generator tool — click-drag-out an AABB; mouseup promotes the preview
-// into a persistent gizmo (face arrows for resize, click-outside to
-// commit, Esc to cancel). The drag-out phase's stamping happens in
-// refreshShapePreview's Generator case, which calls the engine and
-// stampGeneratorCells: directly — bypassing the brush-footprint
-// expansion that stampBrushAtX: does for Line / Circle / Square / Box.
+// Generator tool — gizmo lifecycle. Activates on mouseDown (single-cell
+// box at the anchor), grows during drag-out via refreshShapePreview's
+// Generator case (which keeps _genBounds in sync), persists past
+// mouseUp until the user commits, cancels (Esc / tool switch), or
+// grabs a face handle. Stamping bypasses the brush-footprint expansion
+// that stampBrushAtX: does for Line / Circle / Square / Box.
 // ---------------------------------------------------------------------------
-
-// Promote the current drag-out preview into a persistent gizmo. The
-// preview cells stay applied to the grid; _genBounds captures the box
-// for the next refresh; _hasAnchor goes away because the gizmo state
-// machine takes over from here.
-- (void)enterGenGizmoFromCursor:(NSPoint)windowPoint {
-    if (!_hasAnchor) return;
-    Vec3i endpoint = _anchorCell;
-    int end_face = _anchorFaceAxis;
-    [self computeLineEndpointAtPoint:windowPoint mode:_anchorMode
-                                into:&endpoint face:&end_face];
-    _genBounds = macvoxel::generators::Bounds3i{
-        std::min(_anchorCell.x, endpoint.x),
-        std::min(_anchorCell.y, endpoint.y),
-        std::min(_anchorCell.z, endpoint.z),
-        std::max(_anchorCell.x, endpoint.x),
-        std::max(_anchorCell.y, endpoint.y),
-        std::max(_anchorCell.z, endpoint.z),
-    };
-    _genGizmoActive = YES;
-    _genLastKind = macvoxel::CurrentGeneratorState().active_kind;
-    _genLastBounds = _genBounds;
-    _genLastParams = macvoxel::CurrentGeneratorState().params;
-    _genLastParams.palette_idx = macvoxel::CurrentTool().palette_idx;
-    _hasAnchor = NO;
-}
 
 // Roll back the live preview, run the engine for the current bounds +
 // kind + params, and re-stamp the result. Called whenever the gizmo
