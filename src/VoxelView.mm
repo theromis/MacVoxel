@@ -28,6 +28,7 @@
 #include "Shapes.h"
 #include "ToolState.h"
 #include "ui/Fonts.h"
+#include "ui/GeneratorPanel.h"
 #include "ui/ModelPanel.h"
 #include "ui/PalettePanel.h"
 #include "ui/RenderPanel.h"
@@ -148,22 +149,6 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
                                                   commandQueue:_commandQueue];
     if (_generatorEngine == nil) {
         return nil;
-    }
-    // Smoke test: run a 16-cell ellipsoid through the GPU and log the cell
-    // count, so a build that compiles but breaks the round-trip fails
-    // loudly rather than silently. Removed when Commit B wires the engine
-    // into the panel.
-    {
-        std::vector<macvoxel::shapes::Vec3i> cells;
-        macvoxel::generators::Bounds3i b{0, 0, 0, 15, 15, 15};
-        macvoxel::generators::Params p{};
-        [_generatorEngine generateInto:cells
-                                  kind:macvoxel::generators::Kind::Ellipsoid
-                                bounds:b
-                                params:p];
-        fprintf(stderr,
-                "MacVoxel: generator smoke test — ellipsoid in 16³ box "
-                "produced %zu cells\n", cells.size());
     }
 
     [self setupImGuiWithDevice:device];
@@ -352,6 +337,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
                                         &right_top, &right_bottom);
 
             ImGui::DockBuilderDockWindow("Tool", left_top);
+            ImGui::DockBuilderDockWindow("Generators", left_top);  // tab w/ Tool
             ImGui::DockBuilderDockWindow("Palette", left_bottom);
             ImGui::DockBuilderDockWindow("Model", right_top);
             ImGui::DockBuilderDockWindow("Render", right_bottom);
@@ -441,6 +427,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         macvoxel::DrawModelPanel(*doc, stats);
         macvoxel::DrawRenderPanel(*doc, stats);
         macvoxel::DrawToolPanel();
+        macvoxel::DrawGeneratorPanel();
         macvoxel::DrawPalettePanel(*doc);
         [self drawSelectionOverlay];
         [self drawHoverOverlay];
@@ -643,6 +630,11 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         } else {
             _dragMode = DragMode::None;
         }
+    } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Generator) {
+        // Generator tool's click-drag-out + gizmo interaction lands in
+        // P12.5.C. Until then, viewport clicks while this tool is active
+        // do nothing rather than fall through to the brush paint path.
+        _dragMode = DragMode::None;
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Face) {
         // Face tool: pick the clicked face, run a flood fill on the seed
         // plane, then enter Shape drag for live extrude / inset preview.

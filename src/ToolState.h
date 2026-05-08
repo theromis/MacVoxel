@@ -14,6 +14,7 @@ enum class ToolKind {
     Square,  // two-click center-to-edge-midpoint planar square / frame
     Box,     // two-click corner-to-corner volumetric box / hollow frame
     Face,    // click a face, drag to extrude / inset along its normal
+    Generator,  // gizmoized AABB feeding a parameterized GPU primitive
     Select,  // drag to define a 3D AABB selection
 };
 

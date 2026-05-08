@@ -54,6 +54,8 @@ void DrawToolPanel() {
     tool_button(ICON_CUBE1 "  Box", ToolKind::Box);
     ImGui::SameLine();
     tool_button(ICON_ARROW "  Face", ToolKind::Face);
+    tool_button(ICON_CUBE2 "  Generator", ToolKind::Generator);
+    ImGui::SameLine();
     tool_button(ICON_CROP "  Select", ToolKind::Select);
 
     ImGui::Spacing();
@@ -66,9 +68,11 @@ void DrawToolPanel() {
 
     ImGui::Spacing();
 
-    // Brush footprint controls don't apply to the Face tool — its seed
-    // region is a flood fill, not a stamped brush.
-    const bool show_brush_footprint = t.tool != ToolKind::Face;
+    // Brush footprint controls don't apply to the Face tool (flood-fill
+    // seed, not a stamped brush) or to the Generator tool (GPU kernel
+    // emits cells one-for-one over its volume).
+    const bool show_brush_footprint =
+        t.tool != ToolKind::Face && t.tool != ToolKind::Generator;
     if (show_brush_footprint) {
         int size = t.brush_size;
         if (ImGui::SliderInt("Brush size", &size, 1, 63)) {

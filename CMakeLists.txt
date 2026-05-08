@@ -63,10 +63,12 @@ set(APP_SOURCES
     src/Raycast.cpp
     src/Shapes.cpp
     src/GeneratorEngine.mm
+    src/GeneratorState.cpp
     src/ToolState.cpp
     src/EditHistory.cpp
     src/Selection.cpp
     src/Clipboard.cpp
+    src/ui/GeneratorPanel.cpp
     src/ui/ModelPanel.cpp
     src/ui/ToolPanel.cpp
     src/ui/PalettePanel.cpp
