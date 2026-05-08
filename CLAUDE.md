@@ -222,6 +222,12 @@ in MSL = 3×int32, identical layout), and stamps the cells through the
 existing `_shapePreview` machinery so the live preview / single-undo-step
 commit path is shared with the shape tools.
 
+Four built-in kinds shipped: Ellipsoid, Cylinder, Cone, Pyramid. The
+latter three share an `AxisView` helper in `Generators.metal` that
+materialises the int3 lo / dims / cell as float[3] arrays so the
+axis-parameterized kernels can index by `int axis` cleanly (MSL's vec3
+`[]` indexing across address spaces is the wobbly form).
+
 Lives in:
 - `src/Generators.h` — pure-C++ types (`Bounds3i`, `Kind`, `Params`).
 - `src/GeneratorEngine.{h,mm}` — Obj-C++ engine. Holds one
@@ -258,8 +264,9 @@ Invariants:
   (4096-cell floor on first allocation), so a drag through bigger and
   bigger bounds doesn't realloc every frame.
 - The gizmo's per-frame change detector (active kind / bounds / palette
-  index) is what re-runs the engine when the user tweaks the panel — no
-  ImGui callback wiring; just compare-and-refresh in the per-frame draw.
+  index / axis / apex_at_max) is what re-runs the engine when the user
+  tweaks the panel — no ImGui callback wiring; just compare-and-refresh
+  in the per-frame draw.
 
 ## Things that look weird but are intentional
 

@@ -47,7 +47,7 @@ Effort labels are rough: **S** ≈ a few hours, **M** ≈ a day, **L** ≈ multi
   connectivity). Every two-click tool routes through a shared shape-
   preview pipeline so live voxel preview + single-undo-step commit comes
   for free; pure cell enumeration lives in `Shapes.{h,cpp}`.
-- **Phase 12.5 (foundation) — Generators engine + Ellipsoid + gizmo.**
+- **Phase 12.5 — Generators engine + four primitives + gizmo.**
   Parameterized shape primitives that the user lays out via a gizmoized
   AABB rather than drawing one cell at a time. GPU-first architecture:
   each generator is a Metal compute kernel that scans its AABB at one
@@ -55,26 +55,22 @@ Effort labels are rough: **S** ≈ a few hours, **M** ≈ a day, **L** ≈ multi
   appends qualifying cell coords to an output buffer; CPU reads the
   count and stamps via the existing `_shapePreview` machinery so the
   live preview / single-undo-step commit flow is shared with the shape
-  tools. Shipped: GPU compute infrastructure, the Ellipsoid kernel, the
-  Generators panel, and the full gizmo (face-arrow handles with
-  NDC-space drag projection, click-outside-to-commit, Esc to cancel,
-  per-frame change detection so panel / palette edits re-run the engine
-  in place). Cylinder / Cone / Pyramid / Maze / Perlin / Fractal — and
-  the user-authored MSL shader escape hatch — slot in on top of this
+  tools. Shipped: GPU compute infrastructure, four kernels (Ellipsoid,
+  Cylinder, Cone, Pyramid — the latter three sharing an `AxisView`
+  helper for axis-parameterized cross-sections, with `axis` and
+  `apex_at_max` fields on `Params`), the Generators panel, and the
+  full gizmo (axis-coloured face-arrow handles with NDC-space drag
+  projection, click-outside-to-commit, Esc to cancel, per-frame change
+  detection so panel / palette edits re-run the engine in place).
+  Stretch / RNG-driven kinds and the user-shader path slot in on top
   without architecture changes.
 
-## Phase 12.5 (rest) — Additional generator kinds
+## Phase 12.5+ — RNG-driven generator kinds + user shader path
 
 The engine + gizmo are done; each new kind is one MSL kernel function,
 one `Kind` enum entry, one entry in `KernelNameForKind`, one panel
 button, and any per-kind fields on `Params`.
 
-- **Cylinder (S).** Axis (X / Y / Z), inscribed in the AABB on the two
-  perpendicular axes. Optional: hollow / wall thickness.
-- **Cone (S).** Axis + apex direction (which face the apex points
-  toward). Tapers linearly from base radius to 0.
-- **Pyramid (S).** Like Cone but Chebyshev-norm cross-section (square
-  base) instead of Euclidean.
 - **Maze (M).** Recursive backtracker or Wilson's, seeded into the
   AABB's interior. Needs a seed field on `Params` and an RNG primitive
   in MSL (PCG or wyrand fits in a kernel).
@@ -222,9 +218,17 @@ phase boundary, not a side change.
 
 ## Suggested next-up
 
-**Cylinder + Cone + Pyramid generators.** The Generators engine and gizmo
-are working end-to-end on Ellipsoid. Adding three more pure-math kernels
-on top of the existing dispatch is small, demonstrably useful, and proves
-out the "any new kind is one kernel function" claim before getting into
-the bigger projects (Maze / Perlin RNG, user-shader runtime compile, or
-Phase 13 selection upgrades).
+Pure-math primitives are done; the natural next forks are:
+
+- **Phase 13.5 (edit-volume foundation)** — small, high-leverage. The
+  faint floor grid + bounded volume pair lifts the editor out of
+  "infinite empty space" and makes anchoring empty-space clicks
+  predictable, which the Generator gizmo will benefit from too.
+- **Phase 13 (selection upgrades)** — also small per item; marquee
+  selection + 90° rotations are quick wins.
+- **Phase 12.5+ Maze / Perlin / Fractal** — fun, but each needs an MSL
+  RNG primitive and a richer Params shape, so M-sized rather than S.
+- **Phase 14.5 power-weighted NEE** — ~50 lines, real visible win on
+  emitter-heavy scenes, prereq for the ReSTIR DI / GI work later.
+
+Pick by what feels most fun; nothing is on a deadline.
