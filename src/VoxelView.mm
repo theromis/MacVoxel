@@ -1306,11 +1306,27 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         hover_face = [self pickGenHandleAtPoint:_hoverWindowPoint];
     }
 
-    constexpr float kTipLengthVoxels = 2.5f;
-    constexpr float kArrowheadPx = 10.0f;
-    const ImU32 kBaseColor    = IM_COL32(220, 230, 245, 230);
-    const ImU32 kHoverColor   = IM_COL32(255, 200,  90, 255);
-    const ImU32 kActiveColor  = IM_COL32(255, 230, 140, 255);
+    constexpr float kTipLengthVoxels = 4.0f;
+    constexpr float kArrowheadLenPx = 14.0f;
+    constexpr float kArrowheadHalfWidthPx = 7.0f;
+    // Standard X / Y / Z = red / green / blue, with brighter variants
+    // for hover and active states. Both the +axis and -axis face share
+    // their axis's color — position on the box disambiguates direction.
+    const ImU32 kAxisBase[3] = {
+        IM_COL32(230,  80,  80, 255),
+        IM_COL32( 90, 200, 100, 255),
+        IM_COL32( 90, 140, 240, 255),
+    };
+    const ImU32 kAxisHover[3] = {
+        IM_COL32(255, 160, 160, 255),
+        IM_COL32(170, 250, 180, 255),
+        IM_COL32(160, 200, 255, 255),
+    };
+    const ImU32 kAxisActive[3] = {
+        IM_COL32(255, 220, 220, 255),
+        IM_COL32(220, 255, 230, 255),
+        IM_COL32(220, 240, 255, 255),
+    };
 
     for (int f = 0; f < 6; ++f) {
         simd::float3 cw, nw;
@@ -1321,17 +1337,20 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         project(cw + nw * kTipLengthVoxels, &tip, &tip_v);
         if (!base_v || !tip_v) continue;
 
+        const int axis = f / 2;
         const ImU32 color =
-            (f == _genActiveDragFace) ? kActiveColor :
-            (f == hover_face)         ? kHoverColor  :
-                                        kBaseColor;
+            (f == _genActiveDragFace) ? kAxisActive[axis] :
+            (f == hover_face)         ? kAxisHover[axis]  :
+                                        kAxisBase[axis];
         const float thickness = (f == hover_face || f == _genActiveDragFace)
-                                    ? 2.5f : 1.8f;
+                                    ? 2.8f : 2.0f;
         dl->AddLine(base, tip, color, thickness);
 
-        // Arrowhead: two short legs perpendicular to the stem in
-        // screen space, scaled to a fixed pixel length so the hint
-        // reads at any zoom level.
+        // Solid filled-triangle arrowhead. The triangle's base sits at
+        // `back` (pulled back along the stem from the tip by the
+        // arrowhead length); leg1 / leg2 are perpendicular offsets in
+        // screen space, so the arrowhead reads at consistent pixel
+        // size regardless of camera distance.
         const float stem_dx = tip.x - base.x;
         const float stem_dy = tip.y - base.y;
         const float stem_len = std::sqrt(stem_dx * stem_dx +
@@ -1339,18 +1358,18 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         if (stem_len > 1e-3f) {
             const float ux = stem_dx / stem_len;
             const float uy = stem_dy / stem_len;
-            // 30° arrowhead: rotate the stem direction back by ±150°
-            // and scale to kArrowheadPx.
-            const float cos_a = -0.866f;  // cos(150°)
-            const float sin_a =  0.5f;    // sin(150°)
+            const float px = -uy;   // perpendicular in screen space
+            const float py =  ux;
+            const ImVec2 back{
+                tip.x - ux * kArrowheadLenPx,
+                tip.y - uy * kArrowheadLenPx};
             const ImVec2 leg1{
-                tip.x + (ux * cos_a - uy * sin_a) * kArrowheadPx,
-                tip.y + (ux * sin_a + uy * cos_a) * kArrowheadPx};
+                back.x + px * kArrowheadHalfWidthPx,
+                back.y + py * kArrowheadHalfWidthPx};
             const ImVec2 leg2{
-                tip.x + (ux * cos_a + uy * sin_a) * kArrowheadPx,
-                tip.y + (-ux * sin_a + uy * cos_a) * kArrowheadPx};
-            dl->AddLine(tip, leg1, color, thickness);
-            dl->AddLine(tip, leg2, color, thickness);
+                back.x - px * kArrowheadHalfWidthPx,
+                back.y - py * kArrowheadHalfWidthPx};
+            dl->AddTriangleFilled(tip, leg1, leg2, color);
         }
     }
 }
@@ -2102,8 +2121,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     const float cur_x = static_cast<float>(local.x);
     const float cur_y = static_cast<float>(h - local.y);  // ImGui Y-down
 
-    constexpr float kTipLengthVoxels = 2.5f;
-    constexpr float kHitRadiusPx = 14.0f;
+    // Match drawGenGizmo's stem length so the click target lines up
+    // with the rendered arrow tip; the radius covers the full
+    // 14-px-long arrowhead so any click on the visible arrow lands.
+    constexpr float kTipLengthVoxels = 4.0f;
+    constexpr float kHitRadiusPx = 16.0f;
     int best = -1;
     float best_d2 = kHitRadiusPx * kHitRadiusPx;
     for (int f = 0; f < 6; ++f) {
