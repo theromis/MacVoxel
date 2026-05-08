@@ -40,6 +40,9 @@ NSString* LoadGeneratorLibrarySource() {
 NSString* KernelNameForKind(gen::Kind k) {
     switch (k) {
         case gen::Kind::Ellipsoid: return @"generate_ellipsoid";
+        case gen::Kind::Cylinder:  return @"generate_cylinder";
+        case gen::Kind::Cone:      return @"generate_cone";
+        case gen::Kind::Pyramid:   return @"generate_pyramid";
         case gen::Kind::Count_:    return nil;
     }
     return nil;
@@ -49,7 +52,9 @@ struct Uniforms {
     int32_t lo[4];        // x0, y0, z0, pad
     int32_t dims[4];      // dx, dy, dz, pad
     uint32_t palette_idx;
-    uint32_t pad[3];
+    uint32_t axis;
+    uint32_t apex_at_max;
+    uint32_t pad;
 };
 static_assert(sizeof(Uniforms) == 48, "Uniforms layout mismatch");
 
@@ -164,6 +169,8 @@ static_assert(sizeof(Uniforms) == 48, "Uniforms layout mismatch");
     u.dims[1] = dy;
     u.dims[2] = dz;
     u.palette_idx = params.palette_idx;
+    u.axis = params.axis;
+    u.apex_at_max = params.apex_at_max;
 
     id<MTLCommandBuffer> cmd = [_queue commandBuffer];
     cmd.label = @"GeneratorDispatch";

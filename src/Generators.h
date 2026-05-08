@@ -22,7 +22,10 @@ struct Bounds3i {
 // engine's kernel table.
 enum class Kind : uint32_t {
     Ellipsoid = 0,
-    // Cylinder, Pyramid, Cone, Maze, Perlin, Fractal — added in follow-ups
+    Cylinder,
+    Cone,
+    Pyramid,
+    // Maze, Perlin, Fractal — added in follow-ups
     Count_,
 };
 
@@ -37,6 +40,15 @@ struct Params {
     // produces. Generators that want per-cell color (Perlin, Maze)
     // will get additional fields here.
     uint8_t palette_idx = 1;
+    // Cylinder / Cone / Pyramid: axis along which the primitive is
+    // oriented (0 = X, 1 = Y, 2 = Z). Cylinder treats this as its
+    // symmetry axis; Cone / Pyramid taper along it. Y is the default
+    // since vertical primitives are the most common case.
+    uint32_t axis = 1;
+    // Cone / Pyramid: which end of the bounding box holds the apex.
+    // 0 = -axis face (apex at bounds min on that axis); 1 = +axis
+    // face (apex at bounds max). Ignored by Cylinder.
+    uint32_t apex_at_max = 1;
 };
 
 }  // namespace macvoxel::generators

@@ -19,9 +19,9 @@ struct Uniforms {
     int3 lo;          // bounds min (x0, y0, z0)
     int3 dims;        // bounds size (x1 - x0 + 1, ...)
     uint palette_idx; // unused on GPU side; kept for parity with CPU Params
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    uint axis;        // 0 = X, 1 = Y, 2 = Z (cylinder/cone/pyramid axis)
+    uint apex_at_max; // 0 = apex at -axis face, 1 = apex at +axis face
+    uint pad;
 };
 
 struct PackedCell { int x, y, z; };
@@ -59,6 +59,122 @@ kernel void generate_ellipsoid(
     float3 half_ext = float3(u.dims) * 0.5;
     float3 norm = (float3(cell) + 0.5 - center) / half_ext;
     if (dot(norm, norm) <= 1.0) {
+        emit(cell, counter, out);
+    }
+}
+
+// Stack-allocated views of the int3 lo / dims / cell as float[3] so the
+// axis-parameterized kernels below can index by `int axis` cleanly.
+// MSL's vec3 [] indexing isn't reliable across address spaces, so this
+// is the safe form.
+struct AxisView {
+    float lo[3];
+    float dim[3];
+    float pos[3];   // cell center (cell + 0.5) along each axis
+};
+
+static AxisView make_axis_view(int3 cell, constant Uniforms& u) {
+    AxisView v;
+    v.lo[0]  = float(u.lo.x);
+    v.lo[1]  = float(u.lo.y);
+    v.lo[2]  = float(u.lo.z);
+    v.dim[0] = float(u.dims.x);
+    v.dim[1] = float(u.dims.y);
+    v.dim[2] = float(u.dims.z);
+    v.pos[0] = float(cell.x) + 0.5;
+    v.pos[1] = float(cell.y) + 0.5;
+    v.pos[2] = float(cell.z) + 0.5;
+    return v;
+}
+
+// Cylinder inscribed in the bounding box, symmetry axis = u.axis. The
+// cross-section perpendicular to the axis fills the box's other two
+// dimensions exactly — so a non-square cross-section produces an
+// elliptical cylinder, matching the Ellipsoid convention. Height
+// spans the full box along the axis (no taper).
+kernel void generate_cylinder(
+    constant Uniforms& u                  [[buffer(0)]],
+    device atomic_uint* counter           [[buffer(1)]],
+    device PackedCell* out                [[buffer(2)]],
+    uint3 gid                             [[thread_position_in_grid]])
+{
+    int3 cell;
+    if (!resolve_cell(gid, u, cell)) return;
+
+    int axis = int(u.axis);
+    int u_a = (axis == 0) ? 1 : 0;
+    int v_a = (axis == 2) ? 1 : 2;
+    AxisView v = make_axis_view(cell, u);
+
+    float center_u = v.lo[u_a] + v.dim[u_a] * 0.5;
+    float center_v = v.lo[v_a] + v.dim[v_a] * 0.5;
+    float n_u = (v.pos[u_a] - center_u) / (v.dim[u_a] * 0.5);
+    float n_v = (v.pos[v_a] - center_v) / (v.dim[v_a] * 0.5);
+
+    if (n_u * n_u + n_v * n_v <= 1.0) {
+        emit(cell, counter, out);
+    }
+}
+
+// Cone with elliptical cross-section, base at one face of the box and
+// apex at the opposite. Cross-section radius factor `r` runs linearly
+// from 1 at the base (full-bounds ellipse) to 0 at the apex; a cell is
+// filled when its normalized cross-section position has magnitude ≤ r.
+kernel void generate_cone(
+    constant Uniforms& u                  [[buffer(0)]],
+    device atomic_uint* counter           [[buffer(1)]],
+    device PackedCell* out                [[buffer(2)]],
+    uint3 gid                             [[thread_position_in_grid]])
+{
+    int3 cell;
+    if (!resolve_cell(gid, u, cell)) return;
+
+    int axis = int(u.axis);
+    int u_a = (axis == 0) ? 1 : 0;
+    int v_a = (axis == 2) ? 1 : 2;
+    AxisView v = make_axis_view(cell, u);
+
+    float t = (v.pos[axis] - v.lo[axis]) / v.dim[axis];   // 0 at lo, 1 at hi
+    float r = (u.apex_at_max != 0u) ? (1.0 - t) : t;      // 0 at apex, 1 at base
+    if (r <= 0.0) return;
+
+    float center_u = v.lo[u_a] + v.dim[u_a] * 0.5;
+    float center_v = v.lo[v_a] + v.dim[v_a] * 0.5;
+    float n_u = (v.pos[u_a] - center_u) / (v.dim[u_a] * 0.5);
+    float n_v = (v.pos[v_a] - center_v) / (v.dim[v_a] * 0.5);
+
+    if (n_u * n_u + n_v * n_v <= r * r) {
+        emit(cell, counter, out);
+    }
+}
+
+// Square-base pyramid: same shape as Cone but with a Chebyshev (max-
+// norm) cross-section instead of Euclidean — so each layer is a square
+// rather than an ellipse, tapering linearly to a point at the apex.
+kernel void generate_pyramid(
+    constant Uniforms& u                  [[buffer(0)]],
+    device atomic_uint* counter           [[buffer(1)]],
+    device PackedCell* out                [[buffer(2)]],
+    uint3 gid                             [[thread_position_in_grid]])
+{
+    int3 cell;
+    if (!resolve_cell(gid, u, cell)) return;
+
+    int axis = int(u.axis);
+    int u_a = (axis == 0) ? 1 : 0;
+    int v_a = (axis == 2) ? 1 : 2;
+    AxisView v = make_axis_view(cell, u);
+
+    float t = (v.pos[axis] - v.lo[axis]) / v.dim[axis];
+    float r = (u.apex_at_max != 0u) ? (1.0 - t) : t;
+    if (r <= 0.0) return;
+
+    float center_u = v.lo[u_a] + v.dim[u_a] * 0.5;
+    float center_v = v.lo[v_a] + v.dim[v_a] * 0.5;
+    float n_u = (v.pos[u_a] - center_u) / (v.dim[u_a] * 0.5);
+    float n_v = (v.pos[v_a] - center_v) / (v.dim[v_a] * 0.5);
+
+    if (max(abs(n_u), abs(n_v)) <= r) {
         emit(cell, counter, out);
     }
 }

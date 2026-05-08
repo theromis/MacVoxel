@@ -535,7 +535,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                 gs.active_kind != _genLastKind ||
                 std::memcmp(&_genBounds, &_genLastBounds,
                             sizeof(_genBounds)) != 0 ||
-                cur_palette != _genLastParams.palette_idx;
+                cur_palette != _genLastParams.palette_idx ||
+                gs.params.axis != _genLastParams.axis ||
+                gs.params.apex_at_max != _genLastParams.apex_at_max;
             if (dirty) {
                 [self refreshGenGizmoPreview];
                 _genLastKind = gs.active_kind;

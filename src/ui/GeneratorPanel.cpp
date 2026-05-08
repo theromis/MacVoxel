@@ -13,6 +13,9 @@ namespace {
 const char* KindLabel(generators::Kind k) {
     switch (k) {
         case generators::Kind::Ellipsoid: return "Ellipsoid";
+        case generators::Kind::Cylinder:  return "Cylinder";
+        case generators::Kind::Cone:      return "Cone";
+        case generators::Kind::Pyramid:   return "Pyramid";
         case generators::Kind::Count_:    return "?";
     }
     return "?";
@@ -50,11 +53,44 @@ void DrawGeneratorPanel() {
 
     ImGui::TextDisabled("Kind");
     kind_button(generators::Kind::Ellipsoid);
-    // Cylinder, Pyramid, Cone, Maze, Perlin, Fractal slot in here as
-    // each new kernel lands.
+    ImGui::SameLine();
+    kind_button(generators::Kind::Cylinder);
+    kind_button(generators::Kind::Cone);
+    ImGui::SameLine();
+    kind_button(generators::Kind::Pyramid);
+    // Maze, Perlin, Fractal slot in here as each new kernel lands.
 
     ImGui::Spacing();
     ImGui::TextDisabled("Parameters");
+
+    auto axis_buttons = [&]() {
+        auto axis_button = [&](const char* label, uint32_t a) {
+            const bool active = g.params.axis == a;
+            AccentButtonColors(active);
+            if (ImGui::Button(label, ImVec2(50, 0))) g.params.axis = a;
+            if (active) ImGui::PopStyleColor(3);
+        };
+        ImGui::TextDisabled("Axis");
+        axis_button("X", 0);
+        ImGui::SameLine();
+        axis_button("Y", 1);
+        ImGui::SameLine();
+        axis_button("Z", 2);
+    };
+
+    auto apex_buttons = [&]() {
+        auto apex_button = [&](const char* label, uint32_t a) {
+            const bool active = g.params.apex_at_max == a;
+            AccentButtonColors(active);
+            if (ImGui::Button(label, ImVec2(80, 0))) g.params.apex_at_max = a;
+            if (active) ImGui::PopStyleColor(3);
+        };
+        ImGui::TextDisabled("Apex at");
+        apex_button("Min", 0);
+        ImGui::SameLine();
+        apex_button("Max", 1);
+    };
+
     switch (g.active_kind) {
         case generators::Kind::Ellipsoid:
             // Ellipsoid is fully described by its bounding box — no
@@ -62,6 +98,14 @@ void DrawGeneratorPanel() {
             // hollow shells, partial-sphere wedges are candidates for
             // later passes.)
             ImGui::TextDisabled("(none — shape derives from bounds)");
+            break;
+        case generators::Kind::Cylinder:
+            axis_buttons();
+            break;
+        case generators::Kind::Cone:
+        case generators::Kind::Pyramid:
+            axis_buttons();
+            apex_buttons();
             break;
         case generators::Kind::Count_:
             break;
