@@ -215,6 +215,7 @@ void DrawToolPanel() {
     if (ImGui::CollapsingHeader("Controls")) {
         ImGui::BulletText("Click voxel face: apply current mode");
         ImGui::BulletText("Cmd + click: remove (override mode)");
+        ImGui::BulletText("Option + click: eyedropper (pick voxel color)");
         ImGui::BulletText("Drag: continuous brush along path");
         ImGui::BulletText("Right-drag: orbit camera");
         ImGui::BulletText("Middle-drag or Space + drag: pan");

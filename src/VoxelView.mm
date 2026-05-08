@@ -722,7 +722,15 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         return;
     }
     const NSEventModifierFlags m = event.modifierFlags;
+    const BOOL hasOption = (m & NSEventModifierFlagOption) != 0;
     const BOOL hasCommand = (m & NSEventModifierFlagCommand) != 0;
+    // Option + left-click = eyedropper. Side-action only — doesn't
+    // disturb anchor / gizmo / drag state, just updates the palette.
+    if (hasOption) {
+        [self eyedropperAtPoint:event.locationInWindow];
+        _dragMode = DragMode::None;
+        return;
+    }
     // Space + left-click = pan (the alt to middle-click on trackpads
     // and one-button mice). Camera orbit lives on right-click via
     // rightMouseDown:; pan also lives on otherMouseDown: (middle).
@@ -1003,6 +1011,34 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // the user is targeting. Falls back to the ground plane (grid z=0) when
 // the ray misses all voxels.
 // ---------------------------------------------------------------------------
+
+// Eyedropper: cast a ray from the click into the grid; if it hits a
+// non-empty voxel, copy that voxel's palette index into the active
+// slot (and reset selected_slots to a single-selection of that index,
+// preserving ToolState's "palette_idx is always a member of
+// selected_slots when non-empty" invariant). Misses leave the
+// palette unchanged.
+- (BOOL)eyedropperAtPoint:(NSPoint)windowPoint {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return NO;
+    simd::float3 ray_origin, ray_dir;
+    if (![self gridRayAtPoint:windowPoint
+                       origin:&ray_origin
+                    direction:&ray_dir]) {
+        return NO;
+    }
+    macvoxel::RayHit hit;
+    if (!macvoxel::Raycast(doc->grid, ray_origin, ray_dir, 4096.0f, &hit)) {
+        return NO;
+    }
+    if (hit.color == 0) return NO;
+    macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    tool.palette_idx = hit.color;
+    tool.selected_slots.reset();
+    tool.selected_slots.set(hit.color);
+    return YES;
+}
 
 - (BOOL)pickGridCellAtPoint:(NSPoint)windowPoint into:(Vec3i*)outCell {
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
