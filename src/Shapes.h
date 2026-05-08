@@ -46,6 +46,13 @@ void EnumerateCirclePlanar(Vec3i anchor, Vec3i endpoint, int face_axis,
 void EnumerateSquarePlanar(Vec3i anchor, Vec3i endpoint, int face_axis,
                            bool fill, bool even, std::vector<Vec3i>& out);
 
+// Axis-aligned box of cells whose opposite corners are corner_a and
+// corner_b (each pair of coordinates is taken componentwise as min/max,
+// inclusive). fill = filled volume; otherwise the hollow 1-cell-thick
+// shell of the bounding box.
+void EnumerateBox(Vec3i corner_a, Vec3i corner_b, bool fill,
+                  std::vector<Vec3i>& out);
+
 // Flood-fill in the plane perpendicular to `axis` through `seed`. Returns
 // every cell that (a) is non-empty and matches `match_color` (or any
 // non-empty cell when match_color == 0) and (b) has its face on the

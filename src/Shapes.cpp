@@ -135,6 +135,62 @@ void EnumerateSquarePlanar(Vec3i anchor, Vec3i endpoint, int face_axis,
     }
 }
 
+void EnumerateBox(Vec3i corner_a, Vec3i corner_b, bool fill,
+                  std::vector<Vec3i>& out) {
+    out.clear();
+    const int32_t x0 = std::min(corner_a.x, corner_b.x);
+    const int32_t x1 = std::max(corner_a.x, corner_b.x);
+    const int32_t y0 = std::min(corner_a.y, corner_b.y);
+    const int32_t y1 = std::max(corner_a.y, corner_b.y);
+    const int32_t z0 = std::min(corner_a.z, corner_b.z);
+    const int32_t z1 = std::max(corner_a.z, corner_b.z);
+    const size_t nx = static_cast<size_t>(x1 - x0 + 1);
+    const size_t ny = static_cast<size_t>(y1 - y0 + 1);
+    const size_t nz = static_cast<size_t>(z1 - z0 + 1);
+
+    if (fill) {
+        out.reserve(nx * ny * nz);
+        for (int32_t z = z0; z <= z1; ++z) {
+            for (int32_t y = y0; y <= y1; ++y) {
+                for (int32_t x = x0; x <= x1; ++x) {
+                    out.push_back({x, y, z});
+                }
+            }
+        }
+        return;
+    }
+
+    // Hollow shell: the six faces of the AABB. A single-axis-thin box
+    // (any of nx/ny/nz == 1) collapses to its filled form rather than
+    // returning empty, so a 1-thick frame still draws something.
+    if (nx == 1 || ny == 1 || nz == 1) {
+        out.reserve(nx * ny * nz);
+        for (int32_t z = z0; z <= z1; ++z) {
+            for (int32_t y = y0; y <= y1; ++y) {
+                for (int32_t x = x0; x <= x1; ++x) {
+                    out.push_back({x, y, z});
+                }
+            }
+        }
+        return;
+    }
+
+    const size_t shell_count = nx * ny * nz - (nx - 2) * (ny - 2) * (nz - 2);
+    out.reserve(shell_count);
+    for (int32_t z = z0; z <= z1; ++z) {
+        const bool z_face = (z == z0 || z == z1);
+        for (int32_t y = y0; y <= y1; ++y) {
+            const bool y_face = (y == y0 || y == y1);
+            for (int32_t x = x0; x <= x1; ++x) {
+                const bool x_face = (x == x0 || x == x1);
+                if (x_face || y_face || z_face) {
+                    out.push_back({x, y, z});
+                }
+            }
+        }
+    }
+}
+
 void FloodCoplanarFace(const VoxelGrid& grid, Vec3i seed, int axis, int sign,
                        uint8_t match_color, bool eight_conn,
                        std::vector<Vec3i>& out) {

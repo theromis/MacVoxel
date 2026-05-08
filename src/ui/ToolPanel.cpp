@@ -51,8 +51,9 @@ void DrawToolPanel() {
     tool_button(ICON_SCOPE "  Circle", ToolKind::Circle);
     ImGui::SameLine();
     tool_button(ICON_SQUARE "  Square", ToolKind::Square);
-    tool_button(ICON_ARROW "  Face", ToolKind::Face);
+    tool_button(ICON_CUBE1 "  Box", ToolKind::Box);
     ImGui::SameLine();
+    tool_button(ICON_ARROW "  Face", ToolKind::Face);
     tool_button(ICON_CROP "  Select", ToolKind::Select);
 
     ImGui::Spacing();
@@ -125,6 +126,11 @@ void DrawToolPanel() {
         fill_even_row(&t.circle_fill, &t.circle_even);
     } else if (t.tool == ToolKind::Square) {
         fill_even_row(&t.square_fill, &t.square_even);
+    } else if (t.tool == ToolKind::Box) {
+        const bool active = t.box_fill;
+        AccentButtonColors(active);
+        if (ImGui::Button("Fill", ImVec2(80, 0))) t.box_fill = !t.box_fill;
+        if (active) ImGui::PopStyleColor(3);
     } else if (t.tool == ToolKind::Face) {
         // Extrude: which voxels qualify for the flood-filled seed region.
         auto extrude_button = [&](const char* label, FaceExtrudeKind k) {

@@ -601,7 +601,8 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         }
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Line ||
                macvoxel::CurrentTool().tool == macvoxel::ToolKind::Circle ||
-               macvoxel::CurrentTool().tool == macvoxel::ToolKind::Square) {
+               macvoxel::CurrentTool().tool == macvoxel::ToolKind::Square ||
+               macvoxel::CurrentTool().tool == macvoxel::ToolKind::Box) {
         // Click-and-drag shape tools — anchor on mouseDown, preview while
         // dragging, commit on mouseUp at the release point.
         const macvoxel::ToolMode mode = hasCommand ? macvoxel::ToolMode::Remove
@@ -722,6 +723,8 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
                 [self commitCircleAtPoint:event.locationInWindow]; break;
             case macvoxel::ToolKind::Square:
                 [self commitSquareAtPoint:event.locationInWindow]; break;
+            case macvoxel::ToolKind::Box:
+                [self commitBoxAtPoint:event.locationInWindow]; break;
             case macvoxel::ToolKind::Face:
                 [self commitFaceAtPoint:event.locationInWindow]; break;
             default: _hasAnchor = NO; break;
@@ -876,7 +879,8 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     const bool is_brush = t.tool == macvoxel::ToolKind::Brush;
     const bool is_two_click = (t.tool == macvoxel::ToolKind::Line ||
                                t.tool == macvoxel::ToolKind::Circle ||
-                               t.tool == macvoxel::ToolKind::Square);
+                               t.tool == macvoxel::ToolKind::Square ||
+                               t.tool == macvoxel::ToolKind::Box);
     if (!is_brush && !is_two_click) return;
 
     auto color_for_mode = [](macvoxel::ToolMode m) {
@@ -1436,6 +1440,11 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
                                          even:t.square_even
                                        output:hits];
             break;
+        case macvoxel::ToolKind::Box:
+            [self enumerateBoxFromAnchorTo:_hoverWindowPoint
+                                      fill:t.box_fill
+                                    output:hits];
+            break;
         default: return;
     }
     for (const LineHit& h : hits) {
@@ -1583,6 +1592,58 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
                                  fill:tool.square_fill
                                  even:tool.square_even
                                output:hits];
+
+    if (!hits.empty()) {
+        macvoxel::CurrentHistory().BeginOp();
+        for (const LineHit& h : hits) {
+            [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
+                           mode:_anchorMode];
+        }
+        macvoxel::CurrentHistory().CommitOp();
+    }
+    _hasAnchor = NO;
+}
+
+// ---------------------------------------------------------------------------
+// Box tool — two-click corner-to-corner volumetric AABB / hollow shell.
+// Shares the same endpoint picker as Line (raycast hit, ground-plane
+// fallback), so click-in-empty-space drags the cursor along the ground
+// plane and the box spans from the anchor's depth down to it.
+// ---------------------------------------------------------------------------
+
+- (void)enumerateBoxFromAnchorTo:(NSPoint)cursor
+                             fill:(BOOL)fill
+                           output:(std::vector<LineHit>&)out {
+    out.clear();
+    if (!_hasAnchor) return;
+
+    Vec3i endpoint;
+    int end_face = _anchorFaceAxis;
+    if (![self computeLineEndpointAtPoint:cursor mode:_anchorMode
+                                     into:&endpoint face:&end_face]) {
+        out.push_back({_anchorCell.x, _anchorCell.y, _anchorCell.z,
+                       _anchorFaceAxis});
+        return;
+    }
+
+    std::vector<Vec3i> cells;
+    macvoxel::shapes::EnumerateBox(_anchorCell, endpoint, fill, cells);
+    out.reserve(cells.size());
+    for (const Vec3i& c : cells) {
+        out.push_back({c.x, c.y, c.z, _anchorFaceAxis});
+    }
+}
+
+- (void)commitBoxAtPoint:(NSPoint)windowPoint {
+    if (!_hasAnchor) return;
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) { _hasAnchor = NO; return; }
+
+    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    std::vector<LineHit> hits;
+    [self enumerateBoxFromAnchorTo:windowPoint fill:tool.box_fill
+                            output:hits];
 
     if (!hits.empty()) {
         macvoxel::CurrentHistory().BeginOp();

@@ -12,6 +12,7 @@ enum class ToolKind {
     Line,    // two-click point-to-point voxel line
     Circle,  // two-click center-to-edge planar disc / ring
     Square,  // two-click center-to-edge-midpoint planar square / frame
+    Box,     // two-click corner-to-corner volumetric box / hollow frame
     Face,    // click a face, drag to extrude / inset along its normal
     Select,  // drag to define a 3D AABB selection
 };
@@ -90,6 +91,10 @@ struct ToolState {
     // Chebyshev-norm "disc" (i.e., a square / hollow frame).
     bool square_fill = true;
     bool square_even = false;
+    // Box tool: Fill = filled volume (default) vs. hollow 1-cell-thick
+    // shell. No "Even" — corner-to-corner boxes don't have a center to
+    // align between cells.
+    bool box_fill = true;
     // Face tool options.
     FaceExtrudeKind face_extrude = FaceExtrudeKind::Color;
     FaceWithColor face_with = FaceWithColor::Geometry;
