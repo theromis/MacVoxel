@@ -37,7 +37,7 @@
 #include "ui/ToolPanel.h"
 
 namespace {
-enum class DragMode { None, Orbit, Pan, Paint, Select, Shape };
+enum class DragMode { None, Orbit, Pan, Paint, Select, Shape, GenHandle };
 
 using Vec3i = macvoxel::shapes::Vec3i;
 struct LineHit { int32_t x, y, z; int face_axis; };
@@ -46,6 +46,49 @@ constexpr Vec3i kInvalidCell{INT32_MIN, INT32_MIN, INT32_MIN};
 
 bool SameCell(const Vec3i& a, const Vec3i& b) {
     return a.x == b.x && a.y == b.y && a.z == b.z;
+}
+
+// (axis, sign) for face index 0..5. axis/2 = X|Y|Z; sign +1 for "max"
+// face, -1 for "min" face. Layout matches kFaceArrowOrder below.
+inline void GenFaceAxisSign(int face, int* axis, int* sign) {
+    *axis = face / 2;
+    *sign = (face & 1) ? +1 : -1;
+}
+
+// World-space face center (between cells, after the renderer's
+// R = (gx, gz, -gy) transform) and the face's outward normal in world
+// space. The "outer surface" of a face on the +axis side is at coord+1
+// (voxels span [c, c+1]); on the -axis side it's at coord.
+void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
+                        simd::float3* out_center, simd::float3* out_normal) {
+    int axis, sign;
+    GenFaceAxisSign(face, &axis, &sign);
+    auto mid = [](int32_t a, int32_t b1) {
+        return (static_cast<float>(a) + static_cast<float>(b1) + 1.0f) * 0.5f;
+    };
+    const int32_t face_coord = (sign < 0)
+        ? (axis == 0 ? b.x0 : axis == 1 ? b.y0 : b.z0)
+        : ((axis == 0 ? b.x1 : axis == 1 ? b.y1 : b.z1) + 1);
+    float gx, gy, gz;
+    if (axis == 0) {
+        gx = static_cast<float>(face_coord);
+        gy = mid(b.y0, b.y1);
+        gz = mid(b.z0, b.z1);
+    } else if (axis == 1) {
+        gx = mid(b.x0, b.x1);
+        gy = static_cast<float>(face_coord);
+        gz = mid(b.z0, b.z1);
+    } else {
+        gx = mid(b.x0, b.x1);
+        gy = mid(b.y0, b.y1);
+        gz = static_cast<float>(face_coord);
+    }
+    *out_center = simd::float3{gx, gz, -gy};
+    simd::float3 n_grid{0, 0, 0};
+    if (axis == 0) n_grid.x = static_cast<float>(sign);
+    else if (axis == 1) n_grid.y = static_cast<float>(sign);
+    else n_grid.z = static_cast<float>(sign);
+    *out_normal = simd::float3{n_grid.x, n_grid.z, -n_grid.y};
 }
 }
 
@@ -118,6 +161,16 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     macvoxel::generators::Kind _genLastKind;
     macvoxel::generators::Bounds3i _genLastBounds;
     macvoxel::generators::Params _genLastParams;
+    // Face-handle drag state. _genActiveDragFace is 0..5 while a handle
+    // is being dragged (DragMode::GenHandle); -1 otherwise. The face
+    // index encodes (axis, sign): face/2 = axis, face&1 = (sign>0).
+    // _genHandleStartBounds locks in the bounds at drag-start so each
+    // frame's drag distance projects against the same NDC reference
+    // direction — without this, the projected normal moves as bounds
+    // change and the drag-to-voxels mapping drifts.
+    int _genActiveDragFace;
+    NSPoint _genHandleStartCursor;
+    macvoxel::generators::Bounds3i _genHandleStartBounds;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -162,6 +215,7 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     if (_generatorEngine == nil) {
         return nil;
     }
+    _genActiveDragFace = -1;  // 0 means "the -X face" — explicit nil-state.
 
     [self setupImGuiWithDevice:device];
     return self;
@@ -640,11 +694,19 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         _dragMode = DragMode::Orbit;
         _lastDragLocation = event.locationInWindow;
     } else if (_genGizmoActive) {
-        // Gizmo confirmation: any unmodified click commits the live
-        // preview and exits gizmo mode. Face-arrow handles in P12.5.C2
-        // will pre-empt this with a hit-test before falling through.
-        [self commitGenGizmo];
-        _dragMode = DragMode::None;
+        // Click on a face arrow handle → enter resize drag. Any other
+        // click in the viewport commits the gizmo (the user signals
+        // they're done by clicking outside the handles).
+        const int face = [self pickGenHandleAtPoint:event.locationInWindow];
+        if (face >= 0) {
+            _genActiveDragFace = face;
+            _genHandleStartCursor = event.locationInWindow;
+            _genHandleStartBounds = _genBounds;
+            _dragMode = DragMode::GenHandle;
+        } else {
+            [self commitGenGizmo];
+            _dragMode = DragMode::None;
+        }
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Select) {
         _dragMode = DragMode::Select;
         Vec3i pick;
@@ -763,6 +825,16 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
             _hoverHasPoint = YES;
             [self refreshShapePreview];
             break;
+        case DragMode::GenHandle: {
+            // Project the cursor delta onto the dragged face's normal,
+            // update bounds; the per-frame gizmo refresh picks up the
+            // change and re-runs the engine.
+            const int dv =
+                [self genHandleDragVoxelsForFace:_genActiveDragFace
+                                          cursor:p];
+            [self applyGenHandleDelta:_genActiveDragFace deltaVoxels:dv];
+            break;
+        }
         case DragMode::None:  break;
     }
 }
@@ -770,6 +842,12 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 - (void)mouseUp:(NSEvent*)event {
     if (_dragMode == DragMode::Paint) {
         macvoxel::CurrentHistory().CommitOp();
+    } else if (_dragMode == DragMode::GenHandle) {
+        // Drag finished — leave bounds where the user released them and
+        // stay in gizmo state. Active face goes back to "none" so the
+        // arrow color clears.
+        _dragMode = DragMode::None;
+        _genActiveDragFace = -1;
     } else if (_dragMode == DragMode::Shape) {
         if (_anchorTool == macvoxel::ToolKind::Generator) {
             // Generator tool: don't roll back or commit. Promote the
@@ -1120,9 +1198,11 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     }
 }
 
-// Generator gizmo overlay: a 12-edge AABB outline around _genBounds.
-// Face-arrow handles for resizing the box land in P12.5.C2; for now the
-// outline alone communicates "this is what will be committed."
+// Generator gizmo overlay: 12-edge AABB outline around _genBounds plus
+// 6 face-normal arrow handles. Hovering a handle highlights it; the
+// actively-dragged handle gets the brightest tint. Click-tests for
+// "is the cursor over a handle" use the same projected tip positions
+// computed here, so visuals and hit-tests can't drift.
 - (void)drawGenGizmo {
     if (!_genGizmoActive) return;
     const float w = static_cast<float>(self.bounds.size.width);
@@ -1132,34 +1212,35 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
     const simd::float4x4 vp =
         _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
 
-    // Voxels span [c, c+1] in grid space, so the gizmo's outer surfaces
-    // sit at min and max+1 along each axis.
-    const simd::float3 box_min{static_cast<float>(_genBounds.x0),
-                               static_cast<float>(_genBounds.y0),
-                               static_cast<float>(_genBounds.z0)};
-    const simd::float3 box_max{static_cast<float>(_genBounds.x1 + 1),
-                               static_cast<float>(_genBounds.y1 + 1),
-                               static_cast<float>(_genBounds.z1 + 1)};
+    auto project = [&](simd::float3 wpos, ImVec2* screen, bool* valid) {
+        const simd::float4 clip =
+            simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
+        *valid = clip.w > 0.001f;
+        if (!*valid) return;
+        const float ndc_x = clip.x / clip.w;
+        const float ndc_y = clip.y / clip.w;
+        screen->x = (ndc_x * 0.5f + 0.5f) * w;
+        screen->y = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;
+    };
+
+    // Box outline. Voxels span [c, c+1] so outer surfaces sit at min..max+1.
+    const float bx0 = static_cast<float>(_genBounds.x0);
+    const float by0 = static_cast<float>(_genBounds.y0);
+    const float bz0 = static_cast<float>(_genBounds.z0);
+    const float bx1 = static_cast<float>(_genBounds.x1 + 1);
+    const float by1 = static_cast<float>(_genBounds.y1 + 1);
+    const float bz1 = static_cast<float>(_genBounds.z1 + 1);
     const simd::float3 corners_grid[8] = {
-        {box_min.x, box_min.y, box_min.z}, {box_max.x, box_min.y, box_min.z},
-        {box_max.x, box_max.y, box_min.z}, {box_min.x, box_max.y, box_min.z},
-        {box_min.x, box_min.y, box_max.z}, {box_max.x, box_min.y, box_max.z},
-        {box_max.x, box_max.y, box_max.z}, {box_min.x, box_max.y, box_max.z},
+        {bx0, by0, bz0}, {bx1, by0, bz0},
+        {bx1, by1, bz0}, {bx0, by1, bz0},
+        {bx0, by0, bz1}, {bx1, by0, bz1},
+        {bx1, by1, bz1}, {bx0, by1, bz1},
     };
     ImVec2 screen[8];
     bool valid[8];
     for (int i = 0; i < 8; ++i) {
         const simd::float3 g = corners_grid[i];
-        const simd::float3 wpos{g.x, g.z, -g.y};
-        const simd::float4 clip =
-            simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
-        valid[i] = clip.w > 0.001f;
-        if (valid[i]) {
-            const float ndc_x = clip.x / clip.w;
-            const float ndc_y = clip.y / clip.w;
-            screen[i].x = (ndc_x * 0.5f + 0.5f) * w;
-            screen[i].y = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;
-        }
+        project(simd::float3{g.x, g.z, -g.y}, &screen[i], &valid[i]);
     }
     static const int kEdges[12][2] = {
         {0, 1}, {1, 2}, {2, 3}, {3, 0},
@@ -1167,12 +1248,71 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
         {0, 4}, {1, 5}, {2, 6}, {3, 7},
     };
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    const ImU32 color = IM_COL32(120, 200, 255, 230);
+    const ImU32 outline_color = IM_COL32(120, 200, 255, 230);
     for (int i = 0; i < 12; ++i) {
         const int a = kEdges[i][0];
         const int b = kEdges[i][1];
         if (!valid[a] || !valid[b]) continue;
-        dl->AddLine(screen[a], screen[b], color, 1.5f);
+        dl->AddLine(screen[a], screen[b], outline_color, 1.5f);
+    }
+
+    // Hover face: derived per-frame from the cursor unless we're
+    // already mid-drag (then the dragged face is the "hovered" one,
+    // visually). When a panel has captured the mouse, suppress hover
+    // so the cursor over a tooltip doesn't paint a handle hot.
+    int hover_face = -1;
+    if (_dragMode == DragMode::GenHandle) {
+        hover_face = _genActiveDragFace;
+    } else if (_hoverHasPoint && !ImGui::GetIO().WantCaptureMouse) {
+        hover_face = [self pickGenHandleAtPoint:_hoverWindowPoint];
+    }
+
+    constexpr float kTipLengthVoxels = 2.5f;
+    constexpr float kArrowheadPx = 10.0f;
+    const ImU32 kBaseColor    = IM_COL32(220, 230, 245, 230);
+    const ImU32 kHoverColor   = IM_COL32(255, 200,  90, 255);
+    const ImU32 kActiveColor  = IM_COL32(255, 230, 140, 255);
+
+    for (int f = 0; f < 6; ++f) {
+        simd::float3 cw, nw;
+        GizmoFaceWorldGeom(_genBounds, f, &cw, &nw);
+        ImVec2 base, tip;
+        bool base_v, tip_v;
+        project(cw, &base, &base_v);
+        project(cw + nw * kTipLengthVoxels, &tip, &tip_v);
+        if (!base_v || !tip_v) continue;
+
+        const ImU32 color =
+            (f == _genActiveDragFace) ? kActiveColor :
+            (f == hover_face)         ? kHoverColor  :
+                                        kBaseColor;
+        const float thickness = (f == hover_face || f == _genActiveDragFace)
+                                    ? 2.5f : 1.8f;
+        dl->AddLine(base, tip, color, thickness);
+
+        // Arrowhead: two short legs perpendicular to the stem in
+        // screen space, scaled to a fixed pixel length so the hint
+        // reads at any zoom level.
+        const float stem_dx = tip.x - base.x;
+        const float stem_dy = tip.y - base.y;
+        const float stem_len = std::sqrt(stem_dx * stem_dx +
+                                         stem_dy * stem_dy);
+        if (stem_len > 1e-3f) {
+            const float ux = stem_dx / stem_len;
+            const float uy = stem_dy / stem_len;
+            // 30° arrowhead: rotate the stem direction back by ±150°
+            // and scale to kArrowheadPx.
+            const float cos_a = -0.866f;  // cos(150°)
+            const float sin_a =  0.5f;    // sin(150°)
+            const ImVec2 leg1{
+                tip.x + (ux * cos_a - uy * sin_a) * kArrowheadPx,
+                tip.y + (ux * sin_a + uy * cos_a) * kArrowheadPx};
+            const ImVec2 leg2{
+                tip.x + (ux * cos_a + uy * sin_a) * kArrowheadPx,
+                tip.y + (-ux * sin_a + uy * cos_a) * kArrowheadPx};
+            dl->AddLine(tip, leg1, color, thickness);
+            dl->AddLine(tip, leg2, color, thickness);
+        }
     }
 }
 
@@ -1917,11 +2057,118 @@ bool SameCell(const Vec3i& a, const Vec3i& b) {
 }
 
 // Discard the current gizmo without writing to history. Restores every
-// previewed cell to its pre-preview value.
+// previewed cell to its pre-preview value. Also clears any in-progress
+// face-handle drag so the next mouse event lands cleanly.
 - (void)cancelGenGizmo {
     if (!_genGizmoActive) return;
     [self rollbackShapePreview];
     _genGizmoActive = NO;
+    _genActiveDragFace = -1;
+    if (_dragMode == DragMode::GenHandle) _dragMode = DragMode::None;
+}
+
+// Project each gizmo face's arrow tip into screen space and pick the
+// face whose tip is closest to `windowPoint` within a 14-point click
+// radius. Returns -1 if no handle is under the cursor. Faces whose tip
+// projects behind the camera are skipped.
+- (int)pickGenHandleAtPoint:(NSPoint)windowPoint {
+    if (!_genGizmoActive) return -1;
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0.0f || h <= 0.0f) return -1;
+    const float aspect = w / h;
+    const simd::float4x4 vp =
+        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
+
+    const NSPoint local = [self convertPoint:windowPoint fromView:nil];
+    const float cur_x = static_cast<float>(local.x);
+    const float cur_y = static_cast<float>(h - local.y);  // ImGui Y-down
+
+    constexpr float kTipLengthVoxels = 2.5f;
+    constexpr float kHitRadiusPx = 14.0f;
+    int best = -1;
+    float best_d2 = kHitRadiusPx * kHitRadiusPx;
+    for (int f = 0; f < 6; ++f) {
+        simd::float3 cw, nw;
+        GizmoFaceWorldGeom(_genBounds, f, &cw, &nw);
+        const simd::float3 tip = cw + nw * kTipLengthVoxels;
+        const simd::float4 clip = simd_mul(
+            vp, simd::float4{tip.x, tip.y, tip.z, 1.0f});
+        if (clip.w <= 0.001f) continue;
+        const float ndc_x = clip.x / clip.w;
+        const float ndc_y = clip.y / clip.w;
+        const float sx = (ndc_x * 0.5f + 0.5f) * w;
+        const float sy = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;
+        const float dx = sx - cur_x;
+        const float dy = sy - cur_y;
+        const float d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best = f;
+        }
+    }
+    return best;
+}
+
+// Convert a cursor delta from drag-start into a signed voxel count
+// along face `face`'s normal. Same projection trick as the Face tool's
+// faceDragVoxelsAtCursor:: build the NDC-space direction "1 voxel of
+// normal travel" looks like, project the cursor delta onto it.
+- (int)genHandleDragVoxelsForFace:(int)face cursor:(NSPoint)cursor {
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0.0f || h <= 0.0f) return 0;
+    const float aspect = w / h;
+    const simd::float4x4 vp =
+        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
+
+    simd::float3 cw, nw;
+    GizmoFaceWorldGeom(_genHandleStartBounds, face, &cw, &nw);
+
+    auto to_ndc = [&](simd::float3 wp, simd::float2* ndc) -> bool {
+        const simd::float4 clip = simd_mul(
+            vp, simd::float4{wp.x, wp.y, wp.z, 1.0f});
+        if (clip.w <= 1e-6f) return false;
+        ndc->x = clip.x / clip.w;
+        ndc->y = clip.y / clip.w;
+        return true;
+    };
+    simd::float2 ndc0{}, ndc1{};
+    if (!to_ndc(cw, &ndc0)) return 0;
+    if (!to_ndc(cw + nw, &ndc1)) return 0;
+    const simd::float2 dir{ndc1.x - ndc0.x, ndc1.y - ndc0.y};
+    const float dir_len2 = dir.x * dir.x + dir.y * dir.y;
+    if (dir_len2 < 1e-8f) return 0;
+
+    const NSPoint anchor_local =
+        [self convertPoint:_genHandleStartCursor fromView:nil];
+    const NSPoint cursor_local = [self convertPoint:cursor fromView:nil];
+    const simd::float2 drag{
+        static_cast<float>((cursor_local.x - anchor_local.x) / w * 2.0f),
+        static_cast<float>((cursor_local.y - anchor_local.y) / h * 2.0f)};
+    const float t = (drag.x * dir.x + drag.y * dir.y) / dir_len2;
+    return static_cast<int>(std::round(t));
+}
+
+// Apply a drag delta (in voxels along the face normal) to the gizmo
+// bounds. Positive delta moves the face outward; negative inward.
+// Clamps against the opposite face so the box stays at least 1 voxel
+// thick on each axis.
+- (void)applyGenHandleDelta:(int)face deltaVoxels:(int)delta {
+    int axis, sign;
+    GenFaceAxisSign(face, &axis, &sign);
+    macvoxel::generators::Bounds3i b = _genHandleStartBounds;
+    if (axis == 0) {
+        if (sign < 0) b.x0 = std::min(b.x1, b.x0 - delta);
+        else          b.x1 = std::max(b.x0, b.x1 + delta);
+    } else if (axis == 1) {
+        if (sign < 0) b.y0 = std::min(b.y1, b.y0 - delta);
+        else          b.y1 = std::max(b.y0, b.y1 + delta);
+    } else {
+        if (sign < 0) b.z0 = std::min(b.z1, b.z0 - delta);
+        else          b.z1 = std::max(b.z0, b.z1 + delta);
+    }
+    _genBounds = b;
 }
 
 // ---------------------------------------------------------------------------
