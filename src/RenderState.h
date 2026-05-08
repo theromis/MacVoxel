@@ -49,6 +49,15 @@ struct RenderState {
     // the 3 visible faces — the pre-P14.5.A baseline, kept as a toggle
     // so the user can A/B compare on emitter-heavy scenes.
     bool power_weighted_nee = true;
+    // Resampled importance sampling (RIS) candidate count for direct
+    // lighting NEE. Per pixel per frame, draw this many candidates from
+    // the source distribution (power-weighted CDF or uniform), reservoir-
+    // sample one weighted by the unshadowed integrand luminance, then
+    // fire a single shadow ray. M=1 reduces to the non-RIS path, M>1
+    // approximates sampling from `target_pdf` and reduces variance on
+    // emitter-heavy scenes. Standard ReSTIR-DI starting territory; the
+    // temporal / spatial reservoir reuse from Bitterli 2020 lands later.
+    int nee_ris_count = 8;
     // Multiplier on the constant sky color the path tracer falls back
     // to when a ray escapes the grid. 1.0 is the default tint
     // (≈ daylight overcast, the post-P10.x default). Lowering it

@@ -33,7 +33,7 @@ struct PathUniforms {
     uint32_t light_count;
     uint32_t glass_mode;  // 0 = Probabilistic, 1 = Absorption
     uint32_t power_weighted_nee;  // 0 = uniform NEE, 1 = power CDF
-    uint32_t _pad4;
+    uint32_t nee_ris_count;       // RIS candidate count (≥ 1)
     uint32_t _pad5;
     uint32_t _pad6;
 };
@@ -124,6 +124,7 @@ struct DisplayUniforms {
     macvoxel::GlassMode _lastGlassMode;
     bool _lastPowerWeightedNee;
     float _lastSkyIntensity;
+    int _lastNeeRisCount;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -487,6 +488,11 @@ struct DisplayUniforms {
         _lastSkyIntensity = sky_k;
         _wantsClear = YES;
     }
+    const int ris_m = macvoxel::CurrentRenderState().nee_ris_count;
+    if (ris_m != _lastNeeRisCount) {
+        _lastNeeRisCount = ris_m;
+        _wantsClear = YES;
+    }
 
     if (_wantsClear) {
         _sampleCount = 0;
@@ -600,6 +606,8 @@ struct DisplayUniforms {
         macvoxel::CurrentRenderState().glass_mode);
     u.power_weighted_nee =
         macvoxel::CurrentRenderState().power_weighted_nee ? 1u : 0u;
+    u.nee_ris_count = static_cast<uint32_t>(std::max(
+        1, macvoxel::CurrentRenderState().nee_ris_count));
 
     [enc setRenderPipelineState:_pathPipeline];
     [enc setCullMode:MTLCullModeNone];

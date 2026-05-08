@@ -36,6 +36,24 @@ void DrawLightPanel() {
             "variance on scenes with widely different light brightnesses.\n"
             "Toggle to A/B; converged image is the same either way.");
     }
+
+    // ReSTIR-DI candidate count. M=1 reduces to single-candidate NEE
+    // (the pre-RIS behavior); M>1 enables the RIS reservoir loop. The
+    // shadow-ray cost is the same either way (one per pixel per frame);
+    // the per-candidate cost is just a CDF binary search + 4 rands +
+    // a few dot products, so M=8 is essentially free.
+    ImGui::SliderInt("RIS candidates (M)", &rs.nee_ris_count, 1, 32);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Number of NEE candidates per pixel per frame. The reservoir "
+            "weighted-samples one of them by target_pdf / source_pdf, "
+            "then fires a single shadow ray.\n"
+            "M=1: equivalent to pre-RIS single-candidate NEE.\n"
+            "M=8: standard ReSTIR-DI starting point — visible variance "
+            "drop on emitter-heavy scenes.\n"
+            "Higher M: diminishing returns; spatial / temporal reuse "
+            "(future work) would multiply effective M further.");
+    }
     ImGui::Unindent();
 
     ImGui::Spacing();

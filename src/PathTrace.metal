@@ -16,7 +16,7 @@ struct PathUniforms {
     uint     light_count;
     uint     glass_mode;
     uint     power_weighted_nee;  // 0 = uniform, 1 = power CDF
-    uint     _pad4;
+    uint     nee_ris_count;       // RIS candidate count (≥ 1)
     uint     _pad5;
     uint     _pad6;
 };
@@ -406,36 +406,49 @@ float pdf_ggx_vndf(float3 n, float3 omega_o, float3 omega_i, float roughness) {
     return D * G1_o / max(4.0 * cos_o, 1e-8);
 }
 
+// Luminance proxy for the unshadowed direct-lighting integrand. RIS
+// uses this as the resampling target distribution, and the BSDF-MIS
+// branch evaluates the same expression so both sides agree on what
+// "ideal NEE pdf" looks like.
+//
+// In solid-angle measure, the unshadowed integrand at x toward y is
+// proportional to ‖Le‖ · cos_x · cos_y / dist² — the geometry term
+// G_solid plus the BSDF-independent radiance scale. We scalarize Le
+// via Rec. 709 luminance so target_pdf is a single float that mixes
+// channel weights naturally.
+inline float nee_target_pdf_solid(float3 le, float cos_x, float cos_y,
+                                  float dist2)
+{
+    if (cos_x <= 0.0 || cos_y <= 0.0 || dist2 <= 0.0) return 0.0;
+    float Le_lum = dot(le, float3(0.299, 0.587, 0.114));
+    return Le_lum * cos_x * cos_y / dist2;
+}
+
 // Solid-angle pdf NEE would have assigned to the BSDF-sampled
 // direction that arrived at this emissive voxel — used as the "other"
-// pdf when MIS-weighting the BSDF-sampled emitter arrival.
-//
-// With power-weighted importance sampling, the per-light probability
-// is no longer constant, so we have to find which light corresponds
-// to the hit cell. Linear scan over `lights[]` is fine: emitter hits
-// are relatively rare, and the light list is bounded by the number of
-// emissive voxels in the scene (typically tens to hundreds for hand-
-// authored content).
+// pdf when MIS-weighting the BSDF-sampled emitter arrival. With RIS,
+// the "true" pdf is M · target / W_sum (depends on W_sum, which we'd
+// have to re-run RIS to know). The standard approximation is to use
+// `target_pdf` directly: at large M the effective pdf converges to
+// (target / ∫target), which is proportional to target — and MIS power
+// heuristic is scale-invariant in pdf ratios, so the un-normalized
+// target works.
 float nee_pdf_solid_for_arrival(constant PathUniforms& u,
                                 device const GpuLight* lights,
                                 int3 hit_cell,
+                                float3 n_x_prev,
                                 float3 omega,
                                 float3 n_y,
                                 float dist2)
 {
     if (u.light_count == 0u) return 0.0;
     float cos_y = dot(n_y, -omega);
-    if (cos_y <= 0.0) return 0.0;
-    if (u.power_weighted_nee == 0u) {
-        // Uniform mode: prob is the same 1/N for any light, so we can
-        // skip the lights[] scan entirely.
-        float pdf_area = (1.0 / float(u.light_count)) * (1.0 / 3.0);
-        return pdf_area * dist2 / cos_y;
-    }
+    float cos_x = dot(n_x_prev, omega);
+    if (cos_x <= 0.0 || cos_y <= 0.0) return 0.0;
     for (uint i = 0u; i < u.light_count; ++i) {
         if (all(int3(lights[i].pos.xyz) == hit_cell)) {
-            float pdf_area = lights[i].le.w * (1.0 / 3.0);
-            return pdf_area * dist2 / cos_y;
+            return nee_target_pdf_solid(lights[i].le.xyz,
+                                        cos_x, cos_y, dist2);
         }
     }
     return 0.0;
@@ -453,10 +466,20 @@ struct NEELight {
     float  pdf_solid;    // pdf_area · d² / cos_y
 };
 
-// Pick a power-weighted emissive voxel via CDF binary search, pick
-// one of the three faces oriented toward x, sample uniformly on that
-// face, trace a shadow ray. Per-light area pdf = prob[li] · (1/3);
-// pdf_solid = pdf_area · d² / cos_y.
+// Resampled importance sampling (RIS) for direct-lighting NEE. Per
+// call, draw u.nee_ris_count candidates from the source distribution
+// (power-weighted CDF or uniform, picked by power_weighted_nee), weight
+// each by target_pdf / source_pdf with target = unshadowed integrand
+// luminance, and weighted-reservoir-sample one. A single shadow ray
+// fires for the chosen sample. Returns NEELight with `pdf_solid` set
+// to the EFFECTIVE post-RIS pdf — M · target_chosen / W_sum — which
+// makes the existing nee_diffuse_mis / nee_ggx_mis math do the right
+// ReSTIR estimator without modification (1/pdf_eff factor naturally
+// becomes W_sum / (M · target_chosen), the standard RIS correction).
+//
+// At M = 1 this collapses to the prior single-candidate behavior:
+// w_sum = w_1 = target/source, so M·target/w_sum = source. Identical
+// MIS / radiance contribution as before.
 NEELight nee_sample_light(float3 x,
                           float3 n_x,
                           constant PathUniforms& u,
@@ -475,80 +498,117 @@ NEELight nee_sample_light(float3 x,
     r.pdf_solid = 0.0;
     if (u.light_count == 0u) return r;
 
-    // Pick a light. Power-weighted: CDF binary search via lights[i].pos.w
-    // (running sum, last entry = 1.0). Uniform: bare rand × N. Both
-    // produce a valid `li` in [0, light_count) and a per-light prob; the
-    // downstream pdf math is identical.
-    uint li;
-    float prob_li;
-    if (u.power_weighted_nee != 0u) {
-        float u_rand = rand1(rng);
-        uint lo = 0u;
-        uint hi = u.light_count;
-        while (lo < hi) {
-            uint mid = (lo + hi) >> 1u;
-            if (lights[mid].pos.w < u_rand) lo = mid + 1u;
-            else                            hi = mid;
+    uint M = max(1u, u.nee_ris_count);
+
+    // Reservoir state.
+    float w_sum = 0.0;
+    bool  have_chosen = false;
+    float3 chosen_omega = float3(0.0);
+    float3 chosen_le    = float3(0.0);
+    float  chosen_cos_x = 0.0;
+    float  chosen_cos_y = 0.0;
+    float  chosen_dist2 = 0.0;
+    int3   chosen_cell  = int3(0);
+    float  chosen_target = 0.0;
+
+    for (uint i = 0u; i < M; ++i) {
+        // Light selection — same source distribution as the non-RIS
+        // path. Power-weighted: CDF binary search; uniform: bare rand.
+        uint li;
+        float prob_li;
+        if (u.power_weighted_nee != 0u) {
+            float u_rand = rand1(rng);
+            uint lo = 0u;
+            uint hi = u.light_count;
+            while (lo < hi) {
+                uint mid = (lo + hi) >> 1u;
+                if (lights[mid].pos.w < u_rand) lo = mid + 1u;
+                else                            hi = mid;
+            }
+            li = min(lo, u.light_count - 1u);
+            prob_li = lights[li].le.w;
+        } else {
+            li = uint(rand1(rng) * float(u.light_count));
+            if (li >= u.light_count) li = u.light_count - 1u;
+            prob_li = 1.0 / float(u.light_count);
         }
-        li = min(lo, u.light_count - 1u);
-        prob_li = lights[li].le.w;
-    } else {
-        li = uint(rand1(rng) * float(u.light_count));
-        if (li >= u.light_count) li = u.light_count - 1u;
-        prob_li = 1.0 / float(u.light_count);
+        if (prob_li <= 0.0) continue;
+        GpuLight L = lights[li];
+
+        // Face selection — uniform over the 3 visible faces of the cell.
+        float3 corner = L.pos.xyz;
+        float3 center = corner + 0.5;
+        float3 to_x = x - center;
+        int axis = int(rand1(rng) * 3.0);
+        if (axis > 2) axis = 2;
+        float coord_axis = (axis == 0) ? to_x.x
+                         : (axis == 1) ? to_x.y : to_x.z;
+        float face_sign = coord_axis >= 0.0 ? 1.0 : -1.0;
+        float3 n_y = float3(0.0);
+        float3 y = corner;
+        float u1 = rand1(rng);
+        float u2 = rand1(rng);
+        if (axis == 0) {
+            n_y.x = face_sign;
+            y.x += face_sign > 0.0 ? 1.0 : 0.0;
+            y.y += u1; y.z += u2;
+        } else if (axis == 1) {
+            n_y.y = face_sign;
+            y.y += face_sign > 0.0 ? 1.0 : 0.0;
+            y.x += u1; y.z += u2;
+        } else {
+            n_y.z = face_sign;
+            y.z += face_sign > 0.0 ? 1.0 : 0.0;
+            y.x += u1; y.y += u2;
+        }
+
+        float3 d = y - x;
+        float dist2 = dot(d, d);
+        if (dist2 < 1e-8) continue;
+        float dist = sqrt(dist2);
+        float3 omega = d / dist;
+        float cos_x = dot(n_x, omega);
+        float cos_y = dot(n_y, -omega);
+        if (cos_x <= 0.0 || cos_y <= 0.0) continue;
+
+        // RIS weight = target / source (both in solid-angle measure).
+        // Source pdf = prob_li · (1/3) · dist² / cos_y (face-area pdf
+        // converted to solid angle); target = unshadowed integrand
+        // luminance. Equal denominators across iterations let us do
+        // weighted reservoir sampling with one rand1 per candidate.
+        float source_pdf_solid = prob_li * (1.0 / 3.0) * dist2 / cos_y;
+        float target = nee_target_pdf_solid(L.le.xyz, cos_x, cos_y, dist2);
+        if (source_pdf_solid <= 0.0 || target <= 0.0) continue;
+        float w_i = target / source_pdf_solid;
+
+        w_sum += w_i;
+        if (rand1(rng) * w_sum < w_i) {
+            chosen_omega  = omega;
+            chosen_le     = L.le.xyz;
+            chosen_cos_x  = cos_x;
+            chosen_cos_y  = cos_y;
+            chosen_dist2  = dist2;
+            chosen_cell   = int3(L.pos.xyz);
+            chosen_target = target;
+            have_chosen = true;
+        }
     }
-    GpuLight L = lights[li];
-    if (prob_li <= 0.0) return r;
-    float3 corner = L.pos.xyz;
-    float3 center = corner + 0.5;
-    float3 to_x = x - center;
 
-    int axis = int(rand1(rng) * 3.0);
-    if (axis > 2) axis = 2;
-    float coord_axis = (axis == 0) ? to_x.x : (axis == 1) ? to_x.y : to_x.z;
-    float face_sign = coord_axis >= 0.0 ? 1.0 : -1.0;
+    if (!have_chosen || w_sum <= 0.0) return r;
 
-    float3 n_y = float3(0.0);
-    float3 y = corner;
-    float u1 = rand1(rng);
-    float u2 = rand1(rng);
-    if (axis == 0) {
-        n_y.x = face_sign;
-        y.x += face_sign > 0.0 ? 1.0 : 0.0;
-        y.y += u1; y.z += u2;
-    } else if (axis == 1) {
-        n_y.y = face_sign;
-        y.y += face_sign > 0.0 ? 1.0 : 0.0;
-        y.x += u1; y.z += u2;
-    } else {
-        n_y.z = face_sign;
-        y.z += face_sign > 0.0 ? 1.0 : 0.0;
-        y.x += u1; y.y += u2;
-    }
-
-    float3 d = y - x;
-    float dist2 = dot(d, d);
-    if (dist2 < 1e-8) return r;
-    float dist = sqrt(dist2);
-    float3 omega = d / dist;
-    float cos_x = dot(n_x, omega);
-    float cos_y = dot(n_y, -omega);
-    if (cos_x <= 0.0 || cos_y <= 0.0) return r;
-
-    DDAHit s = dda_traverse(x + n_x * 1e-3, omega, u,
+    // Single shadow ray to the chosen candidate.
+    DDAHit s = dda_traverse(x + n_x * 1e-3, chosen_omega, u,
                             coarse_grid, chunk_pool, 0u);
-    int3 light_cell = int3(L.pos.xyz);
     if (!s.hit) return r;
-    if (any(s.cell_coord != light_cell)) return r;
+    if (any(s.cell_coord != chosen_cell)) return r;
 
     r.visible   = true;
-    r.omega_i   = omega;
-    r.le        = L.le.xyz;
-    r.cos_x     = cos_x;
-    r.cos_y     = cos_y;
-    r.dist2     = dist2;
-    float pdf_area = prob_li * (1.0 / 3.0);
-    r.pdf_solid = pdf_area * dist2 / cos_y;
+    r.omega_i   = chosen_omega;
+    r.le        = chosen_le;
+    r.cos_x     = chosen_cos_x;
+    r.cos_y     = chosen_cos_y;
+    r.dist2     = chosen_dist2;
+    r.pdf_solid = float(M) * chosen_target / w_sum;
     return r;
 }
 
@@ -650,6 +710,12 @@ fragment float4 pt_fragment(
     //   compete — those get full BSDF weight at emitter hits.
     float prev_bsdf_pdf = 0.0;
     bool  prev_is_delta = true;
+    // Surface normal at the previous bounce, for nee_pdf_solid_for_arrival
+    // when the BSDF-sampled ray lands on an emitter. Updated by every
+    // non-emissive scatter (overwriting it on delta bounces is harmless
+    // — those go through the prev_is_delta short-circuit and skip the
+    // pdf evaluation entirely).
+    float3 prev_normal = float3(0.0);
 
     const uint kMinBouncesBeforeRR = 2u;
 
@@ -780,6 +846,7 @@ fragment float4 pt_fragment(
                     ray_dir = cosine_hemi(kGroundNormal, rng);
                     prev_bsdf_pdf = pdf_lambert(kGroundNormal, ray_dir);
                     prev_is_delta = false;
+                    prev_normal = kGroundNormal;
                     throughput *= kGroundAlbedo;
                     continue;
                 }
@@ -808,7 +875,8 @@ fragment float4 pt_fragment(
                 float3 d = h.point - ray_origin;
                 float dist2 = dot(d, d);
                 float pdf_light = nee_pdf_solid_for_arrival(
-                    u, lights, h.cell_coord, ray_dir, n_y, dist2);
+                    u, lights, h.cell_coord, prev_normal,
+                    ray_dir, n_y, dist2);
                 float w_bsdf = mis_power(prev_bsdf_pdf, pdf_light);
                 radiance += throughput * Le * w_bsdf;
             }
@@ -981,6 +1049,12 @@ fragment float4 pt_fragment(
             prev_is_delta = false;
             throughput *= albedo;
         }
+
+        // Carry this surface's normal forward so the next iteration's
+        // emitter-arrival MIS branch can evaluate target_pdf at the
+        // right `x`. Set unconditionally — delta branches go through
+        // the prev_is_delta short-circuit and never read it.
+        prev_normal = normal;
 
         // Russian roulette after a couple of guaranteed bounces. Kill
         // paths with probability (1 - p) where p is the maximum component
