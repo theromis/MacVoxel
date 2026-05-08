@@ -230,20 +230,28 @@ float3 atmosphere_transmittance(float3 p, float3 omega) {
 
 // Nishita single-scatter sky radiance for view direction `view_dir`
 // and sun direction `sun_dir` (both unit-length, atmosphere frame =
-// grid frame since grid Z is up). `sun_irradiance` is the user's
-// per-direction sun radiance reaching the surface — we un-attenuate
-// it once by the surface-to-sun transmittance to get the
-// top-of-atmosphere radiance the integral actually wants.
+// grid frame since grid Z is up). `sun_radiance_surface` is the
+// user's per-direction sun radiance reaching the surface (already
+// divided by the sun's solid angle); `sun_cos_half_angle` lets us
+// recover the surface irradiance, which is what the in-scattering
+// integral actually wants — the sun cone integral
+// ∫_cone σ·ρ·phase·L_radiance·T dω ≈ σ·ρ·phase·L_radiance·T·Ω
+// trades a per-direction radiance for an integrated irradiance. So
+// we multiply by sun_solid_angle once on entry, then un-attenuate to
+// TOA, and use that as the in-scattering source in the integrand.
 float3 nishita_sky_radiance(float3 view_dir, float3 sun_dir,
-                            float3 sun_irradiance)
+                            float3 sun_radiance_surface,
+                            float sun_cos_half_angle)
 {
     float3 origin = float3(0.0, 0.0, kEarthRadius);
     float t_top = ray_outer_sphere_t(origin, view_dir, kAtmosphereTop);
     if (t_top <= 0.0) return float3(0.0);
-    float3 t_surface_to_sun =
-        atmosphere_transmittance(origin, sun_dir);
-    float3 sun_radiance_TOA = sun_irradiance /
-                              max(t_surface_to_sun, float3(1e-6));
+    float sun_solid_angle = 6.2831853 * (1.0 - sun_cos_half_angle);
+    float3 sun_irradiance_surface =
+        sun_radiance_surface * sun_solid_angle;
+    float3 t_surface_to_sun = atmosphere_transmittance(origin, sun_dir);
+    float3 sun_irradiance_TOA = sun_irradiance_surface /
+                                max(t_surface_to_sun, float3(1e-6));
 
     float cos_theta = dot(view_dir, sun_dir);
     float cos_theta2 = cos_theta * cos_theta;
@@ -270,7 +278,7 @@ float3 nishita_sky_radiance(float3 view_dir, float3 sun_dir,
         float3 t_to_sun = atmosphere_transmittance(p, sun_dir);
         float3 in_scatter = kRayleighSigma * density_r * phase_r
                           + float3(kMieSigmaScatter * density_m * phase_m);
-        luminance += view_t * in_scatter * t_to_sun * sun_radiance_TOA * dt;
+        luminance += view_t * in_scatter * t_to_sun * sun_irradiance_TOA * dt;
         float3 ext = kRayleighSigma * density_r
                    + float3((kMieSigmaScatter + kMieSigmaAbsorb)
                             * density_m);
@@ -1086,7 +1094,8 @@ fragment float4 pt_fragment(
             if (u.atmospheric_sky != 0u) {
                 radiance += throughput *
                     nishita_sky_radiance(ray_dir, u.sun_dir_grid,
-                                         u.sun_radiance);
+                                         u.sun_radiance,
+                                         u.sun_cos_half_angle);
             } else {
                 radiance += throughput * u.sky_color;
             }

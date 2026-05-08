@@ -79,7 +79,7 @@ struct RenderState {
     // be noisy until that lands.
     float sun_elevation_deg = 30.0f;       // 0 = horizon, 90 = zenith
     float sun_azimuth_deg = 30.0f;         // 0 = +grid-X, ccw around +grid-Z
-    float sun_angular_diameter_deg = 5.0f; // visible disc; real sun ≈ 0.53°
+    float sun_angular_diameter_deg = 30.0f;
     float sun_color[3] = {1.0f, 0.95f, 0.85f};  // sRGB warm white
     float sun_intensity = 0.0f;            // 0 = sun disabled
     // Replace the constant sky tint with single-scatter Nishita
