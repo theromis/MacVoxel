@@ -123,6 +123,7 @@ struct DisplayUniforms {
     // reset since the two modes produce visually different estimators.
     macvoxel::GlassMode _lastGlassMode;
     bool _lastPowerWeightedNee;
+    float _lastSkyIntensity;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -481,6 +482,11 @@ struct DisplayUniforms {
         _lastPowerWeightedNee = pw_nee;
         _wantsClear = YES;
     }
+    const float sky_k = macvoxel::CurrentRenderState().sky_intensity;
+    if (sky_k != _lastSkyIntensity) {
+        _lastSkyIntensity = sky_k;
+        _wantsClear = YES;
+    }
 
     if (_wantsClear) {
         _sampleCount = 0;
@@ -581,7 +587,11 @@ struct DisplayUniforms {
     u._pad1 = 0;
     u.coarse_dim = _coarseDim;
     u._pad2 = 0;
-    u.sky_color = simd::float3{0.65f, 0.75f, 0.95f};
+    {
+        const float k = std::max(0.0f,
+            macvoxel::CurrentRenderState().sky_intensity);
+        u.sky_color = simd::float3{0.65f * k, 0.75f * k, 0.95f * k};
+    }
     u._pad3 = 0.0f;
     u.frame_seed = frameSeed;
     u.max_bounces = maxBounces;

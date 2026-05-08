@@ -38,6 +38,18 @@ void DrawLightPanel() {
     }
     ImGui::Unindent();
 
+    ImGui::Spacing();
+    ImGui::PushFont(Fonts().header);
+    ImGui::TextUnformatted("Sky");
+    ImGui::PopFont();
+    ImGui::Indent();
+    // Multiplier on the hardcoded sky tint. Drop to 0 to kill ambient
+    // hemisphere fill so emitter contributions read clearly; raise
+    // above 1 for an HDR-like overcast. Replaced once the sun/sky
+    // model in Phase 14 ships.
+    ImGui::SliderFloat("Intensity", &rs.sky_intensity, 0.0f, 4.0f, "%.2f");
+    ImGui::Unindent();
+
     // Sky / sun model, power-weighted NEE, and the eventual ReSTIR
     // toggles will land here as those phases ship — keeping a single
     // home for everything that controls the light field, separate from

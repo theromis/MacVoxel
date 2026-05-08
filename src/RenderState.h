@@ -49,6 +49,13 @@ struct RenderState {
     // the 3 visible faces — the pre-P14.5.A baseline, kept as a toggle
     // so the user can A/B compare on emitter-heavy scenes.
     bool power_weighted_nee = true;
+    // Multiplier on the constant sky color the path tracer falls back
+    // to when a ray escapes the grid. 1.0 is the default tint
+    // (≈ daylight overcast, the post-P10.x default). Lowering it
+    // darkens the sky so emitter contributions read more clearly;
+    // raising it pushes toward HDR-like overcast. Stays a single
+    // float until the eventual sun/sky model lands (Phase 14).
+    float sky_intensity = 1.0f;
 };
 
 RenderState& CurrentRenderState();
