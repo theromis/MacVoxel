@@ -22,6 +22,20 @@ void DrawLightPanel() {
     // only; higher values let GI fill in but cost linearly per sample
     // (mitigated by RR after the first couple of bounces).
     ImGui::SliderInt("Bounces", &rs.max_bounces, 1, 8);
+
+    // Direct-lighting NEE distribution. Toggling this flips between the
+    // post-P14.5.A power-weighted CDF and the uniform pre-P14.5.A
+    // baseline; the accumulator resets on either edge so the comparison
+    // is fair from sample 0.
+    ImGui::Checkbox("Power-weighted NEE", &rs.power_weighted_nee);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "On: NEE picks emitters from a CDF weighted by per-light "
+            "power, so bright lights get sampled more often.\n"
+            "Off: every emitter has equal pick probability — bigger "
+            "variance on scenes with widely different light brightnesses.\n"
+            "Toggle to A/B; converged image is the same either way.");
+    }
     ImGui::Unindent();
 
     // Sky / sun model, power-weighted NEE, and the eventual ReSTIR

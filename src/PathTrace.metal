@@ -15,6 +15,10 @@ struct PathUniforms {
     uint     max_bounces;
     uint     light_count;
     uint     glass_mode;
+    uint     power_weighted_nee;  // 0 = uniform, 1 = power CDF
+    uint     _pad4;
+    uint     _pad5;
+    uint     _pad6;
 };
 
 struct GpuLight {
@@ -422,6 +426,12 @@ float nee_pdf_solid_for_arrival(constant PathUniforms& u,
     if (u.light_count == 0u) return 0.0;
     float cos_y = dot(n_y, -omega);
     if (cos_y <= 0.0) return 0.0;
+    if (u.power_weighted_nee == 0u) {
+        // Uniform mode: prob is the same 1/N for any light, so we can
+        // skip the lights[] scan entirely.
+        float pdf_area = (1.0 / float(u.light_count)) * (1.0 / 3.0);
+        return pdf_area * dist2 / cos_y;
+    }
     for (uint i = 0u; i < u.light_count; ++i) {
         if (all(int3(lights[i].pos.xyz) == hit_cell)) {
             float pdf_area = lights[i].le.w * (1.0 / 3.0);
@@ -465,19 +475,29 @@ NEELight nee_sample_light(float3 x,
     r.pdf_solid = 0.0;
     if (u.light_count == 0u) return r;
 
-    // CDF binary search. lights[i].pos.w is the running sum normalized
-    // to 1.0; pick the smallest index whose cdf is ≥ u.
-    float u_rand = rand1(rng);
-    uint lo = 0u;
-    uint hi = u.light_count;
-    while (lo < hi) {
-        uint mid = (lo + hi) >> 1u;
-        if (lights[mid].pos.w < u_rand) lo = mid + 1u;
-        else                            hi = mid;
+    // Pick a light. Power-weighted: CDF binary search via lights[i].pos.w
+    // (running sum, last entry = 1.0). Uniform: bare rand × N. Both
+    // produce a valid `li` in [0, light_count) and a per-light prob; the
+    // downstream pdf math is identical.
+    uint li;
+    float prob_li;
+    if (u.power_weighted_nee != 0u) {
+        float u_rand = rand1(rng);
+        uint lo = 0u;
+        uint hi = u.light_count;
+        while (lo < hi) {
+            uint mid = (lo + hi) >> 1u;
+            if (lights[mid].pos.w < u_rand) lo = mid + 1u;
+            else                            hi = mid;
+        }
+        li = min(lo, u.light_count - 1u);
+        prob_li = lights[li].le.w;
+    } else {
+        li = uint(rand1(rng) * float(u.light_count));
+        if (li >= u.light_count) li = u.light_count - 1u;
+        prob_li = 1.0 / float(u.light_count);
     }
-    uint li = min(lo, u.light_count - 1u);
     GpuLight L = lights[li];
-    float prob_li = L.le.w;
     if (prob_li <= 0.0) return r;
     float3 corner = L.pos.xyz;
     float3 center = corner + 0.5;

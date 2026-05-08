@@ -32,7 +32,18 @@ struct PathUniforms {
     uint32_t max_bounces;
     uint32_t light_count;
     uint32_t glass_mode;  // 0 = Probabilistic, 1 = Absorption
+    uint32_t power_weighted_nee;  // 0 = uniform NEE, 1 = power CDF
+    uint32_t _pad4;
+    uint32_t _pad5;
+    uint32_t _pad6;
 };
+// CPU and MSL `constant` PathUniforms must agree byte-for-byte, since
+// we setBytes:length:sizeof(PathUniforms). The simd float3/int3 types
+// are 16-byte slots on both sides (3-of-4 used) so the explicit `_padN`
+// scalars get an additional 12-byte auto-pad in front of every
+// 16-aligned successor — which is why this struct is 224 bytes, not
+// the naïve 64+16+16+16+16+4*8 = 160.
+static_assert(sizeof(PathUniforms) == 224, "PathUniforms size mismatch");
 
 // Per-emissive-voxel entry in the next-event-estimation light buffer.
 // Built CPU-side at doc.version change so the shader doesn't have to
@@ -111,6 +122,7 @@ struct DisplayUniforms {
     // Glass interpretation last seen — toggling forces an accumulator
     // reset since the two modes produce visually different estimators.
     macvoxel::GlassMode _lastGlassMode;
+    bool _lastPowerWeightedNee;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -464,6 +476,11 @@ struct DisplayUniforms {
         _lastGlassMode = mode;
         _wantsClear = YES;
     }
+    const bool pw_nee = macvoxel::CurrentRenderState().power_weighted_nee;
+    if (pw_nee != _lastPowerWeightedNee) {
+        _lastPowerWeightedNee = pw_nee;
+        _wantsClear = YES;
+    }
 
     if (_wantsClear) {
         _sampleCount = 0;
@@ -571,6 +588,8 @@ struct DisplayUniforms {
     u.light_count = _lightCount;
     u.glass_mode = static_cast<uint32_t>(
         macvoxel::CurrentRenderState().glass_mode);
+    u.power_weighted_nee =
+        macvoxel::CurrentRenderState().power_weighted_nee ? 1u : 0u;
 
     [enc setRenderPipelineState:_pathPipeline];
     [enc setCullMode:MTLCullModeNone];

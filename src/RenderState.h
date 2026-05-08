@@ -43,6 +43,12 @@ struct RenderState {
     int render_width = 1920;
     int render_height = 1080;
     GlassMode glass_mode = GlassMode::Probabilistic;
+    // Direct-lighting NEE distribution. On = pick lights from a CDF
+    // weighted by per-light power (default; the shipped behavior).
+    // Off = pick uniformly across the light list and uniformly across
+    // the 3 visible faces — the pre-P14.5.A baseline, kept as a toggle
+    // so the user can A/B compare on emitter-heavy scenes.
+    bool power_weighted_nee = true;
 };
 
 RenderState& CurrentRenderState();
