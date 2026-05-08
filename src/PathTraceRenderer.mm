@@ -39,8 +39,15 @@ struct PathUniforms {
 // scan the grid; `le` is the linear-space color × effective emission so
 // the shader needs no palette/material lookup at sample time.
 struct GpuLight {
-    simd::float4 pos;  // .xyz = grid-space corner of the voxel; .w unused
-    simd::float4 le;   // .xyz = albedo_linear * effective_emission; .w unused
+    simd::float4 pos;  // .xyz = grid-space corner of the voxel.
+                       // .w   = cumulative normalized sampling weight (CDF).
+                       //       Last light's .w is 1.0; binary search picks
+                       //       `li` such that cdf[li-1] < u <= cdf[li].
+    simd::float4 le;   // .xyz = albedo_linear * effective_emission.
+                       // .w   = per-light sampling probability (prob[li] =
+                       //       cdf[li] - cdf[li-1]). Pre-baked so the
+                       //       BSDF-arrives-at-emitter MIS branch reads it
+                       //       directly without re-doing the subtract.
 };
 static_assert(sizeof(GpuLight) == 32, "GpuLight size mismatch");
 
@@ -336,7 +343,46 @@ struct DisplayUniforms {
         }
     }
     _lightCount = static_cast<uint32_t>(lights.size());
-    if (lights.empty()) {
+
+    // Power-weighted importance sampling for NEE. Per-light weight =
+    // max channel of `le` (a perceptually-reasonable proxy for power
+    // when all light surfaces have the same area, which they do here:
+    // 3 visible faces × 1 unit² each per voxel). Normalized into a CDF
+    // in pos.w and per-light prob in le.w. Falls back to uniform when
+    // the total weight is zero (shouldn't happen — we only added cells
+    // with eff > 0 — but harmless guard).
+    if (_lightCount > 0) {
+        double total = 0.0;
+        std::vector<float> weights(_lightCount, 0.0f);
+        for (uint32_t i = 0; i < _lightCount; ++i) {
+            const float w = std::max({lights[i].le.x,
+                                      lights[i].le.y,
+                                      lights[i].le.z});
+            weights[i] = w;
+            total += w;
+        }
+        if (total <= 0.0) {
+            const float uniform = 1.0f / static_cast<float>(_lightCount);
+            for (uint32_t i = 0; i < _lightCount; ++i) {
+                weights[i] = 1.0f;
+                lights[i].le.w = uniform;
+                lights[i].pos.w = uniform * static_cast<float>(i + 1);
+            }
+        } else {
+            const double inv_total = 1.0 / total;
+            double running = 0.0;
+            for (uint32_t i = 0; i < _lightCount; ++i) {
+                const double prob = weights[i] * inv_total;
+                running += prob;
+                lights[i].le.w = static_cast<float>(prob);
+                lights[i].pos.w = static_cast<float>(running);
+            }
+            // Guard against fp accumulation drift past 1.0 in the
+            // last entry — binary-searching for u ∈ [0, 1] with a
+            // CDF that ends at 0.99999... would miss the last light.
+            lights[_lightCount - 1].pos.w = 1.0f;
+        }
+    } else {
         // One zero-init entry so the shader has a valid binding even
         // when no emissives exist; light_count == 0 keeps it unread.
         lights.resize(1);

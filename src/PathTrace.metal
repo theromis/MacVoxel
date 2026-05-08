@@ -18,8 +18,10 @@ struct PathUniforms {
 };
 
 struct GpuLight {
-    float4 pos;  // .xyz = grid-space corner; .w unused
-    float4 le;   // .xyz = albedo_linear * effective_emission; .w unused
+    float4 pos;  // .xyz = grid-space corner; .w = cumulative CDF for
+                 //   power-weighted importance sampling (last entry = 1.0).
+    float4 le;   // .xyz = albedo_linear * effective_emission;
+                 // .w   = per-light sampling probability (= cdf[i]-cdf[i-1]).
 };
 
 struct DisplayUniforms {
@@ -400,10 +402,19 @@ float pdf_ggx_vndf(float3 n, float3 omega_o, float3 omega_i, float roughness) {
     return D * G1_o / max(4.0 * cos_o, 1e-8);
 }
 
-// Solid-angle pdf that NEE would have given for sampling a direction
-// arriving at an emissive voxel hit, used as the "other" pdf when
-// MIS-weighting a BSDF-sampled emitter arrival.
+// Solid-angle pdf NEE would have assigned to the BSDF-sampled
+// direction that arrived at this emissive voxel — used as the "other"
+// pdf when MIS-weighting the BSDF-sampled emitter arrival.
+//
+// With power-weighted importance sampling, the per-light probability
+// is no longer constant, so we have to find which light corresponds
+// to the hit cell. Linear scan over `lights[]` is fine: emitter hits
+// are relatively rare, and the light list is bounded by the number of
+// emissive voxels in the scene (typically tens to hundreds for hand-
+// authored content).
 float nee_pdf_solid_for_arrival(constant PathUniforms& u,
+                                device const GpuLight* lights,
+                                int3 hit_cell,
                                 float3 omega,
                                 float3 n_y,
                                 float dist2)
@@ -411,8 +422,13 @@ float nee_pdf_solid_for_arrival(constant PathUniforms& u,
     if (u.light_count == 0u) return 0.0;
     float cos_y = dot(n_y, -omega);
     if (cos_y <= 0.0) return 0.0;
-    float pdf_area = 1.0 / (float(u.light_count) * 3.0);
-    return pdf_area * dist2 / cos_y;
+    for (uint i = 0u; i < u.light_count; ++i) {
+        if (all(int3(lights[i].pos.xyz) == hit_cell)) {
+            float pdf_area = lights[i].le.w * (1.0 / 3.0);
+            return pdf_area * dist2 / cos_y;
+        }
+    }
+    return 0.0;
 }
 
 // Result of importance-sampling a single emissive voxel for NEE.
@@ -427,9 +443,10 @@ struct NEELight {
     float  pdf_solid;    // pdf_area · d² / cos_y
 };
 
-// Pick a uniformly-random emissive voxel, pick one of the three faces
-// oriented toward x, sample uniformly on that face, trace a shadow ray.
-// pdf_area = 1 / (N_lights · 3 · 1.0); pdf_solid follows.
+// Pick a power-weighted emissive voxel via CDF binary search, pick
+// one of the three faces oriented toward x, sample uniformly on that
+// face, trace a shadow ray. Per-light area pdf = prob[li] · (1/3);
+// pdf_solid = pdf_area · d² / cos_y.
 NEELight nee_sample_light(float3 x,
                           float3 n_x,
                           constant PathUniforms& u,
@@ -448,9 +465,20 @@ NEELight nee_sample_light(float3 x,
     r.pdf_solid = 0.0;
     if (u.light_count == 0u) return r;
 
-    uint li = uint(rand1(rng) * float(u.light_count));
-    if (li >= u.light_count) li = u.light_count - 1u;
+    // CDF binary search. lights[i].pos.w is the running sum normalized
+    // to 1.0; pick the smallest index whose cdf is ≥ u.
+    float u_rand = rand1(rng);
+    uint lo = 0u;
+    uint hi = u.light_count;
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1u;
+        if (lights[mid].pos.w < u_rand) lo = mid + 1u;
+        else                            hi = mid;
+    }
+    uint li = min(lo, u.light_count - 1u);
     GpuLight L = lights[li];
+    float prob_li = L.le.w;
+    if (prob_li <= 0.0) return r;
     float3 corner = L.pos.xyz;
     float3 center = corner + 0.5;
     float3 to_x = x - center;
@@ -499,7 +527,7 @@ NEELight nee_sample_light(float3 x,
     r.cos_x     = cos_x;
     r.cos_y     = cos_y;
     r.dist2     = dist2;
-    float pdf_area = 1.0 / (float(u.light_count) * 3.0);
+    float pdf_area = prob_li * (1.0 / 3.0);
     r.pdf_solid = pdf_area * dist2 / cos_y;
     return r;
 }
@@ -760,7 +788,7 @@ fragment float4 pt_fragment(
                 float3 d = h.point - ray_origin;
                 float dist2 = dot(d, d);
                 float pdf_light = nee_pdf_solid_for_arrival(
-                    u, ray_dir, n_y, dist2);
+                    u, lights, h.cell_coord, ray_dir, n_y, dist2);
                 float w_bsdf = mis_power(prev_bsdf_pdf, pdf_light);
                 radiance += throughput * Le * w_bsdf;
             }
