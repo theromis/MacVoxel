@@ -40,42 +40,54 @@ Effort labels are rough: **S** ≈ a few hours, **M** ≈ a day, **L** ≈ multi
   highlight with interior-face dedupe + back-face culling. Two
   carry-overs filed for Phase 13: depth-aware occluded-voxel culling,
   and unifying AABB cut/copy/delete with the sparse selection.
+- **Phase 12 — New modeling tools.** Brush enhancements (size, shape,
+  2D / 3D), Line (Straight + Project modes), Circle (Fill + Even), Square
+  (Fill + Even), Box (Fill toggle), and Face (extrude / inset with
+  Color / Geometry seed flood, Geometry / Palette extrude color, 4 / 8
+  connectivity). Every two-click tool routes through a shared shape-
+  preview pipeline so live voxel preview + single-undo-step commit comes
+  for free; pure cell enumeration lives in `Shapes.{h,cpp}`.
+- **Phase 12.5 (foundation) — Generators engine + Ellipsoid + gizmo.**
+  Parameterized shape primitives that the user lays out via a gizmoized
+  AABB rather than drawing one cell at a time. GPU-first architecture:
+  each generator is a Metal compute kernel that scans its AABB at one
+  thread per cell, evaluates the primitive's inside-test, and atomically
+  appends qualifying cell coords to an output buffer; CPU reads the
+  count and stamps via the existing `_shapePreview` machinery so the
+  live preview / single-undo-step commit flow is shared with the shape
+  tools. Shipped: GPU compute infrastructure, the Ellipsoid kernel, the
+  Generators panel, and the full gizmo (face-arrow handles with
+  NDC-space drag projection, click-outside-to-commit, Esc to cancel,
+  per-frame change detection so panel / palette edits re-run the engine
+  in place). Cylinder / Cone / Pyramid / Maze / Perlin / Fractal — and
+  the user-authored MSL shader escape hatch — slot in on top of this
+  without architecture changes.
 
-## Phase 12 — New modeling tools
+## Phase 12.5 (rest) — Additional generator kinds
 
-Each is a distinct tool; ordered roughly by usefulness. **L total, but
-shippable per-tool.**
+The engine + gizmo are done; each new kind is one MSL kernel function,
+one `Kind` enum entry, one entry in `KernelNameForKind`, one panel
+button, and any per-kind fields on `Params`.
 
-- **Pencil tool.** Modification to current voxel placement. Add options for:
-	- Brush size
-	- Brush shape (circle or square)
-	- 2D/3D (2D is a one-voxel-thick circle or square of the given size, 3D is a sphere/cube)
-	
-- **Line tool (S–M).** Two-click point-to-point. *Straight* mode = 3D Bresenham
-  through cells; *project* mode = locks to nearest axis plane.
-- **Circle tool (S–M).** Two-click center-to-edge. First click sets the
-  center; second sets a point on the edge (defines the radius). Options:
-  *Fill* (on by default) — filled disc that includes the center vs. an
-  outline-only ring that excludes it. *Even* (off by default) — even
-  diameter (center sits between cells) vs. odd (center on a cell).
-  Same Straight / Project axis-handling questions as Line.
-- **Square tool (S).** Two-click center-to-edge. First click sets the
-  center; second sets a corner (or edge midpoint — TBD which feels more
-  natural). Same *Fill* (filled vs. outline) and *Even* (even vs. odd
-  side length) options as Circle.
-- **Face tool (M).** Pick a coplanar contiguous region; extrude / inset by a
-  drag distance. Floods on the same material + same axis.
-- **Box / volume tool (S).** Two-click cuboid. Filled or hollow toggle.
-
-## Phase 12.5 — Insertable primitives
-
-Parametric shapes with an edit gizmo, committed to voxels on confirm. **L total.**
-
-- **Sphere / cylinder / cone / pyramid (M each).** Each gets a parameter set
-  (radius, height, axis…) and an in-scene gizmo.
-- **Commit-to-voxels on deselect.** The primitive becomes ordinary voxels.
-- **(Stretch) Procedural shader tools.** Noise terrain, spiral/coil generators
-  driven by small MSL snippets. **L.**
+- **Cylinder (S).** Axis (X / Y / Z), inscribed in the AABB on the two
+  perpendicular axes. Optional: hollow / wall thickness.
+- **Cone (S).** Axis + apex direction (which face the apex points
+  toward). Tapers linearly from base radius to 0.
+- **Pyramid (S).** Like Cone but Chebyshev-norm cross-section (square
+  base) instead of Euclidean.
+- **Maze (M).** Recursive backtracker or Wilson's, seeded into the
+  AABB's interior. Needs a seed field on `Params` and an RNG primitive
+  in MSL (PCG or wyrand fits in a kernel).
+- **Perlin / value noise (M).** Frequency, octaves, threshold, seed.
+  Threshold + signed noise gives terrain-like fills.
+- **Fractal (M).** Iterations, ratio, seed. Sierpinski-style or
+  Mandelbrot-bulb cross-section.
+- **(Stretch) User-authored MSL shader generator (L).** Runtime
+  compile via `MTLLibrary newLibraryWithSource:`, source editor in the
+  panel, error reporting routed back into the editor, hot reload on
+  edit. Standard "fill this function" stub the user implements.
+  Independent of the built-in kernels — they all dispatch through the
+  same engine.
 
 ## Phase 13 — Selection upgrades
 
@@ -170,7 +182,9 @@ phase boundary, not a side change.
 
 ## Suggested next-up
 
-**Phase 12 — modeling tools.** The renderer and palette UX are in a good
-spot; the next visible-every-session win is making it faster to *build*
-voxel models. Line and box tools are small commits each; face/extrude
-unlocks the kind of moves that turn a sketch into a finished shape.
+**Cylinder + Cone + Pyramid generators.** The Generators engine and gizmo
+are working end-to-end on Ellipsoid. Adding three more pure-math kernels
+on top of the existing dispatch is small, demonstrably useful, and proves
+out the "any new kind is one kernel function" claim before getting into
+the bigger projects (Maze / Perlin RNG, user-shader runtime compile, or
+Phase 13 selection upgrades).

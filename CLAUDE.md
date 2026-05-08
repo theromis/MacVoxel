@@ -26,14 +26,32 @@ src/
 ├── Material.h             Per-palette-entry { type, roughness, metallic,
 │                          emission, transparency, ior }.
 ├── VoxFile.{h,cpp}        MagicaVoxel .vox load/save. Scene graph + MATL.
+├── CellKey.h              21-bit-per-axis pack/unpack for the int64 cell
+│                          keys used by Raycast, EditHistory, the shape
+│                          preview map, and the selection overlay.
 ├── Raycast.{h,cpp}        CPU DDA for picking (mouse-to-voxel).
+├── Shapes.{h,cpp}         Pure C++ cell enumerators: Bresenham3D,
+│                          ProjectInPlane / OffsetInPlane, planar disc /
+│                          square / box / coplanar-face flood. The Line /
+│                          Circle / Square / Box / Face tools' geometry
+│                          all lives here.
 ├── RaycastRenderer.mm     Interactive GPU ray-cast renderer used during
 │                          editing. Coarse-grid + chunk-pool, hierarchical
 │                          empty-space skipping in the shader.
 ├── PathTraceRenderer.mm   Path tracer (render mode). Same GPU layout as the
 │                          ray-cast renderer; trades responsiveness for
 │                          progressive accumulation, GGX, Beer-Lambert, etc.
+├── CliRender.mm           Headless `MacVoxel render` subcommand. Bypasses
+│                          NSApplicationMain and drives PathTraceRenderer
+│                          directly for deterministic CLI/CI renders.
+├── Generators.h           Pure-C++ types for parameterized shape primitives:
+│                          Bounds3i, Kind, Params.
+├── GeneratorEngine.{h,mm} GPU compute runner — one MTLComputePipelineState
+│                          per Kind, atomic-append output buffer, sync
+│                          dispatch + readback. Each kernel is a thread-per-
+│                          cell scan over the AABB.
 ├── ToolState.{h,cpp}      Active tool, brush size, palette index, etc.
+├── GeneratorState.{h,cpp} Active generator kind + Params (mirrors ToolState).
 ├── EditHistory.{h,cpp}    Stroke-grained undo/redo.
 ├── Selection.{h,cpp}      Box selection.
 ├── Clipboard.{h,cpp}      Cut / copy / paste of selected regions.
@@ -41,7 +59,10 @@ src/
 └── ui/
     ├── ModelPanel.cpp     Stats + render-mode toggle.
     ├── ToolPanel.cpp      Tool / brush UI.
-    ├── PalettePanel.cpp   Color + material editor.
+    ├── PalettePanel.cpp   Color picker.
+    ├── RenderPanel.cpp    Render-mode controls + Material editor for the
+    │                      currently-selected palette slots.
+    ├── GeneratorPanel.cpp Generator kind picker + per-kind parameter UI.
     ├── Fonts.cpp          Loads SF from /System at 2× for Retina.
     └── Theme.cpp          Apple-pro-app-inspired ImGui theme.
 ```
@@ -180,6 +201,56 @@ Key invariants in the shader:
 
 These are all real upgrades but each is a project. Don't slip them in alongside
 unrelated changes.
+
+## Generators (P12.5)
+
+Parameterized shape primitives that the user lays out via a gizmoized AABB
+rather than drawing one cell at a time. The architecture is GPU-first: each
+generator is a Metal compute kernel that scans its AABB at one thread per
+cell, evaluates the primitive's inside-test, and atomically appends the
+qualifying cell coords to an output buffer. The CPU reads the count, copies
+`count × 12 bytes` directly into a `std::vector<shapes::Vec3i>` (PackedCell
+in MSL = 3×int32, identical layout), and stamps the cells through the
+existing `_shapePreview` machinery so the live preview / single-undo-step
+commit path is shared with the shape tools.
+
+Lives in:
+- `src/Generators.h` — pure-C++ types (`Bounds3i`, `Kind`, `Params`).
+- `src/GeneratorEngine.{h,mm}` — Obj-C++ engine. Holds one
+  `MTLComputePipelineState` per `Kind`, a grow-only output buffer, an
+  atomic counter buffer (zeroed via shared-storage CPU write — no blit
+  needed on Apple Silicon's unified memory). Synchronous dispatch + wait
+  for now; double-buffered async is the right move if drag rates demand
+  it.
+- `src/GeneratorState.{h,cpp}` — singleton holding the active kind +
+  params. Mirrors `ToolState`.
+- `src/ui/GeneratorPanel.cpp` — kind picker + parameter UI.
+- `src/VoxelView.mm` — the gizmo state machine: click-drag-out lays the
+  initial AABB (live preview during drag); mouseup leaves the box visible
+  with face-normal arrow handles; clicking a handle drags that face along
+  its outward normal (NDC-space projection, same trick as the Face tool's
+  `faceDragVoxelsAtCursor:`); clicking outside any handle commits the
+  preview through `EditHistory` as a single op; Esc cancels and rolls
+  back.
+
+Adding a new built-in is small: write the kernel function in
+`kGenLibrarySource` (output protocol = thread-per-cell, atomic append on
+match), add the enum entry, add a name in `KernelNameForKind`, add a panel
+button, and any per-kind parameters go on `Params`. The eventual
+user-authored shader path plugs into the same dispatch — that's a richer
+project (runtime MSL compile + source editor + error reporting + hot
+reload) but the engine doesn't need restructuring for it.
+
+Invariants:
+- Generators don't touch the document, AppKit, or ImGui. They take
+  `(Bounds3i, Params)` and emit cells. Keeps the GPU-shader escape hatch
+  open and the engine unit-testable in principle.
+- The engine's output buffer grows 2× whenever a request exceeds capacity
+  (4096-cell floor on first allocation), so a drag through bigger and
+  bigger bounds doesn't realloc every frame.
+- The gizmo's per-frame change detector (active kind / bounds / palette
+  index) is what re-runs the engine when the user tweaks the panel — no
+  ImGui callback wiring; just compare-and-refresh in the per-frame draw.
 
 ## Things that look weird but are intentional
 
