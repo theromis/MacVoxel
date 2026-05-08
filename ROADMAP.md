@@ -216,6 +216,27 @@ phase boundary, not a side change.
 
 ---
 
+## Known issues
+
+- **File > Open Recent submenu stays empty.** The framework wiring
+  is in place: `CFBundleDocumentTypes` declares `.vox`, the menu has
+  the standard "Clear Menu" item with `clearRecentDocuments:` action,
+  and `noteNewRecentDocumentURL:` fires on every successful
+  `openDocumentAtURL:` and `saveDocumentAs:`. Despite all that,
+  nothing shows up in the submenu and nothing persists to
+  `defaults read dev.paulstarr.MacVoxel`. Likely culprit: the
+  recents auto-populate path in AppKit specifically expects
+  `NSDocument` architecture, and `NSDocumentController` only acts
+  as the recents store when it's been activated by a real document
+  open. Possible fixes when revisited: (a) adopt a minimal
+  `NSDocument` subclass for `.vox`, (b) maintain the recents list
+  ourselves in `NSUserDefaults` and rebuild the submenu via an
+  `NSMenuDelegate menuNeedsUpdate:` callback. The Finder-side
+  `application:openURLs:` callback works, so the file-open half is
+  fine — only the menu surface is broken.
+
+---
+
 ## Suggested next-up
 
 Pure-math primitives are done; the natural next forks are:
