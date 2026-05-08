@@ -65,7 +65,41 @@ void DrawLightPanel() {
     // hemisphere fill so emitter contributions read clearly; raise
     // above 1 for an HDR-like overcast. Replaced once the sun/sky
     // model in Phase 14 ships.
-    ImGui::SliderFloat("Intensity", &rs.sky_intensity, 0.0f, 4.0f, "%.2f");
+    ImGui::SliderFloat("Intensity##sky", &rs.sky_intensity, 0.0f, 4.0f,
+                       "%.2f");
+    ImGui::Unindent();
+
+    ImGui::Spacing();
+    ImGui::PushFont(Fonts().header);
+    ImGui::TextUnformatted("Sun");
+    ImGui::PopFont();
+    ImGui::Indent();
+    // Direction is exposed in elevation/azimuth (degrees) since
+    // sliding "X / Y / Z" components of a normalized vector is fiddly
+    // — both axes wrap intuitively. Elevation = 0 lays the sun on the
+    // horizon, 90 sticks it at zenith. Below-horizon sun is allowed
+    // (negative elevation) but contributes nothing meaningful since
+    // the only currently-visible-via-sun rays are those that escape
+    // upward to the sky.
+    ImGui::SliderFloat("Elevation",
+                       &rs.sun_elevation_deg, -90.0f, 90.0f, "%.1f°");
+    ImGui::SliderFloat("Azimuth",
+                       &rs.sun_azimuth_deg, 0.0f, 360.0f, "%.1f°");
+    ImGui::SliderFloat("Angular size",
+                       &rs.sun_angular_diameter_deg, 0.1f, 30.0f, "%.2f°");
+    ImGui::ColorEdit3("Color", rs.sun_color);
+    // Logarithmic so the slider feels right both for a stylized sun
+    // (intensity 1–10) and a physically-plausible one (100+).
+    ImGui::SliderFloat("Intensity##sun", &rs.sun_intensity, 0.0f, 200.0f,
+                       "%.2f", ImGuiSliderFlags_Logarithmic);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Multiplier on the linear-space sun colour. 0 disables the "
+            "sun entirely (default). Until NEE-for-sun ships, surfaces "
+            "lit primarily by a small sun will be noisy — the sun is "
+            "currently only reached via random BSDF samples that happen "
+            "to point into its angular cone.");
+    }
     ImGui::Unindent();
 
     // Sky / sun model, power-weighted NEE, and the eventual ReSTIR

@@ -19,6 +19,10 @@ struct PathUniforms {
     uint     nee_ris_count;       // RIS candidate count (≥ 1)
     uint     _pad5;
     uint     _pad6;
+    float3   sun_dir_grid;        // grid-space, unit-length
+    float    sun_cos_half_angle;  // cos(angular_diameter / 2)
+    float3   sun_radiance;        // linear color × intensity
+    float    _pad7;
 };
 
 struct GpuLight {
@@ -850,6 +854,16 @@ fragment float4 pt_fragment(
                     continue;
                 }
             }
+            // Sun disc: the ray escaped to the sky; check whether its
+            // direction lies inside the sun cone. sun_radiance is
+            // (0,0,0) when intensity is 0, so this is a no-op for the
+            // disabled state. NEE-for-sun is a follow-up — until then,
+            // surfaces lit "by the sun" only get its contribution
+            // through random BSDF samples that happen to hit the cone,
+            // so small suns will read as noisy.
+            if (dot(ray_dir, u.sun_dir_grid) >= u.sun_cos_half_angle) {
+                radiance += throughput * u.sun_radiance;
+            }
             radiance += throughput * u.sky_color;
             break;
         }
@@ -1004,7 +1018,7 @@ fragment float4 pt_fragment(
                         ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
                         medium_mat = h.cell_val;
                         medium_entry = h.point;
-                        // Absorption mode caps the "clear" end at 0.8
+                        // Absorption mode caps the "clear" end at 0.9
                         // rather than full white so even nominally-
                         // clear glass keeps a per-voxel Beer-Lambert
                         // factor. That attenuates the back-face
@@ -1012,7 +1026,7 @@ fragment float4 pt_fragment(
                         // two-medium-traversal path so the ghost reads
                         // as a clearly-fainter copy of the primary.
                         medium_albedo = (u.glass_mode == 1u)
-                            ? mix(albedo, float3(0.8), trans)
+                            ? mix(albedo, float3(0.9), trans)
                             : albedo;
                         prev_is_delta = true;
                     }

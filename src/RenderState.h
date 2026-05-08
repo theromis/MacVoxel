@@ -65,6 +65,23 @@ struct RenderState {
     // raising it pushes toward HDR-like overcast. Stays a single
     // float until the eventual sun/sky model lands (Phase 14).
     float sky_intensity = 1.0f;
+    // Sun disc — a directional emitter visible in the sky-miss path
+    // when the escaping ray's direction lies within
+    // `sun_angular_diameter_deg / 2` of `sun_direction`. Off by default
+    // (intensity = 0) so existing scenes are unchanged. Position is
+    // expressed in elevation/azimuth so the UI feels natural; the path
+    // tracer consumes a pre-normalised grid-space direction. Color is
+    // sRGB; the renderer decodes to linear and premultiplies by
+    // intensity before upload.
+    //
+    // Direct (NEE) sampling of the sun is a follow-up — the current
+    // path is BSDF-only, so surfaces lit primarily by a small sun will
+    // be noisy until that lands.
+    float sun_elevation_deg = 30.0f;       // 0 = horizon, 90 = zenith
+    float sun_azimuth_deg = 30.0f;         // 0 = +grid-X, ccw around +grid-Z
+    float sun_angular_diameter_deg = 5.0f; // visible disc; real sun ≈ 0.53°
+    float sun_color[3] = {1.0f, 0.95f, 0.85f};  // sRGB warm white
+    float sun_intensity = 0.0f;            // 0 = sun disabled
 };
 
 RenderState& CurrentRenderState();

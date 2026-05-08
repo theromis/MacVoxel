@@ -36,14 +36,18 @@ struct PathUniforms {
     uint32_t nee_ris_count;       // RIS candidate count (≥ 1)
     uint32_t _pad5;
     uint32_t _pad6;
+    simd::float3 sun_dir_grid;    // grid-space, unit-length
+    float sun_cos_half_angle;     // cos(angular_diameter / 2)
+    simd::float3 sun_radiance;    // linear-space color × intensity
+    float _pad7;
 };
 // CPU and MSL `constant` PathUniforms must agree byte-for-byte, since
 // we setBytes:length:sizeof(PathUniforms). The simd float3/int3 types
 // are 16-byte slots on both sides (3-of-4 used) so the explicit `_padN`
 // scalars get an additional 12-byte auto-pad in front of every
-// 16-aligned successor — which is why this struct is 224 bytes, not
-// the naïve 64+16+16+16+16+4*8 = 160.
-static_assert(sizeof(PathUniforms) == 224, "PathUniforms size mismatch");
+// 16-aligned successor. The trailing sun_* group adds another 64 bytes
+// (two float3+float pairs at 32 bytes each) → 288 total.
+static_assert(sizeof(PathUniforms) == 288, "PathUniforms size mismatch");
 
 // Per-emissive-voxel entry in the next-event-estimation light buffer.
 // Built CPU-side at doc.version change so the shader doesn't have to
@@ -125,6 +129,9 @@ struct DisplayUniforms {
     bool _lastPowerWeightedNee;
     float _lastSkyIntensity;
     int _lastNeeRisCount;
+    // Hash of the sun parameters (elev / azim / diameter / color /
+    // intensity). Cheaper to fingerprint than to compare each field.
+    uint64_t _lastSunHash;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -493,6 +500,27 @@ struct DisplayUniforms {
         _lastNeeRisCount = ris_m;
         _wantsClear = YES;
     }
+    {
+        const auto& rs = macvoxel::CurrentRenderState();
+        uint64_t h = 0xcbf29ce484222325ull;  // FNV-1a 64
+        auto mix = [&h](float v) {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &v, sizeof(bits));
+            h ^= bits;
+            h *= 0x100000001b3ull;
+        };
+        mix(rs.sun_elevation_deg);
+        mix(rs.sun_azimuth_deg);
+        mix(rs.sun_angular_diameter_deg);
+        mix(rs.sun_color[0]);
+        mix(rs.sun_color[1]);
+        mix(rs.sun_color[2]);
+        mix(rs.sun_intensity);
+        if (h != _lastSunHash) {
+            _lastSunHash = h;
+            _wantsClear = YES;
+        }
+    }
 
     if (_wantsClear) {
         _sampleCount = 0;
@@ -608,6 +636,31 @@ struct DisplayUniforms {
         macvoxel::CurrentRenderState().power_weighted_nee ? 1u : 0u;
     u.nee_ris_count = static_cast<uint32_t>(std::max(
         1, macvoxel::CurrentRenderState().nee_ris_count));
+    {
+        const auto& rs = macvoxel::CurrentRenderState();
+        // Convert UI elevation/azimuth (degrees) to a unit-length
+        // grid-space direction. Grid Z is up — elevation tilts off the
+        // horizon plane, azimuth rotates around grid Z. (0°, 0°) points
+        // along +grid-X.
+        const float elev = rs.sun_elevation_deg * (3.14159265f / 180.0f);
+        const float azim = rs.sun_azimuth_deg   * (3.14159265f / 180.0f);
+        const float ce = std::cos(elev);
+        u.sun_dir_grid = simd::float3{
+            ce * std::cos(azim), ce * std::sin(azim), std::sin(elev)};
+        u.sun_cos_half_angle = std::cos(
+            std::max(0.0f, rs.sun_angular_diameter_deg) * 0.5f
+            * (3.14159265f / 180.0f));
+        // sRGB → linear before multiplying by intensity, so HDR sun
+        // works in the same colour space as the path tracer's
+        // throughput accumulation.
+        const float intensity = std::max(0.0f, rs.sun_intensity);
+        u.sun_radiance = simd::float3{
+            std::pow(rs.sun_color[0], 2.2f) * intensity,
+            std::pow(rs.sun_color[1], 2.2f) * intensity,
+            std::pow(rs.sun_color[2], 2.2f) * intensity,
+        };
+        u._pad7 = 0.0f;
+    }
 
     [enc setRenderPipelineState:_pathPipeline];
     [enc setCullMode:MTLCullModeNone];
