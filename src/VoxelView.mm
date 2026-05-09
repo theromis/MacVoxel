@@ -22,6 +22,8 @@
 #include "CellKey.h"
 #include "Document.h"
 #include "EditHistory.h"
+#include "FloatingBuffer.h"
+#include "FloatingBufferOps.h"
 #include "GeneratorState.h"
 #include "Raycast.h"
 #include "RenderState.h"
@@ -133,16 +135,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // sparse sel.voxels list with every occupied cell inside.
     Vec3i _boxSelectAnchor;
     // MoveSelect (Cmd-drag on a selected voxel = move the selection in
-    // the click face's tangent plane). _moveSourceCells is the snapshot
-    // of (cell, palette) at drag start — used to clear sources and write
-    // targets each frame. _movePreview maps every cell we've touched to
-    // its pre-drag value so we can roll back the live preview between
-    // frames; on mouseUp it gets folded into a single EditHistory op.
-    std::vector<std::pair<std::array<int32_t, 3>, uint8_t>> _moveSourceCells;
-    std::unordered_map<int64_t, uint8_t> _movePreview;
-    Vec3i _moveCurrentOffset;
+    // the click face's tangent plane). The actual lift / commit is
+    // delegated to the FloatingBuffer; we just track the drag plane
+    // and the offset value at click time so each frame can compute a
+    // new absolute offset from the cumulative cursor delta.
     int _moveAxis;
     simd::float3 _moveAnchorGrid;
+    Vec3i _moveStartOffset;
     Vec3i _lastDragEditCell;
     NSPoint _lastDragLocation;
     NSPoint _hoverWindowPoint;
@@ -213,6 +212,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     int _genActiveDragFace;
     NSPoint _genHandleStartCursor;
     macvoxel::generators::Bounds3i _genHandleStartBounds;
+    // Tracks transitions for auto-committing the floating buffer:
+    // switching tools / entering render mode / saving / opening etc.
+    // are all "the user moved on" gestures, so we drop whatever's
+    // floating before letting the new context see a stale buffer.
+    macvoxel::ToolKind _lastToolForFB;
+    bool _lastPathTracedForFB;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -546,6 +551,23 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
     if (doc != nullptr) {
+        // Auto-commit the floating buffer on "the user moved on"
+        // gestures. Tool switch + render-mode toggle are the ones
+        // we can detect from the per-frame draw; mouseDown handles
+        // "user clicked with a non-move gesture", and AppDelegate
+        // handles save / open / new / deselect.
+        macvoxel::FloatingBuffer& fb_t = macvoxel::CurrentFloatingBuffer();
+        const macvoxel::ToolKind cur_tool = macvoxel::CurrentTool().tool;
+        const bool cur_pt = macvoxel::CurrentRenderState().path_traced;
+        if (fb_t.active) {
+            if (cur_tool != _lastToolForFB ||
+                (cur_pt && !_lastPathTracedForFB)) {
+                macvoxel::CommitFloatingBuffer(*doc);
+            }
+        }
+        _lastToolForFB = cur_tool;
+        _lastPathTracedForFB = cur_pt;
+
         macvoxel::RenderStats stats;
         stats.chunk_count = [_raycastRenderer lastChunkCount];
         stats.gpu_bytes = [_raycastRenderer lastGPUBytes];
@@ -792,10 +814,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         // Cmd-drag on a selected voxel takes over for the duration of
         // the gesture; tryBeginMoveSelectAtPoint: set _dragMode for us.
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Marquee) {
+        [self autoCommitFloatingBuffer];
         _dragMode = DragMode::Marquee;
         _marqueeAnchorWindow = event.locationInWindow;
         _marqueeCurrentWindow = event.locationInWindow;
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::BoxSelect) {
+        [self autoCommitFloatingBuffer];
         Vec3i pick;
         if ([self pickGridCellAtPoint:event.locationInWindow into:&pick]) {
             _boxSelectAnchor = pick;
@@ -813,6 +837,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             _dragMode = DragMode::None;
         }
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::FloodSelect) {
+        [self autoCommitFloatingBuffer];
         // Flood select fires entirely on mouseDown — there's no drag
         // semantic. A click on an occupied voxel becomes the seed; an
         // empty-space click clears the selection (lets the user undo
@@ -829,6 +854,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                macvoxel::CurrentTool().tool == macvoxel::ToolKind::Square ||
                macvoxel::CurrentTool().tool == macvoxel::ToolKind::Box ||
                macvoxel::CurrentTool().tool == macvoxel::ToolKind::Generator) {
+        [self autoCommitFloatingBuffer];
         // Click-and-drag shape tools — anchor on mouseDown, preview while
         // dragging, commit on mouseUp at the release point.
         const macvoxel::ToolMode mode = hasCommand ? macvoxel::ToolMode::Remove
@@ -867,6 +893,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             _dragMode = DragMode::None;
         }
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Face) {
+        [self autoCommitFloatingBuffer];
         // Face tool: pick the clicked face, run a flood fill on the seed
         // plane, then enter Shape drag for live extrude / inset preview.
         Vec3i seed;
@@ -904,6 +931,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         // the live drag distance.
         [self refreshShapePreview];
     } else {
+        [self autoCommitFloatingBuffer];
         _dragMode = DragMode::Paint;
         _paintMode = hasCommand ? macvoxel::ToolMode::Remove
                                 : macvoxel::CurrentTool().mode;
@@ -1152,11 +1180,31 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                                     -ray_dir_world.z,
                                     ray_dir_world.y};
 
-    macvoxel::RayHit hit;
-    if (macvoxel::Raycast(doc->grid, ray_origin_grid, ray_dir_grid, 4096.0f, &hit)) {
-        outCell->x = hit.x;
-        outCell->y = hit.y;
-        outCell->z = hit.z;
+    // Match the GPU dual-volume DDA: raycast both the document grid
+    // and (if active) the floating buffer, take whichever the ray hits
+    // first. Without this, Cmd-drag on a buffer that's been moved off
+    // its lifted-from doc cells fails because the picker can't see
+    // them — they exist only in the buffer.
+    macvoxel::RayHit hit_doc, hit_buf;
+    bool got_doc = macvoxel::Raycast(doc->grid, ray_origin_grid, ray_dir_grid,
+                                     4096.0f, &hit_doc);
+    bool got_buf = false;
+    const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    if (fb.active && !fb.grid.empty()) {
+        const simd::float3 origin_buf{
+            ray_origin_grid.x - static_cast<float>(fb.offset_x),
+            ray_origin_grid.y - static_cast<float>(fb.offset_y),
+            ray_origin_grid.z - static_cast<float>(fb.offset_z),
+        };
+        got_buf = macvoxel::Raycast(fb.grid, origin_buf, ray_dir_grid,
+                                    4096.0f, &hit_buf);
+    }
+    if (got_doc || got_buf) {
+        const bool from_buf = got_buf && (!got_doc || hit_buf.t < hit_doc.t);
+        const macvoxel::RayHit& hit = from_buf ? hit_buf : hit_doc;
+        outCell->x = hit.x + (from_buf ? fb.offset_x : 0);
+        outCell->y = hit.y + (from_buf ? fb.offset_y : 0);
+        outCell->z = hit.z + (from_buf ? fb.offset_z : 0);
         return YES;
     }
     if (std::abs(ray_dir_grid.z) < 1e-6f) return NO;
@@ -1398,12 +1446,15 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
 // MoveSelect: Cmd-drag on a selected voxel translates the whole
 // selection in the plane of the clicked face, snapped to integer
-// voxel offsets. Returns YES if the gesture took ownership of the
-// drag (caller does not need to set _dragMode); NO to let normal
-// click handling proceed.
+// voxel offsets. The selection is lifted into the FloatingBuffer if
+// not already there (paste / earlier drag may have lifted it
+// already), and the per-frame work is just an integer offset bump —
+// no document mutation, no chunk dirty queue. Returns YES if the
+// gesture took ownership of the drag.
 - (BOOL)tryBeginMoveSelectAtPoint:(NSPoint)windowPoint {
-    macvoxel::Selection& sel = macvoxel::CurrentSelection();
-    if (!sel.active || sel.voxels.empty()) return NO;
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return NO;
 
     Vec3i cell;
     int axis = 2;
@@ -1413,26 +1464,38 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                           color:&color]) {
         return NO;
     }
-    // Click has to land on a voxel that's actually part of the
-    // selection — otherwise the gesture is ambiguous and we just let
-    // it fall through to a no-op.
-    bool found = false;
-    for (const auto& v : sel.voxels) {
-        if (v[0] == cell.x && v[1] == cell.y && v[2] == cell.z) {
-            found = true;
-            break;
+
+    macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    if (!fb.active) {
+        // Buffer is not floating yet → lift the on-grid selection into
+        // it. Click membership has to be against sel.voxels (the cells
+        // that the user can actually see on the document grid).
+        macvoxel::Selection& sel = macvoxel::CurrentSelection();
+        if (!sel.active || sel.voxels.empty()) return NO;
+        bool found = false;
+        for (const auto& v : sel.voxels) {
+            if (v[0] == cell.x && v[1] == cell.y && v[2] == cell.z) {
+                found = true; break;
+            }
         }
+        if (!found) return NO;
+        macvoxel::LiftSelectionToFloating(*doc);
+        if (!fb.active) return NO;  // failsafe: lift had nothing to do
+    } else {
+        // Buffer already active (e.g., from a paste). Click has to
+        // land on one of the buffer's cells in their currently-rendered
+        // world position.
+        const int32_t bx = cell.x - fb.offset_x;
+        const int32_t by = cell.y - fb.offset_y;
+        const int32_t bz = cell.z - fb.offset_z;
+        if (fb.grid.Get(bx, by, bz) == 0) return NO;
     }
-    if (!found) return NO;
 
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) return NO;
-
-    // The drag plane is the outward face of the clicked cell. The
-    // anchor is wherever the camera ray hits that plane — we compute
-    // it once and re-intersect on each frame to derive the integer
-    // voxel offset.
+    // Drag plane: the outward face of the clicked cell in *world*
+    // coords. The anchor is the camera-ray hit on that plane; we
+    // reuse it on every drag frame so the cursor delta translates
+    // 1:1 to a voxel offset regardless of where the user moves to
+    // along the in-plane axes.
     const float plane_coord = (axis == 0)
         ? (sign > 0 ? static_cast<float>(cell.x + 1) : static_cast<float>(cell.x))
         : (axis == 1)
@@ -1444,36 +1507,16 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         return NO;
     }
 
-    // Snapshot the selection's current cells with their palette
-    // indices. We deliberately read from the live grid (not from any
-    // cached colour) so an in-flight stroke that recoloured a voxel
-    // still moves the right value.
-    _moveSourceCells.clear();
-    _moveSourceCells.reserve(sel.voxels.size());
-    for (const auto& v : sel.voxels) {
-        const uint8_t pal = doc->grid.Get(v[0], v[1], v[2]);
-        if (pal == 0) continue;  // selection drifted out of date — skip
-        _moveSourceCells.push_back({{v[0], v[1], v[2]}, pal});
-    }
-    if (_moveSourceCells.empty()) return NO;
-
     _moveAxis = axis;
     _moveAnchorGrid = anchor;
-    _moveCurrentOffset = Vec3i{0, 0, 0};
-    _movePreview.clear();
-    macvoxel::CurrentHistory().BeginOp();
-    // Snapshot the marquee at its pre-drag position so undo can put
-    // both the voxels and the highlight back together.
-    macvoxel::CurrentHistory().RecordSelectionPre(sel);
-
+    _moveStartOffset = Vec3i{fb.offset_x, fb.offset_y, fb.offset_z};
     _dragMode = DragMode::MoveSelect;
     return YES;
 }
 
 - (void)updateMoveSelectAtPoint:(NSPoint)windowPoint {
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) return;
+    macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    if (!fb.active) return;
 
     const float plane_coord = (_moveAxis == 0) ? _moveAnchorGrid.x
                             : (_moveAxis == 1) ? _moveAnchorGrid.y
@@ -1481,110 +1524,48 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     simd::float3 hit;
     if (![self gridPlaneIntersect:windowPoint axis:_moveAxis coord:plane_coord
                           output:&hit]) {
-        // Camera grazed the plane; ignore this event rather than
-        // popping the offset to whatever bogus huge t the math gave.
+        // Grazing ray — leave the offset where it was rather than
+        // jumping to the bogus huge t the math gave.
         return;
     }
 
-    Vec3i offset = {0, 0, 0};
     auto round_to_int = [](float f) -> int32_t {
         return static_cast<int32_t>(std::lround(f));
     };
-    if (_moveAxis != 0) offset.x = round_to_int(hit.x - _moveAnchorGrid.x);
-    if (_moveAxis != 1) offset.y = round_to_int(hit.y - _moveAnchorGrid.y);
-    if (_moveAxis != 2) offset.z = round_to_int(hit.z - _moveAnchorGrid.z);
+    int32_t nx = _moveStartOffset.x;
+    int32_t ny = _moveStartOffset.y;
+    int32_t nz = _moveStartOffset.z;
+    if (_moveAxis != 0) nx += round_to_int(hit.x - _moveAnchorGrid.x);
+    if (_moveAxis != 1) ny += round_to_int(hit.y - _moveAnchorGrid.y);
+    if (_moveAxis != 2) nz += round_to_int(hit.z - _moveAnchorGrid.z);
 
-    if (offset.x == _moveCurrentOffset.x &&
-        offset.y == _moveCurrentOffset.y &&
-        offset.z == _moveCurrentOffset.z) return;
-
-    [self rollbackMovePreview];
-
-    // Two-pass: clear all sources first, then write all targets.
-    // try_emplace keeps the *earliest* pre-preview value at any cell,
-    // which is what we want when source and target overlap (the
-    // overlap cell's rollback target is the original palette, not the
-    // 0 we wrote during phase 1).
-    for (const auto& [src, pal] : _moveSourceCells) {
-        const int64_t key = macvoxel::PackCellKey(src[0], src[1], src[2]);
-        _movePreview.try_emplace(key, doc->grid.Get(src[0], src[1], src[2]));
-        doc->grid.Set(src[0], src[1], src[2], 0);
-    }
-    for (const auto& [src, pal] : _moveSourceCells) {
-        const int32_t tx = src[0] + offset.x;
-        const int32_t ty = src[1] + offset.y;
-        const int32_t tz = src[2] + offset.z;
-        const int64_t key = macvoxel::PackCellKey(tx, ty, tz);
-        _movePreview.try_emplace(key, doc->grid.Get(tx, ty, tz));
-        doc->grid.Set(tx, ty, tz, pal);
-    }
-    _moveCurrentOffset = offset;
-
-    // Track the moved positions in the live selection so the AABB +
-    // per-voxel highlights follow the drag.
-    macvoxel::Selection& sel = macvoxel::CurrentSelection();
-    sel.voxels.clear();
-    sel.voxels.reserve(_moveSourceCells.size());
-    int32_t bxmin = 0, bxmax = 0, bymin = 0, bymax = 0, bzmin = 0, bzmax = 0;
-    bool any = false;
-    for (const auto& [src, pal] : _moveSourceCells) {
-        const int32_t tx = src[0] + offset.x;
-        const int32_t ty = src[1] + offset.y;
-        const int32_t tz = src[2] + offset.z;
-        sel.voxels.push_back({tx, ty, tz});
-        if (!any) {
-            bxmin = bxmax = tx; bymin = bymax = ty; bzmin = bzmax = tz;
-            any = true;
-        } else {
-            bxmin = std::min(bxmin, tx); bxmax = std::max(bxmax, tx);
-            bymin = std::min(bymin, ty); bymax = std::max(bymax, ty);
-            bzmin = std::min(bzmin, tz); bzmax = std::max(bzmax, tz);
-        }
-    }
-    sel.box.min_x = bxmin; sel.box.max_x = bxmax;
-    sel.box.min_y = bymin; sel.box.max_y = bymax;
-    sel.box.min_z = bzmin; sel.box.max_z = bzmax;
-    ++doc->version;
-}
-
-- (void)rollbackMovePreview {
-    if (_movePreview.empty()) return;
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) {
-        _movePreview.clear();
-        return;
-    }
-    for (const auto& [key, orig] : _movePreview) {
-        int32_t x, y, z;
-        macvoxel::UnpackCellKey(key, &x, &y, &z);
-        doc->grid.Set(x, y, z, orig);
-    }
-    _movePreview.clear();
+    if (nx == fb.offset_x && ny == fb.offset_y && nz == fb.offset_z) return;
+    fb.offset_x = nx;
+    fb.offset_y = ny;
+    fb.offset_z = nz;
+    // Note: fb.version stays put. The chunk-pool upload is unchanged;
+    // only the offset uniform updates next frame, which is the entire
+    // point of the floating-buffer model.
 }
 
 - (void)commitMoveSelect {
+    // Nothing to commit on mouseUp — the buffer stays floating until
+    // the user issues an explicit commit gesture (deselect, switch
+    // tools, render-mode toggle, save, ...). The auto-commit hooks
+    // handle those entry points.
+}
+
+// "User moved on to a different gesture" hook. When the floating
+// buffer is alive and the user's about to do anything that's not a
+// continuation of the move (new selection / brush stroke / shape
+// tool / etc.), drop the buffer onto the document so the next
+// gesture sees a settled state. No-op when nothing's floating.
+- (void)autoCommitFloatingBuffer {
+    if (!macvoxel::CurrentFloatingBuffer().active) return;
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) {
-        macvoxel::CurrentHistory().AbandonOp();
-        _movePreview.clear();
-        _moveSourceCells.clear();
-        return;
-    }
-    // Grid currently holds the final state; for each cell we touched,
-    // we have the pre-drag original. Record them as one op so undo
-    // unwinds the entire move atomically.
-    for (const auto& [key, orig] : _movePreview) {
-        int32_t x, y, z;
-        macvoxel::UnpackCellKey(key, &x, &y, &z);
-        const uint8_t now = doc->grid.Get(x, y, z);
-        macvoxel::CurrentHistory().Record(x, y, z, orig, now);
-    }
-    macvoxel::CurrentHistory().RecordSelectionPost(macvoxel::CurrentSelection());
-    macvoxel::CurrentHistory().CommitOp();
-    _movePreview.clear();
-    _moveSourceCells.clear();
+    if (doc == nullptr) return;
+    macvoxel::CommitFloatingBuffer(*doc);
 }
 
 // Camera ray at `windowPoint` intersected with the grid-space plane
@@ -1684,7 +1665,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
 - (void)drawSelectionOverlay {
     const macvoxel::Selection& sel = macvoxel::CurrentSelection();
-    if (!sel.active || sel.box.empty()) return;
+    const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    // Skip both per-voxel highlights and AABB outline when there's
+    // nothing to highlight: empty doc selection AND no floating buffer.
+    const bool show_doc_sel = sel.active && !sel.box.empty();
+    const bool show_floating = fb.active && !fb.grid.empty();
+    if (!show_doc_sel && !show_floating) return;
 
     const float w = static_cast<float>(self.bounds.size.width);
     const float h = static_cast<float>(self.bounds.size.height);
@@ -1736,21 +1722,35 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     };
 
     // Outer AABB. Voxels span [c, c+1] so the outer faces are at min..max+1.
+    // When the floating buffer is active, take its bounds + offset; the
+    // doc-side sel.box is stale during a drag (we don't shift it per
+    // frame for performance reasons — the whole point of FloatingBuffer
+    // is O(1) drag work).
     {
-        const simd::float3 box_min{static_cast<float>(sel.box.min_x),
-                                   static_cast<float>(sel.box.min_y),
-                                   static_cast<float>(sel.box.min_z)};
-        const simd::float3 box_max{static_cast<float>(sel.box.max_x + 1),
-                                   static_cast<float>(sel.box.max_y + 1),
-                                   static_cast<float>(sel.box.max_z + 1)};
+        macvoxel::Bounds3 b{};
+        if (show_floating) {
+            const macvoxel::Bounds3 gb = fb.grid.Bounds();
+            b.min_x = gb.min_x + fb.offset_x;
+            b.min_y = gb.min_y + fb.offset_y;
+            b.min_z = gb.min_z + fb.offset_z;
+            b.max_x = gb.max_x + fb.offset_x;
+            b.max_y = gb.max_y + fb.offset_y;
+            b.max_z = gb.max_z + fb.offset_z;
+        } else {
+            b = sel.box;
+        }
+        const simd::float3 box_min{static_cast<float>(b.min_x),
+                                   static_cast<float>(b.min_y),
+                                   static_cast<float>(b.min_z)};
+        const simd::float3 box_max{static_cast<float>(b.max_x + 1),
+                                   static_cast<float>(b.max_y + 1),
+                                   static_cast<float>(b.max_z + 1)};
         ImVec2 screen[8];
         bool valid[8];
         project_corners(box_min, box_max, screen, valid);
         stroke_edges(screen, valid, kEdges, 12,
                      IM_COL32(255, 220, 80, 255), 1.5f);
     }
-
-    if (sel.voxels.empty()) return;
 
     // Per-voxel highlights for sparse selections. Two passes of
     // hidden-line removal keep the overlay legible when thousands of
@@ -1787,15 +1787,59 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         { 0.0f, -1.0f,  0.0f},
     };
 
-    std::unordered_set<int64_t> selected_set;
-    selected_set.reserve(sel.voxels.size() * 2);
-    for (const auto& v : sel.voxels) {
-        selected_set.insert(macvoxel::PackCellKey(v[0], v[1], v[2]));
-    }
+    // Cap only the floating-buffer path — a 256³ lift renders sane
+    // silhouette wireframes thanks to the hidden-face cull below, but
+    // the O(N) cell scan to *build* them dominates the frame. Doc-side
+    // selections already worked uncapped before the FB landed (marquee
+    // through a solid model can hit 50K+ cells), so don't regress them.
+    constexpr size_t kFloatingWireMax = 200000;
 
     const simd::float3 cam = _camera.Position();
     const ImU32 voxel_color = IM_COL32(255, 220, 80, 200);
-    for (const auto& v : sel.voxels) {
+
+    // Build the cell list + a hash set of cell keys — the doc-side path
+    // already worked this way, and the floating-buffer path slots in
+    // the same shape (cells = fb.grid contents shifted by offset, set
+    // built once for O(1) neighbor membership tests).
+    std::vector<std::array<int32_t, 3>> cells;
+    std::unordered_set<int64_t> selected_set;
+    if (show_floating) {
+        const size_t nfilled = static_cast<size_t>(fb.grid.FilledCount());
+        if (nfilled == 0 || nfilled > kFloatingWireMax) return;
+        cells.reserve(nfilled);
+        selected_set.reserve(nfilled * 2);
+        constexpr uint32_t kCS = macvoxel::VoxelGrid::kChunkSize;
+        for (const auto& [coord, chunk] : fb.grid.chunks()) {
+            if (chunk->filled_count == 0) continue;
+            const int32_t base_x = coord.x * static_cast<int32_t>(kCS);
+            const int32_t base_y = coord.y * static_cast<int32_t>(kCS);
+            const int32_t base_z = coord.z * static_cast<int32_t>(kCS);
+            for (uint32_t lz = 0; lz < kCS; ++lz)
+            for (uint32_t ly = 0; ly < kCS; ++ly)
+            for (uint32_t lx = 0; lx < kCS; ++lx) {
+                const size_t idx = lx + ly * kCS + lz * kCS * kCS;
+                if (chunk->cells[idx] == 0) continue;
+                const int32_t cx = base_x + static_cast<int32_t>(lx)
+                                   + fb.offset_x;
+                const int32_t cy = base_y + static_cast<int32_t>(ly)
+                                   + fb.offset_y;
+                const int32_t cz = base_z + static_cast<int32_t>(lz)
+                                   + fb.offset_z;
+                cells.push_back({cx, cy, cz});
+                selected_set.insert(macvoxel::PackCellKey(cx, cy, cz));
+            }
+        }
+    } else {
+        if (sel.voxels.empty()) return;
+        cells.reserve(sel.voxels.size());
+        selected_set.reserve(sel.voxels.size() * 2);
+        for (const auto& v : sel.voxels) {
+            cells.push_back(v);
+            selected_set.insert(macvoxel::PackCellKey(v[0], v[1], v[2]));
+        }
+    }
+
+    for (const auto& v : cells) {
         const simd::float3 cmin{static_cast<float>(v[0]),
                                 static_cast<float>(v[1]),
                                 static_cast<float>(v[2])};
@@ -1803,7 +1847,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         ImVec2 screen[8];
         bool valid[8];
         project_corners(cmin, cmax, screen, valid);
-        // Cell center in world space, used for the back-face cull.
         const simd::float3 center_world{
             cmin.x + 0.5f, cmin.z + 0.5f, -(cmin.y + 0.5f)};
         for (int f = 0; f < 6; ++f) {
@@ -2820,15 +2863,31 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                     direction:&ray_dir_grid]) {
         return NO;
     }
-    macvoxel::RayHit hit;
-    if (!macvoxel::Raycast(doc->grid, ray_origin_grid, ray_dir_grid,
-                            4096.0f, &hit)) {
-        return NO;
+    // Same dual-volume strategy the renderer uses: try both grids and
+    // take whichever is hit first. Without this, Cmd-drag on a moved
+    // floating buffer fails because the doc-only picker can't see the
+    // lifted cells anymore.
+    macvoxel::RayHit hit_doc, hit_buf;
+    bool got_doc = macvoxel::Raycast(doc->grid, ray_origin_grid, ray_dir_grid,
+                                     4096.0f, &hit_doc);
+    bool got_buf = false;
+    const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    if (fb.active && !fb.grid.empty()) {
+        const simd::float3 origin_buf{
+            ray_origin_grid.x - static_cast<float>(fb.offset_x),
+            ray_origin_grid.y - static_cast<float>(fb.offset_y),
+            ray_origin_grid.z - static_cast<float>(fb.offset_z),
+        };
+        got_buf = macvoxel::Raycast(fb.grid, origin_buf, ray_dir_grid,
+                                    4096.0f, &hit_buf);
     }
+    if (!got_doc && !got_buf) return NO;
+    const bool from_buf = got_buf && (!got_doc || hit_buf.t < hit_doc.t);
+    const macvoxel::RayHit& hit = from_buf ? hit_buf : hit_doc;
     if (hit.axis < 0) return NO;  // ray started inside a voxel — no face
-    outCell->x = hit.x;
-    outCell->y = hit.y;
-    outCell->z = hit.z;
+    outCell->x = hit.x + (from_buf ? fb.offset_x : 0);
+    outCell->y = hit.y + (from_buf ? fb.offset_y : 0);
+    outCell->z = hit.z + (from_buf ? fb.offset_z : 0);
     *outAxis = hit.axis;
     *outSign = hit.sign;
     if (outColor) *outColor = hit.color;

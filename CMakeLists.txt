@@ -68,6 +68,8 @@ set(APP_SOURCES
     src/EditHistory.cpp
     src/Selection.cpp
     src/SelectionOps.cpp
+    src/FloatingBuffer.cpp
+    src/FloatingBufferOps.cpp
     src/Clipboard.cpp
     src/ui/GeneratorPanel.cpp
     src/ui/LightPanel.cpp

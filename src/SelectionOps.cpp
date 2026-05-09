@@ -3,6 +3,7 @@
 #include "CellKey.h"
 #include "Document.h"
 #include "EditHistory.h"
+#include "FloatingBuffer.h"
 #include "Selection.h"
 
 #include <algorithm>
@@ -97,23 +98,68 @@ void ApplyMappingToSelection(
     ++doc.version;
 }
 
+// Same two-pass clear-then-write applied directly to fb.grid (no
+// document mutation, no EditHistory entry — mutations of the floating
+// buffer don't go through history; the buffer is the user's transient
+// staging area until commit). Version bump tells the renderer to
+// rebuild its chunk-pool upload.
+void ApplyMappingToFloatingBuffer(
+    FloatingBuffer& fb,
+    const std::function<std::array<int32_t, 3>(int32_t, int32_t, int32_t)>& map)
+{
+    if (!fb.active || fb.grid.empty()) return;
+
+    struct Source { int32_t x, y, z; uint8_t pal; };
+    std::vector<Source> src;
+    src.reserve(static_cast<size_t>(fb.grid.FilledCount()));
+    constexpr uint32_t kCS = VoxelGrid::kChunkSize;
+    for (const auto& [coord, chunk] : fb.grid.chunks()) {
+        if (chunk->filled_count == 0) continue;
+        const int32_t base_x = coord.x * static_cast<int32_t>(kCS);
+        const int32_t base_y = coord.y * static_cast<int32_t>(kCS);
+        const int32_t base_z = coord.z * static_cast<int32_t>(kCS);
+        for (uint32_t lz = 0; lz < kCS; ++lz)
+        for (uint32_t ly = 0; ly < kCS; ++ly)
+        for (uint32_t lx = 0; lx < kCS; ++lx) {
+            const size_t idx = lx + ly * kCS + lz * kCS * kCS;
+            const uint8_t pal = chunk->cells[idx];
+            if (pal == 0) continue;
+            src.push_back({base_x + static_cast<int32_t>(lx),
+                           base_y + static_cast<int32_t>(ly),
+                           base_z + static_cast<int32_t>(lz), pal});
+        }
+    }
+    if (src.empty()) return;
+
+    fb.grid.Clear();
+    for (const auto& s : src) {
+        const auto t = map(s.x, s.y, s.z);
+        fb.grid.Set(t[0], t[1], t[2], s.pal);
+    }
+    ++fb.version;
+}
+
 }  // namespace
 
 void RotateSelection(Document& doc, Axis axis, bool cw) {
-    const Selection& sel = CurrentSelection();
-    if (!sel.active || sel.voxels.empty()) return;
+    FloatingBuffer& fb = CurrentFloatingBuffer();
+    const bool floating = fb.active && !fb.grid.empty();
+    if (!floating) {
+        const Selection& sel = CurrentSelection();
+        if (!sel.active || sel.voxels.empty()) return;
+    }
 
     // Pivot at the AABB's continuous center. The voxel cell at (cx, cy, cz)
     // covers [cx, cx+1] in each axis, so the box center sits at
     // (xmin + xmax + 1) / 2 — possibly half-integer, which is fine: cell
     // centers (c + 0.5) sit on the same half-step lattice and 90° rotation
     // round-trips them to integer cell coords (modulo lattice parity).
-    const float px = (sel.box.min_x + sel.box.max_x + 1) * 0.5f;
-    const float py = (sel.box.min_y + sel.box.max_y + 1) * 0.5f;
-    const float pz = (sel.box.min_z + sel.box.max_z + 1) * 0.5f;
+    const Bounds3 b = floating ? fb.grid.Bounds() : CurrentSelection().box;
+    const float px = (b.min_x + b.max_x + 1) * 0.5f;
+    const float py = (b.min_y + b.max_y + 1) * 0.5f;
+    const float pz = (b.min_z + b.max_z + 1) * 0.5f;
 
-    ApplyMappingToSelection(doc,
-        [=](int32_t cx, int32_t cy, int32_t cz)
+    auto map = [=](int32_t cx, int32_t cy, int32_t cz)
             -> std::array<int32_t, 3>
     {
         const float fx = static_cast<float>(cx) + 0.5f;
@@ -142,22 +188,28 @@ void RotateSelection(Document& doc, Axis axis, bool cw) {
             static_cast<int32_t>(std::lround(py + ny - 0.5f)),
             static_cast<int32_t>(std::lround(pz + nz - 0.5f)),
         };
-    });
+    };
+    if (floating) ApplyMappingToFloatingBuffer(fb, map);
+    else ApplyMappingToSelection(doc, map);
 }
 
 void FlipSelection(Document& doc, Axis axis) {
-    const Selection& sel = CurrentSelection();
-    if (!sel.active || sel.voxels.empty()) return;
+    FloatingBuffer& fb = CurrentFloatingBuffer();
+    const bool floating = fb.active && !fb.grid.empty();
+    if (!floating) {
+        const Selection& sel = CurrentSelection();
+        if (!sel.active || sel.voxels.empty()) return;
+    }
 
     // Cell-coord mirror through the AABB center. For x, the mirror plane
     // sits at x = (xmin + xmax + 1) / 2, which sends a cell at cx to
     // (xmin + xmax) - cx — an exact integer regardless of dimension parity.
-    const int32_t sx = sel.box.min_x + sel.box.max_x;
-    const int32_t sy = sel.box.min_y + sel.box.max_y;
-    const int32_t sz = sel.box.min_z + sel.box.max_z;
+    const Bounds3 b = floating ? fb.grid.Bounds() : CurrentSelection().box;
+    const int32_t sx = b.min_x + b.max_x;
+    const int32_t sy = b.min_y + b.max_y;
+    const int32_t sz = b.min_z + b.max_z;
 
-    ApplyMappingToSelection(doc,
-        [=](int32_t cx, int32_t cy, int32_t cz)
+    auto map = [=](int32_t cx, int32_t cy, int32_t cz)
             -> std::array<int32_t, 3>
     {
         switch (axis) {
@@ -166,7 +218,9 @@ void FlipSelection(Document& doc, Axis axis) {
             case Axis::Z: return {cx, cy, sz - cz};
         }
         return {cx, cy, cz};
-    });
+    };
+    if (floating) ApplyMappingToFloatingBuffer(fb, map);
+    else ApplyMappingToSelection(doc, map);
 }
 
 }  // namespace macvoxel

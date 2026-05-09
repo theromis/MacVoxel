@@ -1,6 +1,7 @@
 #include "SelectionPanel.h"
 
 #include "Fonts.h"
+#include "../FloatingBuffer.h"
 #include "../Selection.h"
 #include "../SelectionOps.h"
 
@@ -24,9 +25,12 @@ void DrawSelectionPanel(Document& doc) {
     ImGui::SetNextWindowSize(ImVec2(260, 180), ImGuiCond_FirstUseEver);
     ImGui::Begin("Selection");
 
-    const bool has_sel = CurrentSelection().active &&
-                         !CurrentSelection().voxels.empty();
-    ImGui::BeginDisabled(!has_sel);
+    // Either an on-grid selection or a floating buffer counts — the
+    // op routes to whichever is active.
+    const bool has_target =
+        (CurrentSelection().active && !CurrentSelection().voxels.empty()) ||
+        (CurrentFloatingBuffer().active && !CurrentFloatingBuffer().grid.empty());
+    ImGui::BeginDisabled(!has_target);
 
     SectionHeader("Rotate 90°");
     ImGui::Indent();
