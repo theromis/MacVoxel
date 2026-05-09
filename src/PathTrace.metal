@@ -1047,6 +1047,35 @@ fragment float4 pt_fragment(
                         // termination case for consistency.
                         break;
                     }
+                    // Aerial perspective at the horizon: a grazing
+                    // primary ray traverses a long air column whose
+                    // in-scattering looks like the sky in that
+                    // direction. Without modelling it, ground-vs-sky
+                    // reads as a sharp line near ray_dir.z = 0. Blend
+                    // in the limit-direction sky color weighted by
+                    // `fade` and attenuate the ground bounce's
+                    // throughput by the same amount. exp(-30·|cos θ|)
+                    // concentrates the softening within ~5° of horizon.
+                    // Primary-ray only — secondary glancing rays don't
+                    // read as a horizon to the eye.
+                    if (b == 0u) {
+                        float fade = exp(-30.0 * abs(ray_dir.z));
+                        if (fade > 1e-3) {
+                            float3 horizon_sky;
+                            if (u.atmospheric_sky != 0u) {
+                                float3 h_dir = normalize(
+                                    float3(ray_dir.x, ray_dir.y, 1e-4));
+                                horizon_sky = nishita_sky_radiance(
+                                    h_dir, u.sun_dir_grid,
+                                    u.sun_radiance,
+                                    u.sun_cos_half_angle);
+                            } else {
+                                horizon_sky = u.sky_color;
+                            }
+                            radiance += throughput * fade * horizon_sky;
+                            throughput *= (1.0 - fade);
+                        }
+                    }
                     {
                         NEELight nee = nee_sample_light(
                             g_point, kGroundNormal, u, lights,
