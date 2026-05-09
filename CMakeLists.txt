@@ -67,10 +67,12 @@ set(APP_SOURCES
     src/ToolState.cpp
     src/EditHistory.cpp
     src/Selection.cpp
+    src/SelectionOps.cpp
     src/Clipboard.cpp
     src/ui/GeneratorPanel.cpp
     src/ui/LightPanel.cpp
     src/ui/ModelPanel.cpp
+    src/ui/SelectionPanel.cpp
     src/ui/ToolPanel.cpp
     src/ui/PalettePanel.cpp
     src/ui/RenderPanel.cpp

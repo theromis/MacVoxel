@@ -34,6 +34,7 @@
 #include "ui/ModelPanel.h"
 #include "ui/PalettePanel.h"
 #include "ui/RenderPanel.h"
+#include "ui/SelectionPanel.h"
 #include "ui/Theme.h"
 #include "ui/ToolPanel.h"
 
@@ -553,6 +554,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         macvoxel::DrawLightPanel();
         macvoxel::DrawToolPanel();
         macvoxel::DrawGeneratorPanel();
+        macvoxel::DrawSelectionPanel(*doc);
         macvoxel::DrawPalettePanel(*doc);
         // Gizmo refresh: the panel may have changed the active kind or
         // parameters; the tool's palette index may have changed too.
