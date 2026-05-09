@@ -15,7 +15,9 @@ enum class ToolKind {
     Box,     // two-click corner-to-corner volumetric box / hollow frame
     Face,    // click a face, drag to extrude / inset along its normal
     Generator,  // gizmoized AABB feeding a parameterized GPU primitive
-    Marquee, // screen-space rectangle → every occupied voxel under it
+    Marquee,    // screen-space rectangle → every occupied voxel under it
+    BoxSelect,  // 3D AABB drag → every occupied voxel inside the AABB
+    FloodSelect,// click a voxel → BFS-flood by matching palette index
 };
 
 // Line tool variants. Straight = 3D-Bresenham segment between the two clicks.

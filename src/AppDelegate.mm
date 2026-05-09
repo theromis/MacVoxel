@@ -412,14 +412,16 @@
 
 - (IBAction)undo:(id)__unused sender {
     if (_doc == nullptr) return;
-    if (macvoxel::CurrentHistory().Undo(_doc->grid)) {
+    if (macvoxel::CurrentHistory().Undo(_doc->grid,
+                                        &macvoxel::CurrentSelection())) {
         ++_doc->version;
     }
 }
 
 - (IBAction)redo:(id)__unused sender {
     if (_doc == nullptr) return;
-    if (macvoxel::CurrentHistory().Redo(_doc->grid)) {
+    if (macvoxel::CurrentHistory().Redo(_doc->grid,
+                                        &macvoxel::CurrentSelection())) {
         ++_doc->version;
     }
 }

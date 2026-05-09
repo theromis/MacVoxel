@@ -38,7 +38,8 @@
 #include "ui/ToolPanel.h"
 
 namespace {
-enum class DragMode { None, Orbit, Pan, Paint, Marquee, Shape, GenHandle };
+enum class DragMode { None, Orbit, Pan, Paint, Marquee, BoxSelect,
+                      MoveSelect, Shape, GenHandle };
 
 using Vec3i = macvoxel::shapes::Vec3i;
 struct LineHit { int32_t x, y, z; int face_axis; };
@@ -126,6 +127,21 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // the live camera matrix; no per-pixel work happens during drag.
     NSPoint _marqueeAnchorWindow;
     NSPoint _marqueeCurrentWindow;
+    // Box-select tool: anchor cell at mouseDown; sel.box grows live to
+    // [min(anchor, current), max] during drag; mouseUp populates the
+    // sparse sel.voxels list with every occupied cell inside.
+    Vec3i _boxSelectAnchor;
+    // MoveSelect (Cmd-drag on a selected voxel = move the selection in
+    // the click face's tangent plane). _moveSourceCells is the snapshot
+    // of (cell, palette) at drag start — used to clear sources and write
+    // targets each frame. _movePreview maps every cell we've touched to
+    // its pre-drag value so we can roll back the live preview between
+    // frames; on mouseUp it gets folded into a single EditHistory op.
+    std::vector<std::pair<std::array<int32_t, 3>, uint8_t>> _moveSourceCells;
+    std::unordered_map<int64_t, uint8_t> _movePreview;
+    Vec3i _moveCurrentOffset;
+    int _moveAxis;
+    simd::float3 _moveAnchorGrid;
     Vec3i _lastDragEditCell;
     NSPoint _lastDragLocation;
     NSPoint _hoverWindowPoint;
@@ -766,10 +782,46 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             [self commitGenGizmo];
             _dragMode = DragMode::None;
         }
+    } else if (hasCommand &&
+               (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Marquee ||
+                macvoxel::CurrentTool().tool == macvoxel::ToolKind::BoxSelect ||
+                macvoxel::CurrentTool().tool == macvoxel::ToolKind::FloodSelect) &&
+               [self tryBeginMoveSelectAtPoint:event.locationInWindow]) {
+        // Cmd-drag on a selected voxel takes over for the duration of
+        // the gesture; tryBeginMoveSelectAtPoint: set _dragMode for us.
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Marquee) {
         _dragMode = DragMode::Marquee;
         _marqueeAnchorWindow = event.locationInWindow;
         _marqueeCurrentWindow = event.locationInWindow;
+    } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::BoxSelect) {
+        Vec3i pick;
+        if ([self pickGridCellAtPoint:event.locationInWindow into:&pick]) {
+            _boxSelectAnchor = pick;
+            _dragMode = DragMode::BoxSelect;
+            macvoxel::Selection& sel = macvoxel::CurrentSelection();
+            sel.box.min_x = sel.box.max_x = pick.x;
+            sel.box.min_y = sel.box.max_y = pick.y;
+            sel.box.min_z = sel.box.max_z = pick.z;
+            sel.active = true;
+            // Drop any existing sparse list so the live preview only
+            // shows the AABB; mouseUp repopulates the sparse list with
+            // the occupied cells inside.
+            sel.voxels.clear();
+        } else {
+            _dragMode = DragMode::None;
+        }
+    } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::FloodSelect) {
+        // Flood select fires entirely on mouseDown — there's no drag
+        // semantic. A click on an occupied voxel becomes the seed; an
+        // empty-space click clears the selection (lets the user undo
+        // a previous flood without switching tools).
+        Vec3i pick;
+        if ([self pickGridCellAtPoint:event.locationInWindow into:&pick]) {
+            [self commitFloodSelectAt:pick];
+        } else {
+            macvoxel::CurrentSelection().Clear();
+        }
+        _dragMode = DragMode::None;
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Line ||
                macvoxel::CurrentTool().tool == macvoxel::ToolKind::Circle ||
                macvoxel::CurrentTool().tool == macvoxel::ToolKind::Square ||
@@ -876,6 +928,23 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         case DragMode::Marquee:
             _marqueeCurrentWindow = p;
             break;
+        case DragMode::MoveSelect:
+            [self updateMoveSelectAtPoint:p];
+            break;
+        case DragMode::BoxSelect: {
+            Vec3i pick;
+            if ([self pickGridCellAtPoint:p into:&pick]) {
+                macvoxel::Selection& sel = macvoxel::CurrentSelection();
+                sel.box.min_x = std::min(_boxSelectAnchor.x, pick.x);
+                sel.box.min_y = std::min(_boxSelectAnchor.y, pick.y);
+                sel.box.min_z = std::min(_boxSelectAnchor.z, pick.z);
+                sel.box.max_x = std::max(_boxSelectAnchor.x, pick.x);
+                sel.box.max_y = std::max(_boxSelectAnchor.y, pick.y);
+                sel.box.max_z = std::max(_boxSelectAnchor.z, pick.z);
+                sel.active = true;
+            }
+            break;
+        }
         case DragMode::Shape:
             // Re-render the live preview at the new cursor; the actual
             // history entry happens on mouseUp at the release point.
@@ -903,6 +972,14 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     } else if (_dragMode == DragMode::Marquee) {
         _marqueeCurrentWindow = event.locationInWindow;
         [self commitMarqueeSelection];
+        _dragMode = DragMode::None;
+        return;
+    } else if (_dragMode == DragMode::BoxSelect) {
+        [self commitBoxSelection];
+        _dragMode = DragMode::None;
+        return;
+    } else if (_dragMode == DragMode::MoveSelect) {
+        [self commitMoveSelect];
         _dragMode = DragMode::None;
         return;
     } else if (_dragMode == DragMode::GenHandle) {
@@ -1192,41 +1269,17 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     [self drawCellWireAtX:cell.x y:cell.y z:cell.z color:color_for_mode(t.mode)];
 }
 
-// Walk every occupied cell in the document, project its center through
-// the live view × proj matrix, and add cells whose screen-space point
-// lands inside the marquee rectangle. "Every voxel under the rect" —
-// no occlusion test, matching MagicaVoxel's behavior. Single-pass O(N)
-// over filled cells, which for typical scenes is ≤ tens of thousands.
-- (void)commitMarqueeSelection {
+// Iterate every occupied cell, call `pred(cx, cy, cz, palette)`, and
+// collect the cells where `pred` returns YES into the current
+// selection (sparse list + bounding box). If nothing matches, the
+// selection is cleared. Single-pass O(filled_count) — fine for the
+// scene sizes we author.
+- (void)selectCellsWhere:(BOOL(^)(int32_t, int32_t, int32_t, uint8_t))pred {
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
     if (doc == nullptr) return;
 
-    const float w = static_cast<float>(self.bounds.size.width);
-    const float h = static_cast<float>(self.bounds.size.height);
-    if (w <= 0.0f || h <= 0.0f) return;
-
-    const NSPoint a_local = [self convertPoint:_marqueeAnchorWindow fromView:nil];
-    const NSPoint b_local = [self convertPoint:_marqueeCurrentWindow fromView:nil];
-    const float rx_min = static_cast<float>(std::min(a_local.x, b_local.x));
-    const float rx_max = static_cast<float>(std::max(a_local.x, b_local.x));
-    const float ry_min = static_cast<float>(std::min(a_local.y, b_local.y));
-    const float ry_max = static_cast<float>(std::max(a_local.y, b_local.y));
-
     macvoxel::Selection& sel = macvoxel::CurrentSelection();
-
-    // A click without meaningful drag is a click into empty space —
-    // treat it as a "clear selection" gesture so the user has a way
-    // back to no-selection without changing tools.
-    if ((rx_max - rx_min) < 2.0f && (ry_max - ry_min) < 2.0f) {
-        sel.Clear();
-        return;
-    }
-
-    const float aspect = w / h;
-    const simd::float4x4 vp =
-        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
-
     std::vector<std::array<int32_t, 3>> picked;
     int32_t bxmin = 0, bymin = 0, bzmin = 0;
     int32_t bxmax = 0, bymax = 0, bzmax = 0;
@@ -1242,27 +1295,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             for (uint32_t ly = 0; ly < kCS; ++ly) {
                 for (uint32_t lx = 0; lx < kCS; ++lx) {
                     const size_t idx = lx + ly * kCS + lz * kCS * kCS;
-                    if (chunk->cells[idx] == 0) continue;
+                    const uint8_t pal = chunk->cells[idx];
+                    if (pal == 0) continue;
                     const int32_t cx = base_x + static_cast<int32_t>(lx);
                     const int32_t cy = base_y + static_cast<int32_t>(ly);
                     const int32_t cz = base_z + static_cast<int32_t>(lz);
-                    // Grid → world is the same R = (gx, gz, -gy) the
-                    // renderers and the wireframe overlay use.
-                    const float gx = static_cast<float>(cx) + 0.5f;
-                    const float gy = static_cast<float>(cy) + 0.5f;
-                    const float gz = static_cast<float>(cz) + 0.5f;
-                    const simd::float4 clip = simd_mul(
-                        vp, simd::float4{gx, gz, -gy, 1.0f});
-                    if (clip.w <= 1e-3f) continue;
-                    const float ndc_x = clip.x / clip.w;
-                    const float ndc_y = clip.y / clip.w;
-                    // View-local: y bottom-up matches NSPoint after
-                    // convertPoint:fromView:, so the rect-vs-point test
-                    // is a direct comparison.
-                    const float sx = (ndc_x * 0.5f + 0.5f) * w;
-                    const float sy = (ndc_y * 0.5f + 0.5f) * h;
-                    if (sx < rx_min || sx > rx_max ||
-                        sy < ry_min || sy > ry_max) continue;
+                    if (!pred(cx, cy, cz, pal)) continue;
                     picked.push_back({cx, cy, cz});
                     if (!any) {
                         bxmin = bxmax = cx;
@@ -1286,6 +1324,337 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         sel.Clear();
         return;
     }
+    sel.voxels = std::move(picked);
+    sel.box.min_x = bxmin; sel.box.max_x = bxmax;
+    sel.box.min_y = bymin; sel.box.max_y = bymax;
+    sel.box.min_z = bzmin; sel.box.max_z = bzmax;
+    sel.active = true;
+}
+
+// Marquee: project each occupied cell's center through the live
+// view × proj matrix, keep the ones whose screen point lands inside
+// the rectangle. "Every voxel under the rect" — no occlusion test,
+// matching MagicaVoxel.
+- (void)commitMarqueeSelection {
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0.0f || h <= 0.0f) return;
+
+    const NSPoint a_local = [self convertPoint:_marqueeAnchorWindow fromView:nil];
+    const NSPoint b_local = [self convertPoint:_marqueeCurrentWindow fromView:nil];
+    const float rx_min = static_cast<float>(std::min(a_local.x, b_local.x));
+    const float rx_max = static_cast<float>(std::max(a_local.x, b_local.x));
+    const float ry_min = static_cast<float>(std::min(a_local.y, b_local.y));
+    const float ry_max = static_cast<float>(std::max(a_local.y, b_local.y));
+
+    // A click without meaningful drag is a click into empty space —
+    // treat it as a "clear selection" gesture so the user has a way
+    // back to no-selection without changing tools.
+    if ((rx_max - rx_min) < 2.0f && (ry_max - ry_min) < 2.0f) {
+        macvoxel::CurrentSelection().Clear();
+        return;
+    }
+
+    const float aspect = w / h;
+    const simd::float4x4 vp =
+        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
+
+    [self selectCellsWhere:^BOOL(int32_t cx, int32_t cy, int32_t cz,
+                                 uint8_t /*pal*/) {
+        // Grid → world: R = (gx, gz, -gy) — same convention the
+        // renderers and the wireframe overlay use.
+        const float gx = static_cast<float>(cx) + 0.5f;
+        const float gy = static_cast<float>(cy) + 0.5f;
+        const float gz = static_cast<float>(cz) + 0.5f;
+        const simd::float4 clip = simd_mul(
+            vp, simd::float4{gx, gz, -gy, 1.0f});
+        if (clip.w <= 1e-3f) return NO;
+        const float ndc_x = clip.x / clip.w;
+        const float ndc_y = clip.y / clip.w;
+        // View-local y is bottom-up — same convention the rect's
+        // corners use after convertPoint:fromView:, so the test is
+        // a direct comparison.
+        const float sx = (ndc_x * 0.5f + 0.5f) * w;
+        const float sy = (ndc_y * 0.5f + 0.5f) * h;
+        return (sx >= rx_min && sx <= rx_max &&
+                sy >= ry_min && sy <= ry_max) ? YES : NO;
+    }];
+}
+
+// Box-select: every occupied cell within the AABB the user dragged
+// out. sel.box is already up-to-date from the live mouseDragged
+// previews; we just flesh out sel.voxels with the cells inside.
+- (void)commitBoxSelection {
+    const macvoxel::Bounds3 b = macvoxel::CurrentSelection().box;
+    [self selectCellsWhere:^BOOL(int32_t cx, int32_t cy, int32_t cz,
+                                 uint8_t /*pal*/) {
+        return (cx >= b.min_x && cx <= b.max_x &&
+                cy >= b.min_y && cy <= b.max_y &&
+                cz >= b.min_z && cz <= b.max_z) ? YES : NO;
+    }];
+}
+
+// MoveSelect: Cmd-drag on a selected voxel translates the whole
+// selection in the plane of the clicked face, snapped to integer
+// voxel offsets. Returns YES if the gesture took ownership of the
+// drag (caller does not need to set _dragMode); NO to let normal
+// click handling proceed.
+- (BOOL)tryBeginMoveSelectAtPoint:(NSPoint)windowPoint {
+    macvoxel::Selection& sel = macvoxel::CurrentSelection();
+    if (!sel.active || sel.voxels.empty()) return NO;
+
+    Vec3i cell;
+    int axis = 2;
+    int sign = 1;
+    uint8_t color = 0;
+    if (![self pickFaceAtPoint:windowPoint cell:&cell axis:&axis sign:&sign
+                          color:&color]) {
+        return NO;
+    }
+    // Click has to land on a voxel that's actually part of the
+    // selection — otherwise the gesture is ambiguous and we just let
+    // it fall through to a no-op.
+    bool found = false;
+    for (const auto& v : sel.voxels) {
+        if (v[0] == cell.x && v[1] == cell.y && v[2] == cell.z) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) return NO;
+
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return NO;
+
+    // The drag plane is the outward face of the clicked cell. The
+    // anchor is wherever the camera ray hits that plane — we compute
+    // it once and re-intersect on each frame to derive the integer
+    // voxel offset.
+    const float plane_coord = (axis == 0)
+        ? (sign > 0 ? static_cast<float>(cell.x + 1) : static_cast<float>(cell.x))
+        : (axis == 1)
+        ? (sign > 0 ? static_cast<float>(cell.y + 1) : static_cast<float>(cell.y))
+        : (sign > 0 ? static_cast<float>(cell.z + 1) : static_cast<float>(cell.z));
+    simd::float3 anchor;
+    if (![self gridPlaneIntersect:windowPoint axis:axis coord:plane_coord
+                          output:&anchor]) {
+        return NO;
+    }
+
+    // Snapshot the selection's current cells with their palette
+    // indices. We deliberately read from the live grid (not from any
+    // cached colour) so an in-flight stroke that recoloured a voxel
+    // still moves the right value.
+    _moveSourceCells.clear();
+    _moveSourceCells.reserve(sel.voxels.size());
+    for (const auto& v : sel.voxels) {
+        const uint8_t pal = doc->grid.Get(v[0], v[1], v[2]);
+        if (pal == 0) continue;  // selection drifted out of date — skip
+        _moveSourceCells.push_back({{v[0], v[1], v[2]}, pal});
+    }
+    if (_moveSourceCells.empty()) return NO;
+
+    _moveAxis = axis;
+    _moveAnchorGrid = anchor;
+    _moveCurrentOffset = Vec3i{0, 0, 0};
+    _movePreview.clear();
+    macvoxel::CurrentHistory().BeginOp();
+    // Snapshot the marquee at its pre-drag position so undo can put
+    // both the voxels and the highlight back together.
+    macvoxel::CurrentHistory().RecordSelectionPre(sel);
+
+    _dragMode = DragMode::MoveSelect;
+    return YES;
+}
+
+- (void)updateMoveSelectAtPoint:(NSPoint)windowPoint {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return;
+
+    const float plane_coord = (_moveAxis == 0) ? _moveAnchorGrid.x
+                            : (_moveAxis == 1) ? _moveAnchorGrid.y
+                                               : _moveAnchorGrid.z;
+    simd::float3 hit;
+    if (![self gridPlaneIntersect:windowPoint axis:_moveAxis coord:plane_coord
+                          output:&hit]) {
+        // Camera grazed the plane; ignore this event rather than
+        // popping the offset to whatever bogus huge t the math gave.
+        return;
+    }
+
+    Vec3i offset = {0, 0, 0};
+    auto round_to_int = [](float f) -> int32_t {
+        return static_cast<int32_t>(std::lround(f));
+    };
+    if (_moveAxis != 0) offset.x = round_to_int(hit.x - _moveAnchorGrid.x);
+    if (_moveAxis != 1) offset.y = round_to_int(hit.y - _moveAnchorGrid.y);
+    if (_moveAxis != 2) offset.z = round_to_int(hit.z - _moveAnchorGrid.z);
+
+    if (offset.x == _moveCurrentOffset.x &&
+        offset.y == _moveCurrentOffset.y &&
+        offset.z == _moveCurrentOffset.z) return;
+
+    [self rollbackMovePreview];
+
+    // Two-pass: clear all sources first, then write all targets.
+    // try_emplace keeps the *earliest* pre-preview value at any cell,
+    // which is what we want when source and target overlap (the
+    // overlap cell's rollback target is the original palette, not the
+    // 0 we wrote during phase 1).
+    for (const auto& [src, pal] : _moveSourceCells) {
+        const int64_t key = macvoxel::PackCellKey(src[0], src[1], src[2]);
+        _movePreview.try_emplace(key, doc->grid.Get(src[0], src[1], src[2]));
+        doc->grid.Set(src[0], src[1], src[2], 0);
+    }
+    for (const auto& [src, pal] : _moveSourceCells) {
+        const int32_t tx = src[0] + offset.x;
+        const int32_t ty = src[1] + offset.y;
+        const int32_t tz = src[2] + offset.z;
+        const int64_t key = macvoxel::PackCellKey(tx, ty, tz);
+        _movePreview.try_emplace(key, doc->grid.Get(tx, ty, tz));
+        doc->grid.Set(tx, ty, tz, pal);
+    }
+    _moveCurrentOffset = offset;
+
+    // Track the moved positions in the live selection so the AABB +
+    // per-voxel highlights follow the drag.
+    macvoxel::Selection& sel = macvoxel::CurrentSelection();
+    sel.voxels.clear();
+    sel.voxels.reserve(_moveSourceCells.size());
+    int32_t bxmin = 0, bxmax = 0, bymin = 0, bymax = 0, bzmin = 0, bzmax = 0;
+    bool any = false;
+    for (const auto& [src, pal] : _moveSourceCells) {
+        const int32_t tx = src[0] + offset.x;
+        const int32_t ty = src[1] + offset.y;
+        const int32_t tz = src[2] + offset.z;
+        sel.voxels.push_back({tx, ty, tz});
+        if (!any) {
+            bxmin = bxmax = tx; bymin = bymax = ty; bzmin = bzmax = tz;
+            any = true;
+        } else {
+            bxmin = std::min(bxmin, tx); bxmax = std::max(bxmax, tx);
+            bymin = std::min(bymin, ty); bymax = std::max(bymax, ty);
+            bzmin = std::min(bzmin, tz); bzmax = std::max(bzmax, tz);
+        }
+    }
+    sel.box.min_x = bxmin; sel.box.max_x = bxmax;
+    sel.box.min_y = bymin; sel.box.max_y = bymax;
+    sel.box.min_z = bzmin; sel.box.max_z = bzmax;
+    ++doc->version;
+}
+
+- (void)rollbackMovePreview {
+    if (_movePreview.empty()) return;
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) {
+        _movePreview.clear();
+        return;
+    }
+    for (const auto& [key, orig] : _movePreview) {
+        int32_t x, y, z;
+        macvoxel::UnpackCellKey(key, &x, &y, &z);
+        doc->grid.Set(x, y, z, orig);
+    }
+    _movePreview.clear();
+}
+
+- (void)commitMoveSelect {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) {
+        macvoxel::CurrentHistory().AbandonOp();
+        _movePreview.clear();
+        _moveSourceCells.clear();
+        return;
+    }
+    // Grid currently holds the final state; for each cell we touched,
+    // we have the pre-drag original. Record them as one op so undo
+    // unwinds the entire move atomically.
+    for (const auto& [key, orig] : _movePreview) {
+        int32_t x, y, z;
+        macvoxel::UnpackCellKey(key, &x, &y, &z);
+        const uint8_t now = doc->grid.Get(x, y, z);
+        macvoxel::CurrentHistory().Record(x, y, z, orig, now);
+    }
+    macvoxel::CurrentHistory().RecordSelectionPost(macvoxel::CurrentSelection());
+    macvoxel::CurrentHistory().CommitOp();
+    _movePreview.clear();
+    _moveSourceCells.clear();
+}
+
+// Camera ray at `windowPoint` intersected with the grid-space plane
+// axis=axis, coord=plane_coord. Returns NO when the ray is grazing
+// the plane (rd_axis ≈ 0) or the intersection is behind the camera.
+- (BOOL)gridPlaneIntersect:(NSPoint)windowPoint
+                      axis:(int)axis
+                     coord:(float)plane_coord
+                    output:(simd::float3*)out {
+    simd::float3 ro, rd;
+    if (![self gridRayAtPoint:windowPoint origin:&ro direction:&rd]) return NO;
+    const float ro_ax = (axis == 0) ? ro.x : (axis == 1) ? ro.y : ro.z;
+    const float rd_ax = (axis == 0) ? rd.x : (axis == 1) ? rd.y : rd.z;
+    if (std::fabs(rd_ax) < 1e-6f) return NO;
+    const float t = (plane_coord - ro_ax) / rd_ax;
+    if (t <= 0.0f) return NO;
+    *out = ro + rd * t;
+    return YES;
+}
+
+// Flood select: BFS from the seed cell across 6-connected neighbors
+// that share its palette index. Empty seed → no-op. Stops the BFS
+// at the first non-matching neighbor in each direction; doesn't
+// require the shape to be convex or simply connected.
+- (void)commitFloodSelectAt:(Vec3i)seed {
+    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+    macvoxel::Document* doc = [delegate document];
+    if (doc == nullptr) return;
+    const macvoxel::VoxelGrid& grid = doc->grid;
+    const uint8_t target = grid.Get(seed.x, seed.y, seed.z);
+    macvoxel::Selection& sel = macvoxel::CurrentSelection();
+    if (target == 0) {
+        sel.Clear();
+        return;
+    }
+
+    std::unordered_set<int64_t> visited;
+    std::vector<std::array<int32_t, 3>> picked;
+    std::vector<Vec3i> queue;
+    queue.reserve(256);
+    visited.reserve(256);
+
+    queue.push_back(seed);
+    visited.insert(macvoxel::PackCellKey(seed.x, seed.y, seed.z));
+
+    int32_t bxmin = seed.x, bxmax = seed.x;
+    int32_t bymin = seed.y, bymax = seed.y;
+    int32_t bzmin = seed.z, bzmax = seed.z;
+
+    static const int kStep[6][3] = {
+        { 1, 0, 0}, {-1, 0, 0},
+        { 0, 1, 0}, { 0,-1, 0},
+        { 0, 0, 1}, { 0, 0,-1},
+    };
+    while (!queue.empty()) {
+        const Vec3i c = queue.back();
+        queue.pop_back();
+        picked.push_back({c.x, c.y, c.z});
+        bxmin = std::min(bxmin, c.x); bxmax = std::max(bxmax, c.x);
+        bymin = std::min(bymin, c.y); bymax = std::max(bymax, c.y);
+        bzmin = std::min(bzmin, c.z); bzmax = std::max(bzmax, c.z);
+        for (int i = 0; i < 6; ++i) {
+            const int32_t nx = c.x + kStep[i][0];
+            const int32_t ny = c.y + kStep[i][1];
+            const int32_t nz = c.z + kStep[i][2];
+            const int64_t key = macvoxel::PackCellKey(nx, ny, nz);
+            if (!visited.insert(key).second) continue;
+            if (grid.Get(nx, ny, nz) != target) continue;
+            queue.push_back({nx, ny, nz});
+        }
+    }
+
     sel.voxels = std::move(picked);
     sel.box.min_x = bxmin; sel.box.max_x = bxmax;
     sel.box.min_y = bymin; sel.box.max_y = bymax;

@@ -57,6 +57,9 @@ void DrawToolPanel() {
     tool_button(ICON_CUBE2 "  Generator", ToolKind::Generator);
     ImGui::SameLine();
     tool_button(ICON_CROP "  Marquee", ToolKind::Marquee);
+    tool_button(ICON_CROP "  Box-sel", ToolKind::BoxSelect);
+    ImGui::SameLine();
+    tool_button(ICON_PAINT "  Flood-sel", ToolKind::FloodSelect);
 
     ImGui::Spacing();
     ImGui::TextDisabled("Mode");

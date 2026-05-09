@@ -10,8 +10,20 @@ void EditHistory::BeginOp() {
     // any new edit branch loses the redo timeline).
     redo_.clear();
     current_.changes.clear();
+    current_.pre_select.reset();
+    current_.post_select.reset();
     current_index_.clear();
     in_op_ = true;
+}
+
+void EditHistory::RecordSelectionPre(const Selection& sel) {
+    if (!in_op_) return;
+    current_.pre_select = sel;
+}
+
+void EditHistory::RecordSelectionPost(const Selection& sel) {
+    if (!in_op_) return;
+    current_.post_select = sel;
 }
 
 void EditHistory::Record(int32_t x, int32_t y, int32_t z,
@@ -47,24 +59,30 @@ void EditHistory::AbandonOp() {
     current_index_.clear();
 }
 
-bool EditHistory::Undo(VoxelGrid& grid) {
+bool EditHistory::Undo(VoxelGrid& grid, Selection* sel) {
     if (undo_.empty()) return false;
     EditOp op = std::move(undo_.back());
     undo_.pop_back();
     for (const auto& c : op.changes) {
         grid.Set(c.x, c.y, c.z, c.old_val);
     }
+    if (sel != nullptr && op.pre_select.has_value()) {
+        *sel = *op.pre_select;
+    }
     redo_.push_back(std::move(op));
     while (redo_.size() > kMaxOps) redo_.pop_front();
     return true;
 }
 
-bool EditHistory::Redo(VoxelGrid& grid) {
+bool EditHistory::Redo(VoxelGrid& grid, Selection* sel) {
     if (redo_.empty()) return false;
     EditOp op = std::move(redo_.back());
     redo_.pop_back();
     for (const auto& c : op.changes) {
         grid.Set(c.x, c.y, c.z, c.new_val);
+    }
+    if (sel != nullptr && op.post_select.has_value()) {
+        *sel = *op.post_select;
     }
     undo_.push_back(std::move(op));
     while (undo_.size() > kMaxOps) undo_.pop_front();
