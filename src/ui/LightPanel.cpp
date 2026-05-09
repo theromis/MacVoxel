@@ -79,6 +79,21 @@ void DrawLightPanel() {
     ImGui::SliderFloat("Intensity##sky", &rs.sky_intensity, 0.0f, 4.0f,
                        "%.2f");
     ImGui::EndDisabled();
+    // Aerial-perspective fade where ground meets sky. The value is the
+    // angular extent (degrees) the fade is concentrated within — so
+    // 1° is a tight band right at the horizon, 10° spreads it well
+    // into the floor. 0 disables the softening (sharp horizon).
+    ImGui::SliderFloat("Horizon", &rs.horizon_softness_deg, 0.0f, 15.0f,
+                       "%.1f°");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Softens the line where the floor meets the sky by blending "
+            "the limit-direction sky color into grazing-angle ground "
+            "rays. Value is the angular extent of the fade — at this "
+            "many degrees below the horizon the floor returns ~5%% sky.\n"
+            "0° disables it (sharp horizon); ~3° is subtle aerial "
+            "perspective; 10°+ is a hazy distant ground.");
+    }
     ImGui::Unindent();
 
     ImGui::Spacing();

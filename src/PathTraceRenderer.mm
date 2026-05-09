@@ -39,7 +39,7 @@ struct PathUniforms {
     simd::float3 sun_dir_grid;    // grid-space, unit-length
     float sun_cos_half_angle;     // cos(angular_diameter / 2)
     simd::float3 sun_radiance;    // linear-space color × intensity
-    float _pad7;
+    float horizon_softness_k;     // exp falloff coeff; 0 = off
 };
 // CPU and MSL `constant` PathUniforms must agree byte-for-byte, since
 // we setBytes:length:sizeof(PathUniforms). The simd float3/int3 types
@@ -130,6 +130,7 @@ struct DisplayUniforms {
     float _lastSkyIntensity;
     int _lastNeeRisCount;
     bool _lastAtmosphericSky;
+    float _lastHorizonSoftnessDeg;
     // Hash of the sun parameters (elev / azim / diameter / color /
     // intensity). Cheaper to fingerprint than to compare each field.
     uint64_t _lastSunHash;
@@ -506,6 +507,12 @@ struct DisplayUniforms {
         _lastAtmosphericSky = atmo;
         _wantsClear = YES;
     }
+    const float horizon_deg =
+        macvoxel::CurrentRenderState().horizon_softness_deg;
+    if (horizon_deg != _lastHorizonSoftnessDeg) {
+        _lastHorizonSoftnessDeg = horizon_deg;
+        _wantsClear = YES;
+    }
     {
         const auto& rs = macvoxel::CurrentRenderState();
         uint64_t h = 0xcbf29ce484222325ull;  // FNV-1a 64
@@ -684,7 +691,17 @@ struct DisplayUniforms {
             std::pow(rs.sun_color[1], 2.2f) * radiance_scale,
             std::pow(rs.sun_color[2], 2.2f) * radiance_scale,
         };
-        u._pad7 = 0.0f;
+        // Convert the user's "fade-out angle" (degrees) into the
+        // exponential coefficient k the shader plugs into
+        // exp(-k·|ray_dir.z|). At |ray_dir.z| = sin(angle) we want
+        // fade ≈ exp(-3) ≈ 0.05, so k = 3 / sin(angle). 0° disables
+        // the softening (k = 0 → shader falls back to a sharp horizon).
+        const float horizon_rad =
+            std::max(0.0f, rs.horizon_softness_deg) * (3.14159265f / 180.0f);
+        const float horizon_sin = std::sin(horizon_rad);
+        u.horizon_softness_k = (horizon_sin > 1e-6f)
+            ? (3.0f / horizon_sin)
+            : 0.0f;
     }
 
     [enc setRenderPipelineState:_pathPipeline];

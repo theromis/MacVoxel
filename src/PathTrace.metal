@@ -22,7 +22,7 @@ struct PathUniforms {
     float3   sun_dir_grid;        // grid-space, unit-length
     float    sun_cos_half_angle;  // cos(angular_diameter / 2)
     float3   sun_radiance;        // linear color × intensity
-    float    _pad7;
+    float    horizon_softness_k;  // exp falloff coeff; 0 = no softening
 };
 
 struct GpuLight {
@@ -1054,12 +1054,14 @@ fragment float4 pt_fragment(
                     // reads as a sharp line near ray_dir.z = 0. Blend
                     // in the limit-direction sky color weighted by
                     // `fade` and attenuate the ground bounce's
-                    // throughput by the same amount. exp(-30·|cos θ|)
-                    // concentrates the softening within ~5° of horizon.
+                    // throughput by the same amount. The CPU picks
+                    // `horizon_softness_k` so fade decays to ~0.05 at
+                    // the user's softness angle — 0 disables it.
                     // Primary-ray only — secondary glancing rays don't
                     // read as a horizon to the eye.
-                    if (b == 0u) {
-                        float fade = exp(-30.0 * abs(ray_dir.z));
+                    if (b == 0u && u.horizon_softness_k > 0.0) {
+                        float fade = exp(-u.horizon_softness_k *
+                                         abs(ray_dir.z));
                         if (fade > 1e-3) {
                             float3 horizon_sky;
                             if (u.atmospheric_sky != 0u) {

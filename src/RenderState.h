@@ -91,6 +91,14 @@ struct RenderState {
     // When off, falls back to the constant `sky_color × sky_intensity`
     // tint.
     bool atmospheric_sky = false;
+    // Aerial-perspective fade applied to grazing-angle primary rays
+    // that hit the virtual ground plane: blends in the limit-direction
+    // sky color so the floor doesn't meet the sky as a hard line.
+    // Interpreted as the angular extent (degrees) over which the fade
+    // is concentrated — at `horizon_softness_deg` below the horizon
+    // the ground returns ~5% sky (≈ exp(-3)), so smaller = tighter,
+    // 0 = off (sharp horizon).
+    float horizon_softness_deg = 3.0f;
 };
 
 RenderState& CurrentRenderState();
