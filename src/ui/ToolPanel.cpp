@@ -56,7 +56,7 @@ void DrawToolPanel() {
     tool_button(ICON_ARROW "  Face", ToolKind::Face);
     tool_button(ICON_CUBE2 "  Generator", ToolKind::Generator);
     ImGui::SameLine();
-    tool_button(ICON_CROP "  Select", ToolKind::Select);
+    tool_button(ICON_CROP "  Marquee", ToolKind::Marquee);
 
     ImGui::Spacing();
     ImGui::TextDisabled("Mode");
