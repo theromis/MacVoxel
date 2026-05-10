@@ -64,6 +64,14 @@ Effort labels are rough: **S** ≈ a few hours, **M** ≈ a day, **L** ≈ multi
   detection so panel / palette edits re-run the engine in place).
   Stretch / RNG-driven kinds and the user-shader path slot in on top
   without architecture changes.
+- **Phase 13 - Selection upgrades**
+  Marquee, box, flood selection, Cmd-drag selection movement, free transform
+  gizmo, 90° rotation controls in palette, `FloatingBuffer` 
+- **Phase 14 - Sun light and atmospheric simulation**
+  Replaced the hardcoded sky color with a configurable
+  sun (color, size, intensity) + sky (zenith / horizon colors). Path tracer
+  samples it directly; ray-cast just shows it as background. Atmospheric
+  scattering per Nishita.
 
 ## Phase 12.5+ — RNG-driven generator kinds + user shader path
 
@@ -94,22 +102,8 @@ button, and any per-kind fields on `Params`.
 - **90° rotation around X/Y/Z (S).** Three buttons / shortcuts.
 - **Free transform gizmo (L).** ImGuizmo-style rotate / scale of the selection
   with live preview, committed on confirm.
-- **Set selection as Pattern (S).** Wires Phase 12's brush tool.
-- **Proper hidden-surface cull on per-voxel selection highlights (M).**
-  Phase 11.5 added a per-voxel wireframe with interior-face dedupe and
-  back-face culling, but voxels that are themselves visible-from-camera
-  but occluded by other geometry still draw their wireframes through
-  the occluder. A naive per-voxel DDA from the camera looked off; the
-  right fix probably needs depth-buffer integration with the renderer
-  pass or a coarser silhouette extraction. Tackle alongside the
-  selection-as-set work since both want a real depth-aware overlay.
-- **AABB cut/copy/delete unify with sparse selection (S).** Today
-  AppDelegate's clipboard ops still iterate the AABB and ignore
-  Selection::voxels. Extend them to filter by the sparse set when
-  present (need O(1) membership — promote the list to an
-  unordered_set or maintain both side-by-side).
-- **Brush / pattern tool (M).** Stamps a pre-captured selection at the cursor;
-  brush source is set from a Selection Verb (next phase).
+
+
 
 ## Phase 13.5 — Edit-volume foundation
 
@@ -139,56 +133,12 @@ Mostly self-contained shader work. Each item shippable independently. **M each
 unless noted.**
 
 - **Perspective ↔ orthographic toggle.** Both renderers; one shared camera flag.
-- **Sky / sun model.** Replace the hardcoded sky color with a configurable
-  sun (color, size, intensity) + sky (zenith / horizon colors). Path tracer
-  samples it directly; ray-cast just shows it as background.
-- **Atmospheric scattering (M–L).** Simple Hosek-Wilkie or Preetham. Drop-in
-  replacement for the flat sky.
 - **Depth-of-field (M).** Aperture + focal distance camera params; left-click
   in view sets focal distance.
 - **Bloom (S–M).** Post-pass on the display fragment. Threshold + blur.
 - **Fog (S).** Distance-based atmospheric tint. Bonus: height fog.
 - **IBL / HDRI (L).** Replace the constant sky with an environment map; sample
   importance-weighted for the path tracer.
-
-## Phase 14.5 — Sampling upgrades (the ReSTIR path)
-
-Voxel scenes have a lot of small emissive cells. The path tracer's
-NEE used to sample them uniformly across the light list and uniformly
-across the 3 visible faces — a lot of bad samples on big scenes.
-Power-weighted NEE shipped in P14.5.A; the rest of this phase is the
-natural evolution from there.
-
-- ~~**Power-weighted NEE (S–M).**~~ Shipped in P14.5.A. CDF over per-
-  light max-channel power packed into `GpuLight.pos.w` / `le.w`,
-  binary-search sample, matching prob in `nee_pdf_solid_for_arrival`
-  (which now linear-scans `lights[]` to find the matching cell on the
-  BSDF-arrives-at-emitter MIS branch — emitter hits are rare, scan
-  cost is fine).
-- **ReSTIR DI (M–L).** Bitterli et al. 2020. Each pixel keeps a small
-  *reservoir* of the best-so-far direct-lighting sample seen across
-  recent frames + neighbors; resampled importance sampling means the
-  pixel converges toward the *actually-bright* nearby lights rather
-  than rolling the dice fresh every sample. Three passes: candidate
-  generation, temporal reuse (reservoir from last frame, jitter
-  account), spatial reuse (small-radius gather from neighbors).
-  Replaces the current direct-light NEE for the diffuse / glossy
-  branches. Plays nicely with GPU SIMT (every pixel does the same
-  number of resampling steps), unlike MLT's divergent chains.
-- **ReSTIR GI (L).** Ouyang 2021. Same reservoir trick applied to the
-  *first indirect bounce*: keep a reservoir of "good first-bounce
-  scatter directions" from neighbors. Big win on diffuse-bounce GI
-  in interiors lit by small windows / portals — exactly the kind of
-  scene a voxel architectural model wants to render.
-
-The Metropolis Light Transport alternative (Veach 97 / Kelemen 02 /
-PSSMLT) is the other branch of the family tree — it's right when you
-need *hard* light transport (caustics through specific path topologies,
-small lights reachable only through tight apertures) and you're willing
-to take an offline-quality renderer with chain-divergence-fights-SIMT
-costs. For an interactive voxel app with many small emissives, ReSTIR
-is the better fit; if a future project genuinely needs caustics,
-revisit then.
 
 ## Phase 15 — Scene graph + layers
 
@@ -233,6 +183,15 @@ phase boundary, not a side change.
   `NSMenuDelegate menuNeedsUpdate:` callback. The Finder-side
   `application:openURLs:` callback works, so the file-open half is
   fine — only the menu surface is broken.
+
+- **Tool performance.** The Generator tool is notably more performant
+  than the brushes and selection tools. It achieves MagicaVoxel-level
+  responsiveness, while the Brush and Selection tools stutter at high
+  cursor speeds or while affecting larger volumes. This is undoubtedly 
+  because we're either doing more work on the CPU than we should for
+  those tools or because we're moving data back and forth in memory
+  more often than we need to. We need to identify the bottleneck and
+  fix it. **Any** operation that can be handled on the GPU should be.
 
 ---
 

@@ -141,9 +141,6 @@ These came up repeatedly during development and are worth not relitigating:
 - **Single-pass writing.** When something is right, write it cleanly the first
   time. Don't leave half-completed alternate paths or commented-out attempts.
 - **No half-finished implementations.** Either it works or it isn't there.
-- **No future-proofing.** Don't add config knobs, hooks, or abstractions for
-  hypothetical future requirements. Three similar lines is fine; a premature
-  abstraction is worse.
 - **Test the change in the running app before reporting done.** For renderer /
   UI work, eyeballing the result matters more than the type-check passing.
 
@@ -194,24 +191,6 @@ Key invariants in the shader:
 - **VNDF GGX, not naive GGX.** The microfacet sampler in `ggx_sample_vndf` is
   Heitz 2018 visible-normal sampling. Every sample is guaranteed to produce
   an above-surface reflection — no fallback-to-mirror clamp, no spike artifact.
-
-## What the path tracer doesn't have yet
-
-- Exposure control. ACES tonemap exists (toggleable via RenderState) and tames
-  the highlight roll-off, but there's no user-facing exposure / EV slider, so
-  scenes with very bright emissives still need careful authoring.
-- Sun + sky model. The sky is a hardcoded constant `(0.65, 0.75, 0.95)` — no
-  HDRI, no sun disc, no procedural gradient.
-- Distance / cosine-weighted light sampling. Power-weighted picks
-  bright emitters more often (CDF-by-max-channel built per resource
-  rebuild, stored in GpuLight's `pos.w` / `le.w`), but a tiny faraway
-  light still beats out a huge close one with the same intrinsic
-  power. ReSTIR DI is the long-term answer; cheaper interim wins
-  (cosine-weighted face pick, distance-attenuated reservoir) are
-  also viable.
-
-These are all real upgrades but each is a project. Don't slip them in alongside
-unrelated changes.
 
 ## Generators (P12.5)
 
