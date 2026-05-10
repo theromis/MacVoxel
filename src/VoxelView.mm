@@ -25,6 +25,8 @@
 #include "FloatingBuffer.h"
 #include "FloatingBufferOps.h"
 #include "BoxSelectController.h"
+#include "BrushController.h"
+#include "BrushOps.h"
 #include "EditorContext.h"
 #include "FloodSelectController.h"
 #include "GeneratorState.h"
@@ -55,34 +57,6 @@ using DragMode = macvoxel::DragMode;
 
 using Vec3i = macvoxel::shapes::Vec3i;
 struct LineHit { int32_t x, y, z; int face_axis; };
-
-constexpr Vec3i kInvalidCell{INT32_MIN, INT32_MIN, INT32_MIN};
-
-// Reused as the "no skip" argument to ViewContext::ComputeTargetCell so
-// non-Paint dispatches don't allocate a fresh empty set per call.
-const std::unordered_set<int64_t> kEmptySkipSet;
-
-bool SameCell(const Vec3i& a, const Vec3i& b) {
-    return a.x == b.x && a.y == b.y && a.z == b.z;
-}
-
-// Per-cell edit arithmetic: return the new cell value given the old
-// value, the tool mode, and the active palette color. Add only fills
-// empty cells (so a wide brush doesn't recolor neighbors), Remove
-// always clears, Paint only repaints existing voxels. Caller checks
-// `new == old` to decide whether to actually write.
-inline uint8_t ComputeNewCellValue(uint8_t old_val, macvoxel::ToolMode mode,
-                                   uint8_t palette_idx) {
-    switch (mode) {
-        case macvoxel::ToolMode::Add:
-            return (old_val == 0) ? palette_idx : old_val;
-        case macvoxel::ToolMode::Remove:
-            return 0;
-        case macvoxel::ToolMode::Paint:
-            return (old_val != 0) ? palette_idx : old_val;
-    }
-    return old_val;
-}
 
 // (axis, sign) for face index 0..5. axis/2 = X|Y|Z; sign +1 for "max"
 // face, -1 for "min" face. Layout matches kFaceArrowOrder below.
@@ -951,13 +925,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         [self refreshShapePreview];
     } else {
         [self autoCommitFloatingBuffer];
-        _interaction.drag_mode = DragMode::Paint;
-        _interaction.brush.paint_mode = hasCommand ? macvoxel::ToolMode::Remove
-                                : _ctx->tool.mode;
-        _interaction.brush.last_drag_edit_cell = kInvalidCell;
-        _interaction.brush.drag_skip_cells.clear();
-        _ctx->history.BeginOp();
-        [self performEditAtPoint:event.locationInWindow mode:_interaction.brush.paint_mode];
+        macvoxel::brush_controller::OnMouseDown(
+            *_ctx, _interaction, [self viewContext],
+            [self mouseEventFromNSEvent:event]);
     }
 }
 
@@ -973,7 +943,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     switch (_interaction.drag_mode) {
         case DragMode::Orbit: _camera.Orbit(dx, dy); break;
         case DragMode::Pan:   _camera.Pan(dx, dy);   break;
-        case DragMode::Paint: [self performEditAtPoint:p mode:_interaction.brush.paint_mode]; break;
+        case DragMode::Paint:
+            macvoxel::brush_controller::OnMouseDragged(
+                *_ctx, _interaction, [self viewContext],
+                [self mouseEventFromNSEvent:event]);
+            break;
         case DragMode::Marquee:
             macvoxel::marquee_controller::OnMouseDragged(
                 _interaction.marquee, [self mouseEventFromNSEvent:event]);
@@ -1025,7 +999,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
 - (void)mouseUp:(NSEvent*)event {
     if (_interaction.drag_mode == DragMode::Paint) {
-        _ctx->history.CommitOp();
+        macvoxel::brush_controller::OnMouseUp(*_ctx, _interaction);
     } else if (_interaction.drag_mode == DragMode::Marquee) {
         macvoxel::marquee_controller::OnMouseUp(
             *_ctx, _interaction.marquee, [self viewContext],
@@ -1793,119 +1767,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Editing — raycast a click into the grid, then place or erase.
-// ---------------------------------------------------------------------------
-
-- (void)performEditAtPoint:(NSPoint)windowPoint mode:(macvoxel::ToolMode)mode {
-    Vec3i target;
-    int face_axis = 2;
-    const simd::float2 lp = [self localFromWindow:windowPoint];
-    const std::unordered_set<int64_t>& skip =
-        (_interaction.drag_mode == DragMode::Paint)
-            ? _interaction.brush.drag_skip_cells
-            : kEmptySkipSet;
-    if (![self viewContext].ComputeTargetCell(lp.x, lp.y, mode, &target,
-                                              &face_axis, skip)) {
-        return;
-    }
-
-    // Drag-paint dedupe: only fire when the target cell changes. Without
-    // this, every pointer-move event during a drag (many per frame) would
-    // re-apply the brush to the same cell, which is harmless for Add but
-    // bloats the undo history and can produce N²-style work for Paint.
-    if (_interaction.drag_mode == DragMode::Paint && SameCell(target, _interaction.brush.last_drag_edit_cell)) {
-        return;
-    }
-    _interaction.brush.last_drag_edit_cell = target;
-
-    [self stampBrushAtX:target.x y:target.y z:target.z
-              faceAxis:face_axis mode:mode];
-}
-
-// Stamp the current brush footprint at a specific cell. Extracted from
-// performEditAtPoint: so the Line tool can reuse it per voxel along the
-// segment while passing its own face_axis (anchor's axis for Straight mode,
-// per-step axis for Project mode).
-- (void)stampBrushAtX:(int)target_x y:(int)target_y z:(int)target_z
-             faceAxis:(int)face_axis mode:(macvoxel::ToolMode)mode {
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr) return;
-
-    macvoxel::ToolSettings& tool = _ctx->tool;
-    const int size = std::max(1, tool.brush_size);
-    const int lo = -((size - 1) / 2);
-    const int hi = size / 2;
-
-    macvoxel::EditHistory& history = _ctx->history;
-    macvoxel::PreviewOverlay& overlay = _ctx->preview;
-
-    const BOOL track_skip = (_interaction.drag_mode == DragMode::Paint &&
-                             mode == macvoxel::ToolMode::Add);
-    // Shape tools (Line/Circle/Square/Box) stage previewed cells into the
-    // overlay during DragMode::Shape; the doc grid is left alone until the
-    // commit path reads back from the overlay through EditHistory.
-    const BOOL preview = (_interaction.drag_mode == DragMode::Shape);
-    auto apply = [&](int x, int y, int z) {
-        const uint8_t old_val = doc->grid.Get(x, y, z);
-        const uint8_t new_val = ComputeNewCellValue(old_val, mode,
-                                                    tool.palette_idx);
-        if (preview) {
-            overlay.Stamp(x, y, z, new_val, old_val);
-            return;
-        }
-        if (new_val == old_val) return;
-        doc->grid.Set(x, y, z, new_val);
-        history.Record(x, y, z, old_val, new_val);
-        if (track_skip) {
-            _interaction.brush.drag_skip_cells.insert(macvoxel::PackCellKey(x, y, z));
-        }
-    };
-
-    // Footprint shape combines BrushShape × dim:
-    //  Square+3D = cube         |  Square+2D = slab on face plane
-    //  Circle+3D = sphere       |  Circle+2D = disc on face plane
-    // For 2D modes the plane axis is the face the user clicked
-    // (face_axis); the brush is one cell thick along that axis.
-    // Brush center: 0 for odd diameters, 0.5 for even diameters.
-    // The fractional center on even sizes makes the footprint sit
-    // between cells so it stays geometrically centered (and avoids
-    // the cardinal-tip "widows" we used to hand-fudge with +0.5).
-    const float c = (lo + hi) * 0.5f;
-    const float r2 = (size * 0.5f) * (size * 0.5f);
-    const bool is_3d = tool.brush_3d;
-    const bool is_circle = tool.brush_shape == macvoxel::BrushShape::Circle;
-    for (int dz = lo; dz <= hi; ++dz) {
-        if (!is_3d && face_axis == 2 && dz != 0) continue;
-        for (int dy = lo; dy <= hi; ++dy) {
-            if (!is_3d && face_axis == 1 && dy != 0) continue;
-            for (int dx = lo; dx <= hi; ++dx) {
-                if (!is_3d && face_axis == 0 && dx != 0) continue;
-                if (is_circle) {
-                    float d2 = 0.0f;
-                    if (is_3d || face_axis != 0) {
-                        const float f = dx - c; d2 += f * f;
-                    }
-                    if (is_3d || face_axis != 1) {
-                        const float f = dy - c; d2 += f * f;
-                    }
-                    if (is_3d || face_axis != 2) {
-                        const float f = dz - c; d2 += f * f;
-                    }
-                    if (d2 > r2) continue;
-                }
-                apply(target_x + dx, target_y + dy, target_z + dz);
-            }
-        }
-    }
-
-    // Preview path edits the overlay only — the doc is untouched, so no
-    // doc bump. Renderer keys off PreviewOverlay::version.
-    if (_interaction.drag_mode != DragMode::Shape) {
-        doc->BumpGeometry();
-    }
-}
-
 // Single-cell stamp pipeline for the Generator tool. Each cell from a
 // generator kernel is a "this exact cell should be filled" instruction —
 // brush size / shape / 2D / 3D options must NOT expand the footprint
@@ -1921,7 +1782,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     macvoxel::PreviewOverlay& overlay = _ctx->preview;
     for (const macvoxel::shapes::Vec3i& c : cells) {
         const uint8_t old_val = doc->grid.Get(c.x, c.y, c.z);
-        const uint8_t new_val = ComputeNewCellValue(old_val, mode, palette_idx);
+        const uint8_t new_val = macvoxel::ComputeNewCellValue(old_val, mode, palette_idx);
         overlay.Stamp(c.x, c.y, c.z, new_val, old_val);
     }
     ++overlay.version;
@@ -2188,8 +2049,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         default: return;
     }
     for (const LineHit& h : hits) {
-        [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
-                       mode:_interaction.anchor.mode];
+        macvoxel::StampBrushFootprint(*_ctx, h.x, h.y, h.z, h.face_axis,
+                                      _interaction.anchor.mode,
+                                      /*preview=*/true, nullptr);
     }
     ++overlay.version;
 }
