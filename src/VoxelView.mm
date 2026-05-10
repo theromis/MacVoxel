@@ -25,6 +25,7 @@
 #include "FloatingBuffer.h"
 #include "FloatingBufferOps.h"
 #include "GeneratorState.h"
+#include "PreviewOverlay.h"
 #include "Raycast.h"
 #include "RenderState.h"
 #include "Selection.h"
@@ -231,27 +232,21 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     uint8_t _faceSeedColor;
     BOOL _faceObservedDrag;
     // The d value (normalized — signed for Add, |d| for Remove/Paint)
-    // currently materialised into `_shapePreview`, plus the `face_with`
-    // value at the time those layers were applied. Used so each frame
-    // only does O(seed_cells × Δd) work as the user drags through layer
-    // boundaries, instead of rebuilding the whole preview every frame.
+    // currently materialised into the PreviewOverlay, plus the
+    // `face_with` value at the time those layers were applied. Used so
+    // each frame only does O(seed_cells × Δd) work as the user drags
+    // through layer boundaries, instead of rebuilding the whole preview
+    // every frame.
     int _faceAppliedD;
     macvoxel::FaceWithColor _faceAppliedWith;
     std::vector<Vec3i> _faceSeedCells;
-    // Live voxel preview for shape tools (Line/Circle/Square): each entry
-    // is a cell touched during the current drag mapped to its original
-    // grid value (before any preview edits this drag). On every dragged
-    // event we restore these and re-stamp the new shape, so the document
-    // visibly tracks the cursor without polluting EditHistory. On mouseUp
-    // we roll back one last time and commit the final shape through the
-    // normal history path so the whole drag becomes a single undo step.
-    std::unordered_map<int64_t, uint8_t> _shapePreview;
     // Generator gizmo state. After the user releases the mouse from a
-    // Generator-tool drag-out, the box stays visible (along with its
-    // _shapePreview cells) until they confirm. Clicking outside the box
-    // commits the preview through EditHistory; Esc rolls it back without
-    // a commit. The bounds + active-kind cache lets the per-frame loop
-    // detect param/kind changes from the panel and re-run the engine.
+    // Generator-tool drag-out, the box stays visible (along with the
+    // PreviewOverlay cells) until they confirm. Clicking outside the
+    // box commits the preview through EditHistory; Esc drops the
+    // overlay without a commit. The bounds + active-kind cache lets
+    // the per-frame loop detect param/kind changes from the panel and
+    // re-run the engine.
     BOOL _genGizmoActive;
     macvoxel::generators::Bounds3i _genBounds;
     macvoxel::generators::Kind _genLastKind;
@@ -582,7 +577,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         if (macvoxel::CurrentTool().tool != _anchorTool ||
             ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
             if (_dragMode == DragMode::Shape) {
-                [self rollbackShapePreview];
+                // Cancel = drop the overlay. The doc was never touched
+                // during the preview gesture.
+                macvoxel::CurrentPreview().Clear();
                 _dragMode = DragMode::None;
             }
             _hasAnchor = NO;
@@ -986,6 +983,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         _dragMode = DragMode::Shape;
         _hoverWindowPoint = event.locationInWindow;
         _hoverHasPoint = YES;
+        // Face uses an incremental preview (transitionFaceTo only flips
+        // the layers that changed), so the overlay is activated once at
+        // mouseDown and only modified — never wholesale cleared — until
+        // commit/cancel. _faceAppliedD = 0 above already pairs with an
+        // empty overlay.
+        macvoxel::CurrentPreview().Clear();
+        macvoxel::CurrentPreview().active = true;
         // Render the click-as-1-layer preview immediately. As soon as the
         // user actually drags, refreshShapePreview will switch to using
         // the live drag distance.
@@ -1102,12 +1106,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             _dragMode = DragMode::None;
             _hasAnchor = NO;
         } else {
-            // Wipe the live preview before the real commit so
-            // stampBrushAtX: sees the original grid contents and writes
-            // proper old/new pairs into EditHistory. Setting _dragMode
-            // to None first routes the commit*AtPoint stamps through
-            // the history branch.
-            [self rollbackShapePreview];
+            // Line/Circle/Square/Box/Face all read their final cell list
+            // from PreviewOverlay — no rollback needed because the doc
+            // was never touched during the preview gesture.
             _dragMode = DragMode::None;
             switch (_anchorTool) {
                 case macvoxel::ToolKind::Line:
@@ -2479,28 +2480,27 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     const int hi = size / 2;
 
     macvoxel::EditHistory& history = macvoxel::CurrentHistory();
+    macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
 
     const BOOL track_skip = (_dragMode == DragMode::Paint &&
                              mode == macvoxel::ToolMode::Add);
+    // Shape tools (Line/Circle/Square/Box) stage previewed cells into the
+    // overlay during DragMode::Shape; the doc grid is left alone until the
+    // commit path reads back from the overlay through EditHistory.
     const BOOL preview = (_dragMode == DragMode::Shape);
     auto apply = [&](int x, int y, int z) {
         const uint8_t old_val = doc->grid.Get(x, y, z);
         const uint8_t new_val = ComputeNewCellValue(old_val, mode,
                                                     tool.palette_idx);
+        if (preview) {
+            overlay.Stamp(x, y, z, new_val, old_val);
+            return;
+        }
         if (new_val == old_val) return;
         doc->grid.Set(x, y, z, new_val);
-        if (preview) {
-            // Snapshot the original value the *first* time this cell is
-            // touched during the drag; subsequent rollbacks restore that.
-            // After a rollback, old_val is again the original here, so
-            // try_emplace's no-overwrite-on-existing behavior is correct.
-            const int64_t key = macvoxel::PackCellKey(x, y, z);
-            _shapePreview.try_emplace(key, old_val);
-        } else {
-            history.Record(x, y, z, old_val, new_val);
-            if (track_skip) {
-                _dragSkipCells.insert(macvoxel::PackCellKey(x, y, z));
-            }
+        history.Record(x, y, z, old_val, new_val);
+        if (track_skip) {
+            _dragSkipCells.insert(macvoxel::PackCellKey(x, y, z));
         }
     };
 
@@ -2541,37 +2541,33 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         }
     }
 
-    ++doc->version;
+    // Preview path edits the overlay only — the doc is untouched, so no
+    // doc->version bump. Renderer keys off PreviewOverlay::version.
+    if (_dragMode != DragMode::Shape) {
+        ++doc->version;
+    }
 }
 
 // Single-cell stamp pipeline for the Generator tool. Each cell from a
 // generator kernel is a "this exact cell should be filled" instruction —
 // brush size / shape / 2D / 3D options must NOT expand the footprint
-// (the kernel already produced the final cell list). Routes to
-// _shapePreview when `preview` is YES and EditHistory otherwise; the
-// caller is expected to BeginOp/CommitOp around a non-preview batch.
-- (void)stampGeneratorCells:(const std::vector<macvoxel::shapes::Vec3i>&)cells
-                        mode:(macvoxel::ToolMode)mode
-                     preview:(BOOL)preview {
+// (the kernel already produced the final cell list). Stages the result
+// into PreviewOverlay; commitGenGizmo / cancelGenGizmo close the gesture.
+- (void)stampGeneratorCellsToOverlay:
+        (const std::vector<macvoxel::shapes::Vec3i>&)cells
+                                mode:(macvoxel::ToolMode)mode {
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
     if (doc == nullptr || cells.empty()) return;
 
     const uint8_t palette_idx = macvoxel::CurrentTool().palette_idx;
-    macvoxel::EditHistory& history = macvoxel::CurrentHistory();
+    macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
     for (const macvoxel::shapes::Vec3i& c : cells) {
         const uint8_t old_val = doc->grid.Get(c.x, c.y, c.z);
         const uint8_t new_val = ComputeNewCellValue(old_val, mode, palette_idx);
-        if (new_val == old_val) continue;
-        doc->grid.Set(c.x, c.y, c.z, new_val);
-        if (preview) {
-            const int64_t key = macvoxel::PackCellKey(c.x, c.y, c.z);
-            _shapePreview.try_emplace(key, old_val);
-        } else {
-            history.Record(c.x, c.y, c.z, old_val, new_val);
-        }
+        overlay.Stamp(c.x, c.y, c.z, new_val, old_val);
     }
-    ++doc->version;
+    ++overlay.version;
 }
 
 // ---------------------------------------------------------------------------
@@ -2665,36 +2661,85 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     }
 }
 
-// Restore every cell touched by the live shape preview to its original
-// value and drop the snapshot. Used between dragged frames to wipe the
-// previous shape before re-stamping the new one, and on Esc / mouseUp
-// before the final commit goes through the normal history path.
-- (void)rollbackShapePreview {
-    // Always reset the Face short-circuit cache: even if there's nothing
-    // in `_shapePreview` to undo, the next refresh has to re-decide what
-    // to apply rather than trusting a stale "already applied d" value.
-    _faceAppliedD = 0;
-    if (_shapePreview.empty()) return;
+// Walk the active PreviewOverlay and apply its additions / removals to
+// the document through one EditHistory op, then clear the overlay. Used
+// at the commit edge of overlay-backed tool gestures (Line / Circle /
+// Square / Box mouseUp; Generator-gizmo confirm). No-op when the overlay
+// is empty / inactive, so calling this through a cancelled gesture is
+// safe.
+- (void)commitPreviewOverlayThroughHistory {
+    macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
+    if (!overlay.active) return;
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) {
-        _shapePreview.clear();
-        return;
+    if (doc == nullptr) { overlay.Clear(); return; }
+
+    using VG = macvoxel::VoxelGrid;
+    macvoxel::EditHistory& history = macvoxel::CurrentHistory();
+    bool op_open = false;
+    bool any_writes = false;
+    auto ensure_op = [&]() {
+        if (!op_open) {
+            history.BeginOp();
+            op_open = true;
+        }
+    };
+
+    // Additions: every non-zero cell in the additions chunk pool is a
+    // "write this palette index here". Skip cells whose value already
+    // matches the doc — Stamp turns those into ClearAt, so they normally
+    // don't appear, but a redundant pass costs nothing and guards against
+    // stale chunks from earlier in the gesture.
+    for (const auto& [coord, chunk] : overlay.additions.chunks()) {
+        if (chunk->filled_count == 0) continue;
+        for (uint32_t i = 0; i < VG::kChunkVolume; ++i) {
+            const uint8_t new_val = chunk->cells[i];
+            if (new_val == 0) continue;
+            const uint32_t lx = i & VG::kChunkMask;
+            const uint32_t ly = (i >> VG::kChunkBits) & VG::kChunkMask;
+            const uint32_t lz = i >> (2 * VG::kChunkBits);
+            const int32_t x = (coord.x << VG::kChunkBits) + (int32_t)lx;
+            const int32_t y = (coord.y << VG::kChunkBits) + (int32_t)ly;
+            const int32_t z = (coord.z << VG::kChunkBits) + (int32_t)lz;
+            const uint8_t old_val = doc->grid.Get(x, y, z);
+            if (old_val == new_val) continue;
+            ensure_op();
+            doc->grid.Set(x, y, z, new_val);
+            history.Record(x, y, z, old_val, new_val);
+            any_writes = true;
+        }
     }
-    for (const auto& [key, orig] : _shapePreview) {
-        int32_t x, y, z;
-        macvoxel::UnpackCellKey(key, &x, &y, &z);
-        doc->grid.Set(x, y, z, orig);
+    // Removals: every non-zero cell in the removals chunk pool is a
+    // "make this doc cell empty". Doc cells already empty are no-ops.
+    for (const auto& [coord, chunk] : overlay.removals.chunks()) {
+        if (chunk->filled_count == 0) continue;
+        for (uint32_t i = 0; i < VG::kChunkVolume; ++i) {
+            if (chunk->cells[i] == 0) continue;
+            const uint32_t lx = i & VG::kChunkMask;
+            const uint32_t ly = (i >> VG::kChunkBits) & VG::kChunkMask;
+            const uint32_t lz = i >> (2 * VG::kChunkBits);
+            const int32_t x = (coord.x << VG::kChunkBits) + (int32_t)lx;
+            const int32_t y = (coord.y << VG::kChunkBits) + (int32_t)ly;
+            const int32_t z = (coord.z << VG::kChunkBits) + (int32_t)lz;
+            const uint8_t old_val = doc->grid.Get(x, y, z);
+            if (old_val == 0) continue;
+            ensure_op();
+            doc->grid.Set(x, y, z, 0);
+            history.Record(x, y, z, old_val, 0);
+            any_writes = true;
+        }
     }
-    _shapePreview.clear();
-    ++doc->version;
+
+    if (op_open) history.CommitOp();
+    if (any_writes) ++doc->version;
+    overlay.Clear();
 }
 
-// Re-render the in-progress shape into the document at the current cursor.
-// Each cell's original value is preserved in `_shapePreview` so the next
-// frame can roll back. Stamps go through `stampBrushAtX:`, which detects
-// `_dragMode == Shape` and routes writes to the preview path instead of
-// EditHistory.
+// Re-render the in-progress shape into the PreviewOverlay at the
+// current cursor. Stamps go through `stampBrushAtX:` (Line/Circle/
+// Square/Box) or `stampGeneratorCellsToOverlay:` (Generator); the
+// Face branch drives `transitionFaceTo:` which mutates the overlay
+// in place. The doc grid is not touched until commit.
 - (void)refreshShapePreview {
     if (!_hasAnchor || _dragMode != DragMode::Shape) return;
 
@@ -2724,8 +2769,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
     // Other shape tools: rebuild from scratch every refresh, since their
     // hit list is a continuous function of cursor position with no clean
-    // discrete short-circuit.
-    [self rollbackShapePreview];
+    // discrete short-circuit. Line/Circle/Square/Box/Generator stage
+    // into the overlay; the doc grid is left alone until commit.
+    macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
+    overlay.Clear();
+    overlay.active = true;
 
     const macvoxel::ToolState& t = macvoxel::CurrentTool();
     std::vector<LineHit> hits;
@@ -2757,7 +2805,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         case macvoxel::ToolKind::Generator: {
             // Engine emits final cells; brush footprint must NOT apply,
             // so this path bypasses the per-hit stampBrushAtX loop and
-            // writes through stampGeneratorCells instead.
+            // writes through stampGeneratorCellsToOverlay instead. The
+            // overlay has already been Cleared above (Generator counts as
+            // an overlay tool), so each refresh starts from a blank slate.
             Vec3i endpoint = _anchorCell;
             int end_face = _anchorFaceAxis;
             [self computeLineEndpointAtPoint:_hoverWindowPoint
@@ -2780,7 +2830,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                         kind:macvoxel::CurrentGeneratorState().active_kind
                       bounds:b
                       params:p];
-            [self stampGeneratorCells:cells mode:_anchorMode preview:YES];
+            [self stampGeneratorCellsToOverlay:cells mode:_anchorMode];
             // Keep gizmo state synced with the drag so drawGenGizmo
             // sees the live bounds and the per-frame change-detector
             // doesn't redundantly re-fire on the next frame.
@@ -2796,6 +2846,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
                        mode:_anchorMode];
     }
+    ++overlay.version;
 }
 
 - (void)beginAnchorAtPoint:(NSPoint)windowPoint mode:(macvoxel::ToolMode)mode {
@@ -2814,24 +2865,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 - (void)commitLineAtPoint:(NSPoint)windowPoint {
+    (void)windowPoint;
     if (!_hasAnchor) return;
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) { _hasAnchor = NO; return; }
-
-    const BOOL straight =
-        macvoxel::CurrentTool().line_mode == macvoxel::LineMode::Straight;
-    std::vector<LineHit> hits;
-    [self enumerateLineFromAnchorTo:windowPoint straight:straight output:hits];
-
-    if (!hits.empty()) {
-        macvoxel::CurrentHistory().BeginOp();
-        for (const LineHit& h : hits) {
-            [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
-                           mode:_anchorMode];
-        }
-        macvoxel::CurrentHistory().CommitOp();
-    }
+    [self commitPreviewOverlayThroughHistory];
     _hasAnchor = NO;
 }
 
@@ -2866,26 +2902,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 - (void)commitCircleAtPoint:(NSPoint)windowPoint {
+    (void)windowPoint;
     if (!_hasAnchor) return;
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) { _hasAnchor = NO; return; }
-
-    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
-    std::vector<LineHit> hits;
-    [self enumerateCircleFromAnchorTo:windowPoint
-                                 fill:tool.circle_fill
-                                 even:tool.circle_even
-                               output:hits];
-
-    if (!hits.empty()) {
-        macvoxel::CurrentHistory().BeginOp();
-        for (const LineHit& h : hits) {
-            [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
-                           mode:_anchorMode];
-        }
-        macvoxel::CurrentHistory().CommitOp();
-    }
+    [self commitPreviewOverlayThroughHistory];
     _hasAnchor = NO;
 }
 
@@ -2926,26 +2945,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 - (void)commitSquareAtPoint:(NSPoint)windowPoint {
+    (void)windowPoint;
     if (!_hasAnchor) return;
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) { _hasAnchor = NO; return; }
-
-    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
-    std::vector<LineHit> hits;
-    [self enumerateSquareFromAnchorTo:windowPoint
-                                 fill:tool.square_fill
-                                 even:tool.square_even
-                               output:hits];
-
-    if (!hits.empty()) {
-        macvoxel::CurrentHistory().BeginOp();
-        for (const LineHit& h : hits) {
-            [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
-                           mode:_anchorMode];
-        }
-        macvoxel::CurrentHistory().CommitOp();
-    }
+    [self commitPreviewOverlayThroughHistory];
     _hasAnchor = NO;
 }
 
@@ -2980,24 +2982,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 - (void)commitBoxAtPoint:(NSPoint)windowPoint {
+    (void)windowPoint;
     if (!_hasAnchor) return;
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) { _hasAnchor = NO; return; }
-
-    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
-    std::vector<LineHit> hits;
-    [self enumerateBoxFromAnchorTo:windowPoint fill:tool.box_fill
-                            output:hits];
-
-    if (!hits.empty()) {
-        macvoxel::CurrentHistory().BeginOp();
-        for (const LineHit& h : hits) {
-            [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
-                           mode:_anchorMode];
-        }
-        macvoxel::CurrentHistory().CommitOp();
-    }
+    [self commitPreviewOverlayThroughHistory];
     _hasAnchor = NO;
 }
 
@@ -3019,7 +3006,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     macvoxel::Document* doc = [delegate document];
     if (doc == nullptr) return;
 
-    [self rollbackShapePreview];
+    macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
+    overlay.Clear();
+    overlay.active = true;
 
     macvoxel::generators::Params p = macvoxel::CurrentGeneratorState().params;
     p.palette_idx = macvoxel::CurrentTool().palette_idx;
@@ -3028,44 +3017,24 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                               kind:macvoxel::CurrentGeneratorState().active_kind
                             bounds:_genBounds
                             params:p];
-    [self stampGeneratorCells:cells
-                         mode:macvoxel::CurrentTool().mode
-                      preview:YES];
+    [self stampGeneratorCellsToOverlay:cells
+                                  mode:macvoxel::CurrentTool().mode];
 }
 
 // Commit the current gizmo's preview through EditHistory as a single
-// undo step, then exit gizmo state. The grid already shows the result
-// (the preview is live), so we just need to record old/new pairs.
+// undo step, then exit gizmo state.
 - (void)commitGenGizmo {
     if (!_genGizmoActive) return;
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) {
-        _genGizmoActive = NO;
-        _shapePreview.clear();
-        return;
-    }
-    if (!_shapePreview.empty()) {
-        macvoxel::EditHistory& history = macvoxel::CurrentHistory();
-        history.BeginOp();
-        for (const auto& [key, orig] : _shapePreview) {
-            int32_t x, y, z;
-            macvoxel::UnpackCellKey(key, &x, &y, &z);
-            const uint8_t cur = doc->grid.Get(x, y, z);
-            history.Record(x, y, z, orig, cur);
-        }
-        history.CommitOp();
-    }
-    _shapePreview.clear();
+    [self commitPreviewOverlayThroughHistory];
     _genGizmoActive = NO;
 }
 
-// Discard the current gizmo without writing to history. Restores every
-// previewed cell to its pre-preview value. Also clears any in-progress
+// Discard the current gizmo without writing to history. Drops the
+// overlay (the doc was never touched). Also clears any in-progress
 // face-handle drag so the next mouse event lands cleanly.
 - (void)cancelGenGizmo {
     if (!_genGizmoActive) return;
-    [self rollbackShapePreview];
+    macvoxel::CurrentPreview().Clear();
     _genGizmoActive = NO;
     _genActiveDragFace = -1;
     if (_dragMode == DragMode::GenHandle) _dragMode = DragMode::None;
@@ -3313,18 +3282,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
     int da[3] = {0, 0, 0};
     da[_anchorFaceAxis] = _faceSign;
-    macvoxel::EditHistory& history = macvoxel::CurrentHistory();
-    const BOOL preview = (_dragMode == DragMode::Shape);
+    macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
     auto write = [&](int x, int y, int z, uint8_t new_val) {
-        const uint8_t old_val = doc->grid.Get(x, y, z);
-        if (new_val == old_val) return;
-        doc->grid.Set(x, y, z, new_val);
-        if (preview) {
-            const int64_t key = macvoxel::PackCellKey(x, y, z);
-            _shapePreview.try_emplace(key, old_val);
-        } else {
-            history.Record(x, y, z, old_val, new_val);
-        }
+        overlay.Stamp(x, y, z, new_val, doc->grid.Get(x, y, z));
     };
 
     const macvoxel::ToolState& tool = macvoxel::CurrentTool();
@@ -3383,15 +3343,15 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             }
         }
     }
-    ++doc->version;
+    ++overlay.version;
 }
 
 // Apply or rollback a single Face-tool layer at `offset` along the face
 // normal. These are the incremental hot-path helpers used during the
 // live preview — they only touch one layer's worth of cells (seed_cells
 // many) instead of the full O(seed × |d|) the bulk applyFaceExtrusion:
-// would do. Always write to `_shapePreview` (preconditions: drag in
-// progress with `_dragMode == DragMode::Shape`).
+// would do. Both write to the PreviewOverlay; the doc grid is not
+// modified until commit.
 - (void)applyFaceLayerAtOffset:(int)offset {
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
@@ -3401,55 +3361,44 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     da[_anchorFaceAxis] = _faceSign;
     const macvoxel::ToolState& tool = macvoxel::CurrentTool();
     const macvoxel::ToolMode mode = _anchorMode;
-    auto write = [&](int x, int y, int z, uint8_t new_val) {
-        const uint8_t old_val = doc->grid.Get(x, y, z);
-        if (new_val == old_val) return;
-        doc->grid.Set(x, y, z, new_val);
-        const int64_t key = macvoxel::PackCellKey(x, y, z);
-        _shapePreview.try_emplace(key, old_val);
-    };
+    macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
 
     for (const Vec3i& v : _faceSeedCells) {
         const int x = v.x + offset * da[0];
         const int y = v.y + offset * da[1];
         const int z = v.z + offset * da[2];
+        const uint8_t old_val = doc->grid.Get(x, y, z);
         if (mode == macvoxel::ToolMode::Add && offset > 0) {
-            if (doc->grid.Get(x, y, z) != 0) continue;
+            if (old_val != 0) continue;
             const uint8_t color =
                 (tool.face_with == macvoxel::FaceWithColor::Geometry)
                     ? doc->grid.Get(v.x, v.y, v.z)
                     : tool.palette_idx;
-            write(x, y, z, color);
+            overlay.Stamp(x, y, z, color, old_val);
         } else if (mode == macvoxel::ToolMode::Add && offset <= 0) {
-            write(x, y, z, 0);
+            overlay.Stamp(x, y, z, 0, old_val);
         } else if (mode == macvoxel::ToolMode::Remove) {
-            write(x, y, z, 0);
+            overlay.Stamp(x, y, z, 0, old_val);
         } else if (mode == macvoxel::ToolMode::Paint) {
-            if (doc->grid.Get(x, y, z) != 0) {
-                write(x, y, z, tool.palette_idx);
+            if (old_val != 0) {
+                overlay.Stamp(x, y, z, tool.palette_idx, old_val);
             }
         }
     }
-    ++doc->version;
+    ++overlay.version;
 }
 
 - (void)rollbackFaceLayerAtOffset:(int)offset {
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) return;
     int da[3] = {0, 0, 0};
     da[_anchorFaceAxis] = _faceSign;
+    macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
     for (const Vec3i& v : _faceSeedCells) {
         const int x = v.x + offset * da[0];
         const int y = v.y + offset * da[1];
         const int z = v.z + offset * da[2];
-        const int64_t key = macvoxel::PackCellKey(x, y, z);
-        auto it = _shapePreview.find(key);
-        if (it == _shapePreview.end()) continue;
-        doc->grid.Set(x, y, z, it->second);
-        _shapePreview.erase(it);
+        overlay.ClearAt(x, y, z);
     }
-    ++doc->version;
+    ++overlay.version;
 }
 
 // Move the Face preview from `_faceAppliedD` to `new_d` by adding /
@@ -3473,7 +3422,14 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         }
     }
     if (full_rebuild) {
-        [self rollbackShapePreview];  // resets _faceAppliedD to 0
+        // Drop the per-layer state so applyFaceExtrusion sees an empty
+        // canvas. Active is held — Face's overlay was activated once at
+        // mouseDown and stays live until commit/cancel.
+        macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
+        overlay.additions.Clear();
+        overlay.removals.Clear();
+        ++overlay.version;
+        _faceAppliedD = 0;
         [self applyFaceExtrusion:new_d];
         _faceAppliedD = new_d;
         _faceAppliedWith = tool.face_with;
@@ -3511,21 +3467,23 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
 - (void)commitFaceAtPoint:(NSPoint)windowPoint {
     if (!_hasAnchor) { _faceSeedCells.clear(); return; }
-    AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
-    macvoxel::Document* doc = [delegate document];
-    if (doc == nullptr) {
-        _hasAnchor = NO;
-        _faceSeedCells.clear();
-        return;
-    }
+    // Re-run the incremental preview to the cursor's release location
+    // so the overlay reflects the exact final state before commit. The
+    // last mouseDragged event isn't guaranteed to fire at the same point
+    // mouseUp arrives at — better to converge here than to ship one
+    // layer off.
     int d = [self faceDragVoxelsAtCursor:windowPoint];
     if (d != 0) _faceObservedDrag = YES;
     if (d == 0 && !_faceObservedDrag) d = 1;
-    if (d != 0) {
-        macvoxel::CurrentHistory().BeginOp();
-        [self applyFaceExtrusion:d];
-        macvoxel::CurrentHistory().CommitOp();
+    if (_anchorMode == macvoxel::ToolMode::Remove ||
+        _anchorMode == macvoxel::ToolMode::Paint) {
+        d = std::abs(d);
     }
+    if (d != _faceAppliedD ||
+        macvoxel::CurrentTool().face_with != _faceAppliedWith) {
+        [self transitionFaceTo:d];
+    }
+    [self commitPreviewOverlayThroughHistory];
     _hasAnchor = NO;
     _faceSeedCells.clear();
 }
