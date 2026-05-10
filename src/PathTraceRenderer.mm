@@ -112,7 +112,12 @@ struct DisplayUniforms {
     id<MTLBuffer> _materialBuffer;
     id<MTLBuffer> _lightBuffer;
     uint32_t _lightCount;
-    uint64_t _cachedDocVersion;
+    // Typed dirty caches — each renderer-side buffer rebuilds only when
+    // its category's counter advances. Lights derive from all three, so
+    // the light buffer rebuilds whenever any of them changes.
+    uint64_t _cachedGeometryVersion;
+    uint64_t _cachedPaletteVersion;
+    uint64_t _cachedMaterialVersion;
     BOOL _resourcesValid;
     simd::int3 _coarseMin;
     simd::int3 _coarseDim;
@@ -226,7 +231,7 @@ struct DisplayUniforms {
 // "render mode" use, not interactive editing).
 // ---------------------------------------------------------------------------
 
-- (void)rebuildResourcesFromDocument:(macvoxel::Document*)doc {
+- (void)rebuildVoxelBuffersFromDocument:(macvoxel::Document*)doc {
     using VG = macvoxel::VoxelGrid;
     const auto& chunks = doc->grid.chunks();
 
@@ -235,53 +240,55 @@ struct DisplayUniforms {
         _coarseDim = simd::int3{0, 0, 0};
         _coarseBuffer = nil;
         _poolBuffer = nil;
-    } else {
-        int32_t min_cx = INT32_MAX, min_cy = INT32_MAX, min_cz = INT32_MAX;
-        int32_t max_cx = INT32_MIN, max_cy = INT32_MIN, max_cz = INT32_MIN;
-        for (const auto& [coord, chunk] : chunks) {
-            min_cx = std::min(min_cx, coord.x);
-            min_cy = std::min(min_cy, coord.y);
-            min_cz = std::min(min_cz, coord.z);
-            max_cx = std::max(max_cx, coord.x);
-            max_cy = std::max(max_cy, coord.y);
-            max_cz = std::max(max_cz, coord.z);
-        }
-        _coarseMin = simd::int3{min_cx, min_cy, min_cz};
-        _coarseDim = simd::int3{max_cx - min_cx + 1,
-                                max_cy - min_cy + 1,
-                                max_cz - min_cz + 1};
-
-        const size_t coarse_count =
-            static_cast<size_t>(_coarseDim.x) *
-            static_cast<size_t>(_coarseDim.y) *
-            static_cast<size_t>(_coarseDim.z);
-        std::vector<uint32_t> coarse(coarse_count, 0);
-        std::vector<uint8_t> pool;
-        pool.reserve(chunks.size() * VG::kChunkVolume);
-        uint32_t pool_idx = 1;
-        for (const auto& [coord, chunk] : chunks) {
-            const size_t cgi =
-                static_cast<size_t>(coord.x - min_cx) +
-                static_cast<size_t>(coord.y - min_cy) *
-                    static_cast<size_t>(_coarseDim.x) +
-                static_cast<size_t>(coord.z - min_cz) *
-                    static_cast<size_t>(_coarseDim.x) *
-                    static_cast<size_t>(_coarseDim.y);
-            coarse[cgi] = pool_idx++;
-            const size_t old = pool.size();
-            pool.resize(old + VG::kChunkVolume);
-            std::memcpy(pool.data() + old, chunk->cells, VG::kChunkVolume);
-        }
-        _coarseBuffer = [_device newBufferWithBytes:coarse.data()
-                                             length:coarse.size() * sizeof(uint32_t)
-                                            options:MTLResourceStorageModeShared];
-        _coarseBuffer.label = @"PTCoarse";
-        _poolBuffer = [_device newBufferWithBytes:pool.data()
-                                           length:pool.size()
-                                          options:MTLResourceStorageModeShared];
-        _poolBuffer.label = @"PTChunkPool";
+        return;
     }
+    int32_t min_cx = INT32_MAX, min_cy = INT32_MAX, min_cz = INT32_MAX;
+    int32_t max_cx = INT32_MIN, max_cy = INT32_MIN, max_cz = INT32_MIN;
+    for (const auto& [coord, chunk] : chunks) {
+        min_cx = std::min(min_cx, coord.x);
+        min_cy = std::min(min_cy, coord.y);
+        min_cz = std::min(min_cz, coord.z);
+        max_cx = std::max(max_cx, coord.x);
+        max_cy = std::max(max_cy, coord.y);
+        max_cz = std::max(max_cz, coord.z);
+    }
+    _coarseMin = simd::int3{min_cx, min_cy, min_cz};
+    _coarseDim = simd::int3{max_cx - min_cx + 1,
+                            max_cy - min_cy + 1,
+                            max_cz - min_cz + 1};
 
+    const size_t coarse_count =
+        static_cast<size_t>(_coarseDim.x) *
+        static_cast<size_t>(_coarseDim.y) *
+        static_cast<size_t>(_coarseDim.z);
+    std::vector<uint32_t> coarse(coarse_count, 0);
+    std::vector<uint8_t> pool;
+    pool.reserve(chunks.size() * VG::kChunkVolume);
+    uint32_t pool_idx = 1;
+    for (const auto& [coord, chunk] : chunks) {
+        const size_t cgi =
+            static_cast<size_t>(coord.x - min_cx) +
+            static_cast<size_t>(coord.y - min_cy) *
+                static_cast<size_t>(_coarseDim.x) +
+            static_cast<size_t>(coord.z - min_cz) *
+                static_cast<size_t>(_coarseDim.x) *
+                static_cast<size_t>(_coarseDim.y);
+        coarse[cgi] = pool_idx++;
+        const size_t old = pool.size();
+        pool.resize(old + VG::kChunkVolume);
+        std::memcpy(pool.data() + old, chunk->cells, VG::kChunkVolume);
+    }
+    _coarseBuffer = [_device newBufferWithBytes:coarse.data()
+                                         length:coarse.size() * sizeof(uint32_t)
+                                        options:MTLResourceStorageModeShared];
+    _coarseBuffer.label = @"PTCoarse";
+    _poolBuffer = [_device newBufferWithBytes:pool.data()
+                                       length:pool.size()
+                                      options:MTLResourceStorageModeShared];
+    _poolBuffer.label = @"PTChunkPool";
+}
+
+- (void)rebuildPaletteBufferFromDocument:(macvoxel::Document*)doc {
     // Path tracer wants linear-space color for physically-meaningful
     // multiplication. Palette comes in sRGB-ish (the standard storage for
     // 8-bit RGBA), so decode with the gamma-2.2 approximation here. The
@@ -303,7 +310,9 @@ struct DisplayUniforms {
                                           length:sizeof(pal_floats)
                                          options:MTLResourceStorageModeShared];
     _paletteBuffer.label = @"PTPalette";
+}
 
+- (void)rebuildMaterialBufferFromDocument:(macvoxel::Document*)doc {
     // Material buffer parallel to palette; one entry per palette index.
     std::array<GpuMaterial, 256> mats{};
     for (size_t i = 0; i < 256; ++i) {
@@ -321,7 +330,16 @@ struct DisplayUniforms {
                                            length:sizeof(mats)
                                           options:MTLResourceStorageModeShared];
     _materialBuffer.label = @"PTMaterials";
+}
 
+// Lights are derived from (geometry × palette emission × material
+// emission strength), so rebuild whenever any of those three categories
+// has advanced. Cheaper than the voxel buffer in absolute terms but
+// it's the only buffer that has to *traverse* every cell on rebuild,
+// so skipping it on pure render-mode entries is meaningful.
+- (void)rebuildLightBufferFromDocument:(macvoxel::Document*)doc {
+    using VG = macvoxel::VoxelGrid;
+    const auto& chunks = doc->grid.chunks();
     // Next-event estimation light list. One entry per emissive voxel
     // (with effective_emission > 0). Stored as { grid corner, linear
     // albedo × emission } so the shader can sample without a palette
@@ -414,9 +432,38 @@ struct DisplayUniforms {
                                         length:lights.size() * sizeof(GpuLight)
                                        options:MTLResourceStorageModeShared];
     _lightBuffer.label = @"PTLights";
+}
 
-    _cachedDocVersion = doc->version;
-    _resourcesValid = YES;
+// Sync GPU resources to the document, rebuilding only the categories
+// whose typed counter has advanced since last call. Returns YES if any
+// rebuild fired (caller uses that to decide whether to clear the
+// accumulator).
+- (BOOL)syncResourcesToDocument:(macvoxel::Document*)doc {
+    BOOL geom_dirty = NO, pal_dirty = NO, mat_dirty = NO;
+    if (!_resourcesValid ||
+        _cachedGeometryVersion != doc->geometry_version) {
+        [self rebuildVoxelBuffersFromDocument:doc];
+        _cachedGeometryVersion = doc->geometry_version;
+        geom_dirty = YES;
+    }
+    if (!_resourcesValid ||
+        _cachedPaletteVersion != doc->palette_version) {
+        [self rebuildPaletteBufferFromDocument:doc];
+        _cachedPaletteVersion = doc->palette_version;
+        pal_dirty = YES;
+    }
+    if (!_resourcesValid ||
+        _cachedMaterialVersion != doc->material_version) {
+        [self rebuildMaterialBufferFromDocument:doc];
+        _cachedMaterialVersion = doc->material_version;
+        mat_dirty = YES;
+    }
+    if (geom_dirty || pal_dirty || mat_dirty) {
+        [self rebuildLightBufferFromDocument:doc];
+        _resourcesValid = YES;
+        return YES;
+    }
+    return NO;
 }
 
 - (void)ensureAccumTextureForSize:(CGSize)size {
@@ -473,8 +520,7 @@ struct DisplayUniforms {
     }
 
     [self ensureAccumTextureForSize:size];
-    if (!_resourcesValid || _cachedDocVersion != doc->version) {
-        [self rebuildResourcesFromDocument:doc];
+    if ([self syncResourcesToDocument:doc]) {
         _wantsClear = YES;
     }
     const uint64_t cam_hash = [self hashCameraState:camera];
@@ -737,7 +783,7 @@ struct DisplayUniforms {
     }
 
     [self ensureAccumTextureForSize:size];
-    [self rebuildResourcesFromDocument:doc];
+    [self syncResourcesToDocument:doc];
     _sampleCount = 0;
     _wantsClear = NO;
 

@@ -2542,9 +2542,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     }
 
     // Preview path edits the overlay only — the doc is untouched, so no
-    // doc->version bump. Renderer keys off PreviewOverlay::version.
+    // doc bump. Renderer keys off PreviewOverlay::version.
     if (_dragMode != DragMode::Shape) {
-        ++doc->version;
+        doc->BumpGeometry();
     }
 }
 
@@ -2731,7 +2731,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     }
 
     if (op_open) history.CommitOp();
-    if (any_writes) ++doc->version;
+    if (any_writes) doc->BumpGeometry();
     overlay.Clear();
 }
 

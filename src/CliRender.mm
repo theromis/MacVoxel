@@ -137,7 +137,7 @@ int RunCliRender(int argc, const char* argv[]) {
         return 1;
     }
     doc.path = args.input;
-    doc.version = 1;
+    doc.BumpAll();
 
     if (doc.grid.empty()) {
         std::fprintf(stderr, "document has no voxels\n");

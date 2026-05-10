@@ -165,7 +165,7 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
             // Always write the active slot too — single-slot edits work
             // even if the selection somehow lost the active idx.
             if (idx != 0) doc.palette.SetMaterial(idx, m);
-            ++doc.version;
+            doc.BumpMaterials();
         }
     }
     ImGui::Unindent();

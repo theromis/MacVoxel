@@ -95,7 +95,7 @@ void ApplyMappingToSelection(
 
     hist.RecordSelectionPost(sel);
     hist.CommitOp();
-    ++doc.version;
+    doc.BumpGeometry();
 }
 
 // Same two-pass clear-then-write applied directly to fb.grid (no

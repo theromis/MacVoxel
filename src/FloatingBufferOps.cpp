@@ -48,7 +48,7 @@ void LiftSelectionToFloating(Document& doc) {
     fb.active = true;
     fb.originated_from_lift = true;
     ++fb.version;
-    ++doc.version;
+    doc.BumpGeometry();
 }
 
 void CommitFloatingBuffer(Document& doc) {
@@ -157,7 +157,7 @@ void CommitFloatingBuffer(Document& doc) {
     fb.Clear();
     hist.RecordSelectionPost(sel);
     hist.CommitOp();
-    ++doc.version;
+    doc.BumpGeometry();
 }
 
 void CancelFloatingLift(Document& doc) {
@@ -182,7 +182,7 @@ void CancelFloatingLift(Document& doc) {
         sel.active = false;
     }
     fb.Clear();
-    ++doc.version;
+    doc.BumpGeometry();
 }
 
 void ResampleFloatingBuffer(const VoxelGrid& src,

@@ -401,7 +401,8 @@ fragment float4 raycast_fragment(
     id<MTLBuffer> _coarseBuffer;
     id<MTLBuffer> _poolBuffer;
     id<MTLBuffer> _paletteBuffer;
-    uint64_t _cachedDocVersion;
+    uint64_t _cachedGeometryVersion;
+    uint64_t _cachedPaletteVersion;
     BOOL _cacheValid;
     simd::int3 _coarseMin;
     simd::int3 _coarseDim;
@@ -411,8 +412,6 @@ fragment float4 raycast_fragment(
     // the "empty" sentinel that coarse_grid uses (1-based pool indices).
     uint32_t _poolSlotsUsed;
     uint32_t _poolSlotsCapacity;
-    // Palette state (cached so we don't re-upload it every edit).
-    uint64_t _paletteSignature;
     // Overlay-additions resources. The slot is shared by FloatingBuffer
     // (selection lift / paste / move-drag) and PreviewOverlay (shape /
     // face / generator preview); the two are mutually exclusive at the
@@ -666,26 +665,28 @@ fragment float4 raycast_fragment(
                                           length:sizeof(pal_floats)
                                          options:MTLResourceStorageModeShared];
     _paletteBuffer.label = @"RaycastPalette";
-    _paletteSignature = [self paletteSignature:doc];
 
     // Wholesale rebuild covered everything; flush the dirty queue so the
     // next encode doesn't redundantly re-process those same chunks.
     doc->grid.TakeDirtyChunks();
 
-    _cachedDocVersion = doc->version;
+    _cachedGeometryVersion = doc->geometry_version;
+    _cachedPaletteVersion = doc->palette_version;
     _cacheValid = YES;
 }
 
-- (uint64_t)paletteSignature:(const macvoxel::Document*)doc {
-    // Cheap fingerprint of the palette so we can skip re-uploading it
-    // when only the grid changed. FNV-1a over the 256 RGBA bytes.
-    uint64_t h = 0xcbf29ce484222325ULL;
-    const auto* p = reinterpret_cast<const uint8_t*>(doc->palette.data());
-    for (size_t i = 0; i < 256 * sizeof(macvoxel::Color); ++i) {
-        h ^= p[i];
-        h *= 0x100000001b3ULL;
+// Upload the palette to its existing GPU buffer. Cheap (1 KB memcpy).
+// Caller is responsible for ensuring _paletteBuffer is non-nil — i.e.
+// only call after at least one wholesale rebuild has happened.
+- (void)uploadPalette:(macvoxel::Document*)doc {
+    std::array<simd::float4, 256> pal_floats{};
+    for (size_t i = 0; i < 256; ++i) {
+        const macvoxel::Color c = doc->palette.Get(static_cast<uint8_t>(i));
+        pal_floats[i] = simd::float4{
+            c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f,
+        };
     }
-    return h;
+    std::memcpy(_paletteBuffer.contents, pal_floats.data(), sizeof(pal_floats));
 }
 
 - (BOOL)dirtyFitsInExistingBounds:(const macvoxel::VoxelGrid::ChunkSet&)dirty {
@@ -776,11 +777,14 @@ fragment float4 raycast_fragment(
     _chunkCount = static_cast<uint32_t>(chunks.size());
 }
 
-- (void)updateFromDocument:(macvoxel::Document*)doc {
+- (void)updateGeometryFromDocument:(macvoxel::Document*)doc {
     auto dirty = doc->grid.TakeDirtyChunks();
 
     if (!_cacheValid || _coarseBuffer == nil ||
         ![self dirtyFitsInExistingBounds:dirty]) {
+        // wholesaleRebuildFromDocument re-uploads palette too and
+        // refreshes both cached typed versions, so the encode-time
+        // palette check downstream will be a no-op this frame.
         [self wholesaleRebuildFromDocument:doc];
         return;
     }
@@ -789,23 +793,7 @@ fragment float4 raycast_fragment(
         [self applyDirty:doc dirty:dirty];
     }
 
-    // Palette is far smaller than the chunk pool but still worth skipping
-    // when it didn't change. Most edits don't touch it.
-    const uint64_t sig = [self paletteSignature:doc];
-    if (sig != _paletteSignature) {
-        std::array<simd::float4, 256> pal_floats{};
-        for (size_t i = 0; i < 256; ++i) {
-            const macvoxel::Color c = doc->palette.Get(static_cast<uint8_t>(i));
-            pal_floats[i] = simd::float4{
-                c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f,
-            };
-        }
-        std::memcpy(_paletteBuffer.contents, pal_floats.data(),
-                    sizeof(pal_floats));
-        _paletteSignature = sig;
-    }
-
-    _cachedDocVersion = doc->version;
+    _cachedGeometryVersion = doc->geometry_version;
 }
 
 - (void)encodeWithEncoder:(id<MTLRenderCommandEncoder>)encoder
@@ -814,8 +802,17 @@ fragment float4 raycast_fragment(
               cameraWorld:(simd::float3)cameraWorld
                  document:(macvoxel::Document*)doc {
     if (doc == nullptr) return;
-    if (!_cacheValid || _cachedDocVersion != doc->version) {
-        [self updateFromDocument:doc];
+    if (!_cacheValid || _cachedGeometryVersion != doc->geometry_version) {
+        [self updateGeometryFromDocument:doc];
+    }
+    // Palette upload is independent of geometry — a single colour tweak
+    // mustn't drag the chunk pool through a wholesale rebuild. The cached
+    // version stays in sync regardless of which path advanced it (the
+    // wholesale rebuild also refreshes _cachedPaletteVersion).
+    if (_paletteBuffer != nil &&
+        _cachedPaletteVersion != doc->palette_version) {
+        [self uploadPalette:doc];
+        _cachedPaletteVersion = doc->palette_version;
     }
     if (_coarseBuffer == nil || _poolBuffer == nil) return;
 

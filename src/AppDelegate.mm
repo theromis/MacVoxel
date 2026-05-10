@@ -34,7 +34,7 @@
 - (void)applicationWillFinishLaunching:(NSNotification*)__unused notification {
     _doc = std::make_unique<macvoxel::Document>();
     [self seedDocumentFromDefault];
-    _doc->version = 1;
+    _doc->BumpAll();
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)__unused notification {
@@ -331,7 +331,7 @@
     macvoxel::DiscardFloatingBuffer();
     [self seedDocumentFromDefault];
     _doc->path.clear();
-    ++_doc->version;
+    _doc->BumpAll();
     macvoxel::CurrentHistory().Clear();
     [self invalidateRenderersIfPossible];
     [self updateWindowTitle];
@@ -365,8 +365,12 @@
         return NO;
     }
     fresh.path = path;
-    fresh.version = _doc->version + 1;
     *_doc = std::move(fresh);
+    // BumpAll after the move so the renderers' typed-version caches all
+    // disagree with the new doc and re-upload their respective buffers.
+    // The path tracer's `invalidate` only restarts accumulation; the
+    // version bump is what forces a fresh resource rebuild there.
+    _doc->BumpAll();
     macvoxel::CurrentHistory().Clear();
     [self invalidateRenderersIfPossible];
     [self updateWindowTitle];
@@ -438,12 +442,12 @@
         // Paste-style buffers have no source cells to restore — the
         // discard is the entire revert.
         macvoxel::CancelFloatingLift(*_doc);
-        ++_doc->version;
+        _doc->BumpGeometry();
         return;
     }
     if (macvoxel::CurrentHistory().Undo(_doc->grid,
                                         &macvoxel::CurrentSelection())) {
-        ++_doc->version;
+        _doc->BumpGeometry();
     }
 }
 
@@ -451,7 +455,7 @@
     if (_doc == nullptr) return;
     if (macvoxel::CurrentHistory().Redo(_doc->grid,
                                         &macvoxel::CurrentSelection())) {
-        ++_doc->version;
+        _doc->BumpGeometry();
     }
 }
 
@@ -565,7 +569,7 @@
         // remains on the undo stack; one more Cmd-Z restores the
         // pre-lift state.)
         macvoxel::DiscardFloatingBuffer();
-        ++_doc->version;
+        _doc->BumpGeometry();
         return;
     }
     const macvoxel::Selection& sel = macvoxel::CurrentSelection();
@@ -580,7 +584,7 @@
         }
     }
     history.CommitOp();
-    ++_doc->version;
+    _doc->BumpGeometry();
 }
 
 - (IBAction)paste:(id)__unused sender {
@@ -601,7 +605,7 @@
     // committing.
     macvoxel::LiftClipboardToFloating(*_doc, cb,
                                       cb.origin_x, cb.origin_y, cb.origin_z);
-    ++_doc->version;
+    _doc->BumpGeometry();
 }
 
 - (IBAction)deselect:(id)__unused sender {

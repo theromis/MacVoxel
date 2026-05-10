@@ -255,7 +255,7 @@ void DrawPalettePanel(Document& doc) {
                         any = true;
                     }
                 }
-                if (any) ++doc.version;
+                if (any) doc.BumpPalette();
             }
             ImGui::Separator();
             const bool any_slot_selected = (n_sel > 0);
@@ -340,7 +340,7 @@ void DrawPalettePanel(Document& doc) {
                                 try_paint(x, y, z);
                 }
                 hist.CommitOp();
-                if (any) ++doc.version;
+                if (any) doc.BumpGeometry();
             };
 
             const bool paint_solid_ok =
@@ -393,7 +393,7 @@ void DrawPalettePanel(Document& doc) {
                         any = true;
                     }
                 }
-                if (any) ++doc.version;
+                if (any) doc.BumpPalette();
             }
             ImGui::EndPopup();
         }
@@ -418,7 +418,7 @@ void DrawPalettePanel(Document& doc) {
             nc.a = static_cast<uint8_t>(rgba[3] * 255.0f + 0.5f);
             if (!(nc == c)) {
                 doc.palette.Set(idx, nc);
-                ++doc.version;
+                doc.BumpPalette();
             }
         }
     }
