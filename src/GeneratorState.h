@@ -10,7 +10,7 @@ namespace macvoxel {
 // gizmo, not by this panel.
 //
 // Single-document app convention, same as ToolState / EditHistory /
-// Selection / RenderState.
+// Selection / RenderSettings.
 struct GeneratorState {
     generators::Kind active_kind = generators::Kind::Ellipsoid;
     generators::Params params{};

@@ -159,10 +159,10 @@ int RunCliRender(int argc, const char* argv[]) {
             return 1;
         }
 
-        // exportPNGToURL: reads aces_tonemap from CurrentRenderState; the
-        // path-trace pass reads glass_mode from it as well.
-        CurrentRenderState().aces_tonemap = args.aces;
-        CurrentRenderState().glass_mode = args.glass_mode;
+        // exportPNGToURL: reads aces_tonemap from CurrentRenderSettings;
+        // the path-trace pass reads glass_mode from it as well.
+        CurrentRenderSettings().aces_tonemap = args.aces;
+        CurrentRenderSettings().glass_mode = args.glass_mode;
 
         PathTraceRenderer* renderer =
             [[PathTraceRenderer alloc] initWithDevice:device

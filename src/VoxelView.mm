@@ -611,7 +611,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         // handles save / open / new / deselect.
         macvoxel::FloatingBuffer& fb_t = macvoxel::CurrentFloatingBuffer();
         const macvoxel::ToolKind cur_tool = macvoxel::CurrentTool().tool;
-        const bool cur_pt = macvoxel::CurrentRenderState().path_traced;
+        const bool cur_pt = macvoxel::CurrentRenderSettings().path_traced;
         if (fb_t.active) {
             if (cur_tool != _lastToolForFB ||
                 (cur_pt && !_lastPathTracedForFB)) {
@@ -669,7 +669,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
     cmd.label = @"MacVoxel Frame";
 
-    const bool pt_now = macvoxel::CurrentRenderState().path_traced;
+    const bool pt_now = macvoxel::CurrentRenderSettings().path_traced;
     if (pt_now != _wasPathTraced) {
         // Toggling either direction invalidates whatever the path tracer
         // had accumulated (or wants to start fresh on enable).

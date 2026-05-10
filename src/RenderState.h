@@ -22,11 +22,13 @@ enum class GlassMode : uint8_t {
     Absorption = 1,
 };
 
-// Application-wide rendering settings — which renderer is active, etc.
-struct RenderState {
+// User-editable render configuration. Inputs only — anything the
+// renderer *produces* (sample_count, etc.) belongs on RenderProgress
+// so the input side stays a pure value an Observable / SwiftUI binding
+// can publish without churning every frame.
+struct RenderSettings {
     bool path_traced = false;
     int max_bounces = 5;        // depth of bounces beyond the primary ray
-    uint32_t sample_count = 0;  // current accumulated samples (read-only stat)
     // Cap on accumulated samples. Once reached, the renderer keeps
     // displaying the already-accumulated buffer but stops contributing
     // new samples — which makes "looks the same any longer" stop costing
@@ -101,6 +103,13 @@ struct RenderState {
     float horizon_softness_deg = 3.0f;
 };
 
-RenderState& CurrentRenderState();
+// Renderer-produced state. Reported back from PathTraceRenderer for the
+// UI to display; never an input to the renderer.
+struct RenderProgress {
+    uint32_t sample_count = 0;  // current accumulated samples
+};
+
+RenderSettings& CurrentRenderSettings();
+RenderProgress& CurrentRenderProgress();
 
 }  // namespace macvoxel

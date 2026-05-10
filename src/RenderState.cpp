@@ -2,9 +2,14 @@
 
 namespace macvoxel {
 
-RenderState& CurrentRenderState() {
-    static RenderState s;
+RenderSettings& CurrentRenderSettings() {
+    static RenderSettings s;
     return s;
+}
+
+RenderProgress& CurrentRenderProgress() {
+    static RenderProgress p;
+    return p;
 }
 
 }  // namespace macvoxel

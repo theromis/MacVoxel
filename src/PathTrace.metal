@@ -1224,7 +1224,7 @@ fragment float4 pt_fragment(
             // are spectrally neutral (correct for a dielectric), and
             // transmitted-ray tint scales with actual path length.
             //
-            // Transparency interpretation depends on RenderState's
+            // Transparency interpretation depends on RenderSettings'
             // glass_mode (set per-frame as u.glass_mode):
             //  - Probabilistic (0): with prob=transparency, refract with
             //    medium_albedo = albedo. Else diffuse-fallback bounce.

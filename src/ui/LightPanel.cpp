@@ -11,7 +11,7 @@ void DrawLightPanel() {
     ImGui::SetNextWindowSize(ImVec2(280, 200), ImGuiCond_FirstUseEver);
     ImGui::Begin("Light");
 
-    RenderState& rs = CurrentRenderState();
+    RenderSettings& rs = CurrentRenderSettings();
 
     ImGui::PushFont(Fonts().header);
     ImGui::TextUnformatted("Path tracing");

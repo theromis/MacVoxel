@@ -41,7 +41,8 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
     ImGui::SetNextWindowSize(ImVec2(280, 240), ImGuiCond_FirstUseEver);
     ImGui::Begin("Render");
 
-    RenderState& rs = CurrentRenderState();
+    RenderSettings& rs = CurrentRenderSettings();
+    const RenderProgress& rp = CurrentRenderProgress();
 
     ImGui::PushFont(Fonts().header);
     ImGui::TextUnformatted("Mode");
@@ -82,19 +83,19 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
 
         const int target = std::max(1, rs.max_samples);
         const float fraction =
-            std::min(1.0f, static_cast<float>(rs.sample_count) /
+            std::min(1.0f, static_cast<float>(rp.sample_count) /
                                static_cast<float>(target));
         char overlay[32];
         std::snprintf(overlay, sizeof(overlay), "%u / %d",
-                      rs.sample_count, target);
+                      rp.sample_count, target);
         ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0), overlay);
-        if (rs.sample_count >= static_cast<uint32_t>(target)) {
+        if (rp.sample_count >= static_cast<uint32_t>(target)) {
             ImGui::TextDisabled("converged — adjust target or move camera "
                                 "to keep sampling");
         }
 
         ImGui::Spacing();
-        const bool can_save = rs.sample_count > 0;
+        const bool can_save = rp.sample_count > 0;
         ImGui::BeginDisabled(!can_save);
         if (ImGui::Button("Save render…")) {
             g_save_render_clicked = true;
