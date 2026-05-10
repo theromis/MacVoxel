@@ -248,13 +248,19 @@ void DrawPalettePanel(Document& doc) {
                                 ColorClip().has_value)) {
                 const Color c = ColorClip().color;
                 bool any = false;
+                EditHistory& hist = CurrentHistory();
+                hist.BeginOp();
                 for (int i = 1; i < 256; ++i) {
                     if (!tool.selected_slots.test(i)) continue;
-                    if (!(doc.palette.Get(static_cast<uint8_t>(i)) == c)) {
-                        doc.palette.Set(static_cast<uint8_t>(i), c);
+                    const uint8_t slot = static_cast<uint8_t>(i);
+                    const Color old_c = doc.palette.Get(slot);
+                    if (!(old_c == c)) {
+                        doc.palette.Set(slot, c);
+                        hist.RecordPalette(slot, old_c, c);
                         any = true;
                     }
                 }
+                hist.CommitOp();
                 if (any) doc.BumpPalette();
             }
             ImGui::Separator();
@@ -380,6 +386,8 @@ void DrawPalettePanel(Document& doc) {
                 const Color c1 = doc.palette.Get(static_cast<uint8_t>(g_hi));
                 const float span = static_cast<float>(g_hi - g_lo);
                 bool any = false;
+                EditHistory& hist = CurrentHistory();
+                hist.BeginOp();
                 for (int i = g_lo + 1; i < g_hi; ++i) {
                     if (!tool.selected_slots.test(i)) continue;
                     const float t = (i - g_lo) / span;
@@ -388,11 +396,15 @@ void DrawPalettePanel(Document& doc) {
                     nc.g = static_cast<uint8_t>(c0.g + (c1.g - c0.g) * t + 0.5f);
                     nc.b = static_cast<uint8_t>(c0.b + (c1.b - c0.b) * t + 0.5f);
                     nc.a = static_cast<uint8_t>(c0.a + (c1.a - c0.a) * t + 0.5f);
-                    if (!(doc.palette.Get(static_cast<uint8_t>(i)) == nc)) {
-                        doc.palette.Set(static_cast<uint8_t>(i), nc);
+                    const uint8_t slot = static_cast<uint8_t>(i);
+                    const Color old_c = doc.palette.Get(slot);
+                    if (!(old_c == nc)) {
+                        doc.palette.Set(slot, nc);
+                        hist.RecordPalette(slot, old_c, nc);
                         any = true;
                     }
                 }
+                hist.CommitOp();
                 if (any) doc.BumpPalette();
             }
             ImGui::EndPopup();
@@ -408,18 +420,43 @@ void DrawPalettePanel(Document& doc) {
     const uint8_t idx = tool.palette_idx;
     ImGui::Text("Index %u", idx);
     {
+        // Coalesce a ColorEdit4 drag (the picker fires on every cursor
+        // frame) into one undo step. col_drag tracks whether an op is
+        // open across frames; col_pre holds the pre-drag color.
+        static bool col_drag = false;
+        static Color col_pre;
+        static uint8_t col_pre_idx = 0;
+
         Color c = doc.palette.Get(idx);
         float rgba[4] = {c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f};
-        if (ImGui::ColorEdit4("Color", rgba, ImGuiColorEditFlags_AlphaBar)) {
+        const bool changed =
+            ImGui::ColorEdit4("Color", rgba, ImGuiColorEditFlags_AlphaBar);
+        if (changed) {
             Color nc;
             nc.r = static_cast<uint8_t>(rgba[0] * 255.0f + 0.5f);
             nc.g = static_cast<uint8_t>(rgba[1] * 255.0f + 0.5f);
             nc.b = static_cast<uint8_t>(rgba[2] * 255.0f + 0.5f);
             nc.a = static_cast<uint8_t>(rgba[3] * 255.0f + 0.5f);
             if (!(nc == c)) {
+                EditHistory& hist = CurrentHistory();
+                if (!col_drag || col_pre_idx != idx) {
+                    // Either a fresh drag, or the user switched the
+                    // active palette index mid-gesture (rare, but the
+                    // pre-snapshot is no longer the right baseline).
+                    if (col_drag) hist.CommitOp();
+                    hist.BeginOp();
+                    col_drag = true;
+                    col_pre = c;
+                    col_pre_idx = idx;
+                }
                 doc.palette.Set(idx, nc);
+                hist.RecordPalette(idx, col_pre, nc);
                 doc.BumpPalette();
             }
+        }
+        if (col_drag && !changed && !ImGui::IsAnyItemActive()) {
+            CurrentHistory().CommitOp();
+            col_drag = false;
         }
     }
 

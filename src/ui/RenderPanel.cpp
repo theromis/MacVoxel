@@ -1,6 +1,7 @@
 #include "RenderPanel.h"
 
 #include "Document.h"
+#include "EditHistory.h"
 #include "Fonts.h"
 #include "Material.h"
 #include "Palette.h"
@@ -10,8 +11,10 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 #include <cstdio>
+#include <optional>
 
 namespace macvoxel {
 namespace {
@@ -156,16 +159,52 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
         if (ImGui::SliderInt("Power",        &m.emissionPower, 1, 5)) dirty = true;
         if (ImGui::SliderFloat("Transparency", &m.transparency, 0.0f, 1.0f)) dirty = true;
         if (ImGui::SliderFloat("IoR",        &m.ior,        1.0f, 3.0f)) dirty = true;
+        // Coalesce the multi-widget gesture into one EditHistory op so
+        // a slider drag (or a Combo pick) becomes a single Cmd-Z step.
+        // Pre-drag values are snapshotted on the first dirty frame and
+        // held until ImGui reports no widget is active any more — at
+        // which point we commit. Static state is panel-local; doc
+        // reload calls History.Clear() which is harmless here.
+        static bool mat_drag = false;
+        static std::array<std::optional<Material>, 256> mat_pre;
+
         if (dirty) {
+            EditHistory& hist = CurrentHistory();
+            if (!mat_drag) {
+                mat_drag = true;
+                for (auto& v : mat_pre) v.reset();
+                for (size_t i = 1; i < tool.selected_slots.size(); ++i) {
+                    if (tool.selected_slots.test(i)) {
+                        mat_pre[i] = doc.palette.GetMaterial(
+                            static_cast<uint8_t>(i));
+                    }
+                }
+                // Always include the active slot too — single-slot edits
+                // work even if the selection somehow lost the active idx.
+                if (idx != 0 && !mat_pre[idx].has_value()) {
+                    mat_pre[idx] = doc.palette.GetMaterial(idx);
+                }
+                hist.BeginOp();
+            }
+            auto apply_to = [&](uint8_t s) {
+                if (!mat_pre[s].has_value()) return;
+                doc.palette.SetMaterial(s, m);
+                hist.RecordMaterial(s, *mat_pre[s], m);
+            };
             for (size_t i = 1; i < tool.selected_slots.size(); ++i) {
                 if (tool.selected_slots.test(i)) {
-                    doc.palette.SetMaterial(static_cast<uint8_t>(i), m);
+                    apply_to(static_cast<uint8_t>(i));
                 }
             }
-            // Always write the active slot too — single-slot edits work
-            // even if the selection somehow lost the active idx.
-            if (idx != 0) doc.palette.SetMaterial(idx, m);
+            if (idx != 0) apply_to(idx);
             doc.BumpMaterials();
+        }
+        // Drag end: no widget is currently being interacted with and
+        // there was no value change this frame. Close the op so the
+        // next gesture starts a fresh undo step.
+        if (mat_drag && !dirty && !ImGui::IsAnyItemActive()) {
+            CurrentHistory().CommitOp();
+            mat_drag = false;
         }
     }
     ImGui::Unindent();

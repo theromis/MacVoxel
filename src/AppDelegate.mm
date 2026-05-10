@@ -445,18 +445,14 @@
         _doc->BumpGeometry();
         return;
     }
-    if (macvoxel::CurrentHistory().Undo(_doc->grid,
-                                        &macvoxel::CurrentSelection())) {
-        _doc->BumpGeometry();
-    }
+    // Undo/Redo bump the matching typed counters internally — caller
+    // doesn't need to know which categories the op touched.
+    macvoxel::CurrentHistory().Undo(*_doc, &macvoxel::CurrentSelection());
 }
 
 - (IBAction)redo:(id)__unused sender {
     if (_doc == nullptr) return;
-    if (macvoxel::CurrentHistory().Redo(_doc->grid,
-                                        &macvoxel::CurrentSelection())) {
-        _doc->BumpGeometry();
-    }
+    macvoxel::CurrentHistory().Redo(*_doc, &macvoxel::CurrentSelection());
 }
 
 // Grey items when their preconditions aren't met — standard Mac UX.

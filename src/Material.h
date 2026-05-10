@@ -29,6 +29,13 @@ struct Material {
     int emissionPower = 1;      // 1..5; each step is a decade of brightness
     float transparency = 0.0f;  // 0 = opaque, 1 = fully transmissive
     float ior = 1.5f;           // index of refraction (~1.5 is glass)
+
+    friend bool operator==(const Material& a, const Material& b) {
+        return a.type == b.type && a.roughness == b.roughness &&
+               a.metallic == b.metallic && a.emission == b.emission &&
+               a.emissionPower == b.emissionPower &&
+               a.transparency == b.transparency && a.ior == b.ior;
+    }
 };
 
 inline float EffectiveEmission(const Material& m) {
