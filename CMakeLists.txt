@@ -70,6 +70,7 @@ set(APP_SOURCES
     src/SelectionOps.cpp
     src/FloatingBuffer.cpp
     src/FloatingBufferOps.cpp
+    src/PreviewOverlay.cpp
     src/Clipboard.cpp
     src/ui/GeneratorPanel.cpp
     src/ui/LightPanel.cpp

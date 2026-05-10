@@ -8,6 +8,7 @@
 
 #include "Document.h"
 #include "FloatingBuffer.h"
+#include "PreviewOverlay.h"
 
 namespace {
 
@@ -21,18 +22,32 @@ struct Uniforms {
     int _pad2;
     simd::float3 light_dir;
     float _pad3;
-    // Floating-buffer overlay: a second sparse grid the shader DDA
-    // samples in parallel. Renders "on top of" the document in any
-    // cell where the buffer is non-zero (lift / paste / move-drag
-    // stage their cells here, so the document grid stays untouched
-    // until the user explicitly commits). When `buf_active == 0` all
-    // buf_* fields are ignored.
+    // Overlay additions slot — a second sparse grid the shader DDA samples
+    // in parallel. Renders "on top of" the document wherever the slot is
+    // non-zero. Two sources feed it (mutually exclusive at the gesture
+    // level, so they share one slot):
+    //   1. FloatingBuffer.grid for selection lift / paste / move-drag /
+    //      rotate / flip — the grid stays in document-relative cells and
+    //      `buf_offset` is the running drag delta.
+    //   2. PreviewOverlay.additions for shape / face / generator tool
+    //      previews — no offset; cells are already at their final coords.
+    // When `buf_active == 0` all buf_* fields are ignored.
     simd::int3 buf_coarse_min;
     int _pad4;
     simd::int3 buf_coarse_dim;
     int _pad5;
     simd::int3 buf_offset;     // world cell delta added to buffer-local cells
     int buf_active;            // 0 = ignore buffer
+    // Preview removals slot — only set during a tool preview. Marks doc
+    // cells the preview wants to appear empty (Remove / Paint / Add-inset
+    // strokes). Same coarse-grid + chunk-pool layout as the additions
+    // slot; any non-zero byte means "hide the doc cell here". `rem_active`
+    // is 0 outside of preview gestures, so the cost is one branch in the
+    // shader's hit path.
+    simd::int3 rem_coarse_min;
+    int _pad6;
+    simd::int3 rem_coarse_dim;
+    int rem_active;
 };
 
 NSString* const kShaderSource = @R"MSL(
@@ -60,6 +75,10 @@ struct Uniforms {
     int      _pad5;
     int3     buf_offset;
     int      buf_active;
+    int3     rem_coarse_min;
+    int      _pad6;
+    int3     rem_coarse_dim;
+    int      rem_active;
 };
 
 struct Chunk {
@@ -92,7 +111,9 @@ fragment float4 raycast_fragment(
     device const Chunk* chunk_pool [[buffer(2)]],
     constant float4* palette [[buffer(3)]],
     device const uint* buf_coarse_grid [[buffer(4)]],
-    device const Chunk* buf_chunk_pool [[buffer(5)]])
+    device const Chunk* buf_chunk_pool [[buffer(5)]],
+    device const uint* rem_coarse_grid [[buffer(6)]],
+    device const Chunk* rem_chunk_pool [[buffer(7)]])
 {
     // Reconstruct world-space ray from NDC.
     float4 near_clip = float4(in.ndc, 0.0, 1.0);
@@ -320,6 +341,26 @@ fragment float4 raycast_fragment(
             uint lz = uint(cell.z) & kChunkMask;
             uint local_idx = lx + ly * kChunkSize + lz * kChunkSize * kChunkSize;
             uint val = uint(chunk_pool[pool_idx_doc - 1u].cells[local_idx]);
+            // Preview removals: skip doc cells the active preview wants to
+            // appear empty (Remove / Paint / Add-inset previews stage their
+            // hidden cells here so the doc grid stays untouched).
+            if (val != 0u && u.rem_active != 0) {
+                int3 rgc = chunk_c - u.rem_coarse_min;
+                if (rgc.x >= 0 && rgc.y >= 0 && rgc.z >= 0 &&
+                    rgc.x < u.rem_coarse_dim.x &&
+                    rgc.y < u.rem_coarse_dim.y &&
+                    rgc.z < u.rem_coarse_dim.z) {
+                    uint r_idx = uint(rgc.x) +
+                                 uint(rgc.y) * uint(u.rem_coarse_dim.x) +
+                                 uint(rgc.z) * uint(u.rem_coarse_dim.x) *
+                                               uint(u.rem_coarse_dim.y);
+                    uint pool_idx_rem = rem_coarse_grid[r_idx];
+                    if (pool_idx_rem != 0u &&
+                        rem_chunk_pool[pool_idx_rem - 1u].cells[local_idx] != 0u) {
+                        val = 0u;
+                    }
+                }
+            }
             if (val != 0u) {
                 float3 grid_normal = float3(0.0);
                 if (last_axis == 0) grid_normal.x = -float(step_dir.x);
@@ -372,17 +413,38 @@ fragment float4 raycast_fragment(
     uint32_t _poolSlotsCapacity;
     // Palette state (cached so we don't re-upload it every edit).
     uint64_t _paletteSignature;
-    // Floating-buffer resources. Built fresh from FloatingBuffer.grid
-    // whenever `version` advances; pure offset changes (the dragging
-    // case) cost a single uniform write, no rebuild.
+    // Overlay-additions resources. The slot is shared by FloatingBuffer
+    // (selection lift / paste / move-drag) and PreviewOverlay (shape /
+    // face / generator preview); the two are mutually exclusive at the
+    // gesture level. _bufSource records which kind currently populates
+    // the slot so a switch (e.g. ending a preview, starting a move)
+    // forces a rebuild instead of mistakenly reusing version numbers.
+    enum class OverlaySource : uint8_t {
+        None = 0,
+        FloatingBuffer = 1,
+        Preview = 2,
+    };
     id<MTLBuffer> _bufCoarseBuffer;
     id<MTLBuffer> _bufPoolBuffer;
     uint64_t _bufLastVersion;
     BOOL _bufBuilt;
     simd::int3 _bufCoarseMin;
     simd::int3 _bufCoarseDim;
-    // Stub buffers always bound at fragment slots 4 and 5 — Metal needs
-    // a valid backing even when buf_active = 0 in the uniforms.
+    OverlaySource _bufSource;
+    // Preview-removals resources. Mirrors the additions slot's coarse-grid
+    // + chunk-pool layout. Only populated while a PreviewOverlay is active
+    // (FloatingBuffer doesn't need removals — its lift mechanism cleared
+    // the source cells in the doc grid up front). _remBuilt + version
+    // gate rebuilds the same way the additions slot does.
+    id<MTLBuffer> _remCoarseBuffer;
+    id<MTLBuffer> _remPoolBuffer;
+    uint64_t _remLastVersion;
+    BOOL _remBuilt;
+    simd::int3 _remCoarseMin;
+    simd::int3 _remCoarseDim;
+    // Stub buffers always bound at fragment slots 4–7 — Metal needs a
+    // valid backing for every declared fragment buffer even when the
+    // corresponding {buf,rem}_active flag is 0 in the uniforms.
     id<MTLBuffer> _stubBuffer;
 }
 
@@ -447,20 +509,25 @@ fragment float4 raycast_fragment(
 // extents) — there the coarse grid itself has to be reshaped.
 // ---------------------------------------------------------------------------
 
-// Build (or rebuild) the floating-buffer's GPU mirror. Same coarse-grid +
-// chunk-pool layout as the document, just smaller. Called when
-// FloatingBuffer.version advances since the last upload — pure offset
-// changes (the dragging case) don't trigger a rebuild.
-- (void)rebuildFloatingResources:(const macvoxel::FloatingBuffer&)fb {
+// Build (or rebuild) one of the overlay slots' GPU mirror from a sparse
+// VoxelGrid. Same coarse-grid + chunk-pool layout as the document, just
+// smaller. Used for both the additions slot (FloatingBuffer.grid OR
+// PreviewOverlay.additions) and the removals slot
+// (PreviewOverlay.removals). Caller picks the slot's ivars.
+- (void)rebuildSparseSlotFromGrid:(const macvoxel::VoxelGrid&)grid
+                           coarse:(__strong id<MTLBuffer>* _Nonnull)coarseOut
+                             pool:(__strong id<MTLBuffer>* _Nonnull)poolOut
+                        coarseMin:(simd::int3* _Nonnull)minOut
+                        coarseDim:(simd::int3* _Nonnull)dimOut
+                       coarseName:(NSString*)coarseLabel
+                         poolName:(NSString*)poolLabel {
     using VG = macvoxel::VoxelGrid;
-    const auto& chunks = fb.grid.chunks();
+    const auto& chunks = grid.chunks();
     if (chunks.empty()) {
-        _bufCoarseBuffer = nil;
-        _bufPoolBuffer = nil;
-        _bufCoarseMin = simd::int3{0, 0, 0};
-        _bufCoarseDim = simd::int3{0, 0, 0};
-        _bufBuilt = NO;
-        _bufLastVersion = fb.version;
+        *coarseOut = nil;
+        *poolOut = nil;
+        *minOut = simd::int3{0, 0, 0};
+        *dimOut = simd::int3{0, 0, 0};
         return;
     }
 
@@ -471,41 +538,39 @@ fragment float4 raycast_fragment(
         min_cy = std::min(min_cy, coord.y); max_cy = std::max(max_cy, coord.y);
         min_cz = std::min(min_cz, coord.z); max_cz = std::max(max_cz, coord.z);
     }
-    _bufCoarseMin = simd::int3{min_cx, min_cy, min_cz};
-    _bufCoarseDim = simd::int3{max_cx - min_cx + 1,
-                               max_cy - min_cy + 1,
-                               max_cz - min_cz + 1};
+    *minOut = simd::int3{min_cx, min_cy, min_cz};
+    *dimOut = simd::int3{max_cx - min_cx + 1,
+                         max_cy - min_cy + 1,
+                         max_cz - min_cz + 1};
 
     const size_t coarse_count =
-        static_cast<size_t>(_bufCoarseDim.x) *
-        static_cast<size_t>(_bufCoarseDim.y) *
-        static_cast<size_t>(_bufCoarseDim.z);
+        static_cast<size_t>((*dimOut).x) *
+        static_cast<size_t>((*dimOut).y) *
+        static_cast<size_t>((*dimOut).z);
     std::vector<uint32_t> coarse(coarse_count, 0);
     const size_t pool_bytes = chunks.size() * VG::kChunkVolume;
-    _bufPoolBuffer = [_device newBufferWithLength:pool_bytes
-                                          options:MTLResourceStorageModeShared];
-    _bufPoolBuffer.label = @"RaycastBufPool";
-    auto* pool = static_cast<uint8_t*>(_bufPoolBuffer.contents);
+    *poolOut = [_device newBufferWithLength:pool_bytes
+                                    options:MTLResourceStorageModeShared];
+    (*poolOut).label = poolLabel;
+    auto* pool = static_cast<uint8_t*>((*poolOut).contents);
     uint32_t pool_idx = 1;
     for (const auto& [coord, chunk] : chunks) {
         const size_t cgi =
             static_cast<size_t>(coord.x - min_cx) +
             static_cast<size_t>(coord.y - min_cy) *
-                static_cast<size_t>(_bufCoarseDim.x) +
+                static_cast<size_t>((*dimOut).x) +
             static_cast<size_t>(coord.z - min_cz) *
-                static_cast<size_t>(_bufCoarseDim.x) *
-                static_cast<size_t>(_bufCoarseDim.y);
+                static_cast<size_t>((*dimOut).x) *
+                static_cast<size_t>((*dimOut).y);
         coarse[cgi] = pool_idx;
         std::memcpy(pool + (pool_idx - 1) * VG::kChunkVolume,
                     chunk->cells, VG::kChunkVolume);
         ++pool_idx;
     }
-    _bufCoarseBuffer = [_device newBufferWithBytes:coarse.data()
-                                           length:coarse.size() * sizeof(uint32_t)
-                                          options:MTLResourceStorageModeShared];
-    _bufCoarseBuffer.label = @"RaycastBufCoarse";
-    _bufBuilt = YES;
-    _bufLastVersion = fb.version;
+    *coarseOut = [_device newBufferWithBytes:coarse.data()
+                                     length:coarse.size() * sizeof(uint32_t)
+                                    options:MTLResourceStorageModeShared];
+    (*coarseOut).label = coarseLabel;
 }
 
 - (void)wholesaleRebuildFromDocument:(macvoxel::Document*)doc {
@@ -754,18 +819,76 @@ fragment float4 raycast_fragment(
     }
     if (_coarseBuffer == nil || _poolBuffer == nil) return;
 
-    // Floating buffer: rebuild GPU resources only if its grid actually
-    // changed since last upload. Offset moves the buffer in O(1) — pure
-    // uniform write.
+    // Resolve which overlay (if any) feeds the additions slot this frame.
+    // FloatingBuffer (selection move/paste/transform) and PreviewOverlay
+    // (shape/face/generator preview) are mutually exclusive at the gesture
+    // level, so they share one slot — the source tag tracks which one
+    // last filled it so a switch invalidates the cache cleanly.
     const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
-    if (fb.active) {
-        if (!_bufBuilt || _bufLastVersion != fb.version) {
-            [self rebuildFloatingResources:fb];
+    const macvoxel::PreviewOverlay& prev = macvoxel::CurrentPreview();
+    const OverlaySource active_source =
+        fb.active ? OverlaySource::FloatingBuffer
+        : (prev.active ? OverlaySource::Preview : OverlaySource::None);
+
+    if (active_source == OverlaySource::FloatingBuffer) {
+        if (!_bufBuilt || _bufSource != active_source ||
+            _bufLastVersion != fb.version) {
+            [self rebuildSparseSlotFromGrid:fb.grid
+                                     coarse:&_bufCoarseBuffer
+                                       pool:&_bufPoolBuffer
+                                  coarseMin:&_bufCoarseMin
+                                  coarseDim:&_bufCoarseDim
+                                 coarseName:@"RaycastBufCoarse"
+                                   poolName:@"RaycastBufPool"];
+            _bufBuilt = (_bufCoarseBuffer != nil);
+            _bufLastVersion = fb.version;
+            _bufSource = active_source;
         }
-    } else if (_bufBuilt) {
-        _bufCoarseBuffer = nil;
-        _bufPoolBuffer = nil;
-        _bufBuilt = NO;
+    } else if (active_source == OverlaySource::Preview) {
+        if (!_bufBuilt || _bufSource != active_source ||
+            _bufLastVersion != prev.version) {
+            [self rebuildSparseSlotFromGrid:prev.additions
+                                     coarse:&_bufCoarseBuffer
+                                       pool:&_bufPoolBuffer
+                                  coarseMin:&_bufCoarseMin
+                                  coarseDim:&_bufCoarseDim
+                                 coarseName:@"RaycastBufCoarse"
+                                   poolName:@"RaycastBufPool"];
+            _bufBuilt = (_bufCoarseBuffer != nil);
+            _bufLastVersion = prev.version;
+            _bufSource = active_source;
+        }
+        if (!_remBuilt || _remLastVersion != prev.version) {
+            [self rebuildSparseSlotFromGrid:prev.removals
+                                     coarse:&_remCoarseBuffer
+                                       pool:&_remPoolBuffer
+                                  coarseMin:&_remCoarseMin
+                                  coarseDim:&_remCoarseDim
+                                 coarseName:@"RaycastRemCoarse"
+                                   poolName:@"RaycastRemPool"];
+            _remBuilt = (_remCoarseBuffer != nil);
+            _remLastVersion = prev.version;
+        }
+    } else {
+        if (_bufBuilt) {
+            _bufCoarseBuffer = nil;
+            _bufPoolBuffer = nil;
+            _bufBuilt = NO;
+            _bufSource = OverlaySource::None;
+        }
+        if (_remBuilt) {
+            _remCoarseBuffer = nil;
+            _remPoolBuffer = nil;
+            _remBuilt = NO;
+        }
+    }
+    // Removals are preview-only — drop them whenever the active overlay
+    // isn't a preview, so a leftover removal mask never bleeds into a
+    // floating-buffer or no-overlay frame.
+    if (active_source != OverlaySource::Preview && _remBuilt) {
+        _remCoarseBuffer = nil;
+        _remPoolBuffer = nil;
+        _remBuilt = NO;
     }
 
     Uniforms u;
@@ -779,11 +902,13 @@ fragment float4 raycast_fragment(
     u.light_dir = simd::normalize(simd::float3{0.4f, 0.7f, 0.5f});
     u._pad3 = 0.0f;
 
-    const bool buffer_drawable = fb.active && _bufBuilt && _bufCoarseBuffer != nil;
+    const bool buffer_drawable = _bufBuilt && _bufCoarseBuffer != nil;
     if (buffer_drawable) {
         u.buf_coarse_min = _bufCoarseMin;
         u.buf_coarse_dim = _bufCoarseDim;
-        u.buf_offset = simd::int3{fb.offset_x, fb.offset_y, fb.offset_z};
+        u.buf_offset = (active_source == OverlaySource::FloatingBuffer)
+            ? simd::int3{fb.offset_x, fb.offset_y, fb.offset_z}
+            : simd::int3{0, 0, 0};
         u.buf_active = 1;
     } else {
         u.buf_coarse_min = simd::int3{0, 0, 0};
@@ -793,6 +918,18 @@ fragment float4 raycast_fragment(
     }
     u._pad4 = 0;
     u._pad5 = 0;
+
+    const bool removals_drawable = _remBuilt && _remCoarseBuffer != nil;
+    if (removals_drawable) {
+        u.rem_coarse_min = _remCoarseMin;
+        u.rem_coarse_dim = _remCoarseDim;
+        u.rem_active = 1;
+    } else {
+        u.rem_coarse_min = simd::int3{0, 0, 0};
+        u.rem_coarse_dim = simd::int3{0, 0, 0};
+        u.rem_active = 0;
+    }
+    u._pad6 = 0;
 
     [encoder pushDebugGroup:@"Voxels (raycast)"];
     [encoder setRenderPipelineState:_pipeline];
@@ -807,6 +944,12 @@ fragment float4 raycast_fragment(
     [encoder setFragmentBuffer:(buffer_drawable ? _bufPoolBuffer : _stubBuffer)
                         offset:0
                        atIndex:5];
+    [encoder setFragmentBuffer:(removals_drawable ? _remCoarseBuffer : _stubBuffer)
+                        offset:0
+                       atIndex:6];
+    [encoder setFragmentBuffer:(removals_drawable ? _remPoolBuffer : _stubBuffer)
+                        offset:0
+                       atIndex:7];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:3];
