@@ -18,6 +18,14 @@ void SelectCellsWhere(
     EditorContext& ctx,
     const std::function<bool(int32_t, int32_t, int32_t, uint8_t)>& pred);
 
+// Flood select: BFS from `seed` across 6-connected neighbors that
+// share its palette index, replace the active selection with the
+// resulting cell list. Empty seed (cell value 0) clears the
+// selection. Stops at the first non-matching neighbor in each
+// direction; the connected region need not be convex / simply
+// connected.
+void FloodSelectFromSeed(EditorContext& ctx, int32_t x, int32_t y, int32_t z);
+
 // 90° rotation of the active selection around the named axis. `cw` is
 // "clockwise as viewed from +axis looking toward origin" (right-hand
 // rule with the negative of the axis vector). Pivots around the

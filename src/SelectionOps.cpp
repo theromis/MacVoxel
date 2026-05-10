@@ -13,9 +13,51 @@
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace macvoxel {
+
+void FloodSelectFromSeed(EditorContext& ctx, int32_t x, int32_t y, int32_t z) {
+    const VoxelGrid& grid = ctx.document.grid;
+    const uint8_t target = grid.Get(x, y, z);
+    Selection& sel = ctx.selection;
+    if (target == 0) {
+        sel.Clear();
+        return;
+    }
+
+    std::unordered_set<int64_t> visited;
+    std::vector<std::array<int32_t, 3>> picked;
+    std::vector<std::array<int32_t, 3>> queue;
+    queue.reserve(256);
+    visited.reserve(256);
+
+    queue.push_back({x, y, z});
+    visited.insert(PackCellKey(x, y, z));
+
+    static constexpr int kStep[6][3] = {
+        { 1, 0, 0}, {-1, 0, 0},
+        { 0, 1, 0}, { 0,-1, 0},
+        { 0, 0, 1}, { 0, 0,-1},
+    };
+    while (!queue.empty()) {
+        const auto c = queue.back();
+        queue.pop_back();
+        picked.push_back(c);
+        for (int i = 0; i < 6; ++i) {
+            const int32_t nx = c[0] + kStep[i][0];
+            const int32_t ny = c[1] + kStep[i][1];
+            const int32_t nz = c[2] + kStep[i][2];
+            const int64_t key = PackCellKey(nx, ny, nz);
+            if (!visited.insert(key).second) continue;
+            if (grid.Get(nx, ny, nz) != target) continue;
+            queue.push_back({nx, ny, nz});
+        }
+    }
+
+    sel.SetVoxels(std::move(picked));
+}
 
 void SelectCellsWhere(
     EditorContext& ctx,

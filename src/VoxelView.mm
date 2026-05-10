@@ -24,11 +24,14 @@
 #include "EditHistory.h"
 #include "FloatingBuffer.h"
 #include "FloatingBufferOps.h"
+#include "BoxSelectController.h"
 #include "EditorContext.h"
+#include "FloodSelectController.h"
 #include "GeneratorState.h"
 #include "Input.h"
 #include "InteractionState.h"
 #include "MarqueeController.h"
+#include "MoveSelectController.h"
 #include "PreviewOverlay.h"
 #include "Raycast.h"
 #include "RenderState.h"
@@ -837,43 +840,26 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                (_ctx->tool.tool == macvoxel::ToolKind::Marquee ||
                 _ctx->tool.tool == macvoxel::ToolKind::BoxSelect ||
                 _ctx->tool.tool == macvoxel::ToolKind::FloodSelect) &&
-               [self tryBeginMoveSelectAtPoint:event.locationInWindow]) {
+               macvoxel::move_select_controller::OnMouseDown(
+                   *_ctx, _interaction, [self viewContext],
+                   [self mouseEventFromNSEvent:event])) {
         // Cmd-drag on a selected voxel takes over for the duration of
-        // the gesture; tryBeginMoveSelectAtPoint: set _interaction.drag_mode for us.
+        // the gesture; the controller set _interaction.drag_mode on success.
     } else if (_ctx->tool.tool == macvoxel::ToolKind::Marquee) {
         [self autoCommitFloatingBuffer];
         macvoxel::marquee_controller::OnMouseDown(
             _interaction, [self mouseEventFromNSEvent:event]);
     } else if (_ctx->tool.tool == macvoxel::ToolKind::BoxSelect) {
         [self autoCommitFloatingBuffer];
-        Vec3i pick;
-        const simd::float2 lp = [self localFromWindow:event.locationInWindow];
-        if ([self viewContext].PickCell(lp.x, lp.y, &pick)) {
-            _interaction.box_select.anchor = pick;
-            _interaction.drag_mode = DragMode::BoxSelect;
-            // SetBox stages the live AABB without populating cells; the
-            // mouseUp handler scans the doc and SetVoxels-es the result.
-            macvoxel::Bounds3 b{};
-            b.min_x = b.max_x = pick.x;
-            b.min_y = b.max_y = pick.y;
-            b.min_z = b.max_z = pick.z;
-            _ctx->selection.SetBox(b);
-        } else {
+        if (!macvoxel::box_select_controller::OnMouseDown(
+                *_ctx, _interaction, [self viewContext],
+                [self mouseEventFromNSEvent:event])) {
             _interaction.drag_mode = DragMode::None;
         }
     } else if (_ctx->tool.tool == macvoxel::ToolKind::FloodSelect) {
         [self autoCommitFloatingBuffer];
-        // Flood select fires entirely on mouseDown — there's no drag
-        // semantic. A click on an occupied voxel becomes the seed; an
-        // empty-space click clears the selection (lets the user undo
-        // a previous flood without switching tools).
-        Vec3i pick;
-        const simd::float2 lp = [self localFromWindow:event.locationInWindow];
-        if ([self viewContext].PickCell(lp.x, lp.y, &pick)) {
-            [self commitFloodSelectAt:pick];
-        } else {
-            _ctx->selection.Clear();
-        }
+        macvoxel::flood_select_controller::OnMouseDown(
+            *_ctx, [self viewContext], [self mouseEventFromNSEvent:event]);
         _interaction.drag_mode = DragMode::None;
     } else if (_ctx->tool.tool == macvoxel::ToolKind::Line ||
                _ctx->tool.tool == macvoxel::ToolKind::Circle ||
@@ -993,7 +979,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                 _interaction.marquee, [self mouseEventFromNSEvent:event]);
             break;
         case DragMode::MoveSelect:
-            [self updateMoveSelectAtPoint:p];
+            macvoxel::move_select_controller::OnMouseDragged(
+                *_ctx, _interaction.move_select, [self viewContext],
+                [self mouseEventFromNSEvent:event]);
             break;
         case DragMode::XformHandle: {
             const simd::float2 lp = [self localFromWindow:p];
@@ -1005,21 +993,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             [self applyXformHandleDelta:_interaction.xform.drag_face deltaVoxels:dv];
             break;
         }
-        case DragMode::BoxSelect: {
-            Vec3i pick;
-            const simd::float2 lp = [self localFromWindow:p];
-            if ([self viewContext].PickCell(lp.x, lp.y, &pick)) {
-                macvoxel::Bounds3 b{};
-                b.min_x = std::min(_interaction.box_select.anchor.x, pick.x);
-                b.min_y = std::min(_interaction.box_select.anchor.y, pick.y);
-                b.min_z = std::min(_interaction.box_select.anchor.z, pick.z);
-                b.max_x = std::max(_interaction.box_select.anchor.x, pick.x);
-                b.max_y = std::max(_interaction.box_select.anchor.y, pick.y);
-                b.max_z = std::max(_interaction.box_select.anchor.z, pick.z);
-                _ctx->selection.SetBox(b);
-            }
+        case DragMode::BoxSelect:
+            macvoxel::box_select_controller::OnMouseDragged(
+                *_ctx, _interaction.box_select, [self viewContext],
+                [self mouseEventFromNSEvent:event]);
             break;
-        }
         case DragMode::Shape:
             // Re-render the live preview at the new cursor; the actual
             // history entry happens on mouseUp at the release point.
@@ -1055,11 +1033,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         _interaction.drag_mode = DragMode::None;
         return;
     } else if (_interaction.drag_mode == DragMode::BoxSelect) {
-        [self commitBoxSelection];
+        macvoxel::box_select_controller::OnMouseUp(*_ctx);
         _interaction.drag_mode = DragMode::None;
         return;
     } else if (_interaction.drag_mode == DragMode::MoveSelect) {
-        [self commitMoveSelect];
+        // Buffer stays floating until an explicit commit gesture
+        // (tool switch / render toggle / save / etc.) hits the
+        // auto-commit hooks elsewhere.
         _interaction.drag_mode = DragMode::None;
         return;
     } else if (_interaction.drag_mode == DragMode::XformHandle) {
@@ -1300,20 +1280,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     [self drawCellWireAtX:cell.x y:cell.y z:cell.z color:color_for_mode(t.mode)];
 }
 
-// Box-select: every occupied cell within the AABB the user dragged
-// out. The selection's bounds are already up-to-date from the live
-// mouseDragged previews (SetBox calls); we just flesh out the voxel
-// list with the cells inside.
-- (void)commitBoxSelection {
-    const macvoxel::Bounds3 b = _ctx->selection.bounds();
-    macvoxel::SelectCellsWhere(
-        *_ctx, [&](int32_t cx, int32_t cy, int32_t cz, uint8_t /*pal*/) {
-            return (cx >= b.min_x && cx <= b.max_x &&
-                    cy >= b.min_y && cy <= b.max_y &&
-                    cz >= b.min_z && cz <= b.max_z);
-        });
-}
-
 // MoveSelect: Cmd-drag on a selected voxel translates the whole
 // selection in the plane of the clicked face, snapped to integer
 // voxel offsets. The selection is lifted into the FloatingBuffer if
@@ -1321,104 +1287,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // already), and the per-frame work is just an integer offset bump —
 // no document mutation, no chunk dirty queue. Returns YES if the
 // gesture took ownership of the drag.
-- (BOOL)tryBeginMoveSelectAtPoint:(NSPoint)windowPoint {
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr) return NO;
-
-    Vec3i cell;
-    int axis = 2;
-    int sign = 1;
-    uint8_t color = 0;
-    const simd::float2 lp = [self localFromWindow:windowPoint];
-    const macvoxel::ViewContext vc = [self viewContext];
-    if (!vc.PickFace(lp.x, lp.y, &cell, &axis, &sign, &color)) {
-        return NO;
-    }
-
-    macvoxel::FloatingBuffer& fb = _ctx->floating_buffer;
-    if (!fb.active) {
-        // Buffer is not floating yet → lift the on-grid selection into
-        // it. Click membership has to be against the selected cells
-        // (the ones the user can actually see on the document grid).
-        macvoxel::Selection& sel = _ctx->selection;
-        if (!sel.active() || sel.empty()) return NO;
-        if (!sel.Contains(cell.x, cell.y, cell.z)) return NO;
-        macvoxel::LiftSelectionToFloating(*_ctx);
-        if (!fb.active) return NO;  // failsafe: lift had nothing to do
-    } else {
-        // Buffer already active (e.g., from a paste). Click has to
-        // land on one of the buffer's cells in their currently-rendered
-        // world position.
-        const int32_t bx = cell.x - fb.offset_x;
-        const int32_t by = cell.y - fb.offset_y;
-        const int32_t bz = cell.z - fb.offset_z;
-        if (fb.grid.Get(bx, by, bz) == 0) return NO;
-    }
-
-    // Drag plane: the outward face of the clicked cell in *world*
-    // coords. The anchor is the camera-ray hit on that plane; we
-    // reuse it on every drag frame so the cursor delta translates
-    // 1:1 to a voxel offset regardless of where the user moves to
-    // along the in-plane axes.
-    const float plane_coord = (axis == 0)
-        ? (sign > 0 ? static_cast<float>(cell.x + 1) : static_cast<float>(cell.x))
-        : (axis == 1)
-        ? (sign > 0 ? static_cast<float>(cell.y + 1) : static_cast<float>(cell.y))
-        : (sign > 0 ? static_cast<float>(cell.z + 1) : static_cast<float>(cell.z));
-    simd::float3 anchor;
-    if (!vc.GridPlaneIntersect(lp.x, lp.y, axis, plane_coord, &anchor)) {
-        return NO;
-    }
-
-    _interaction.move_select.axis = axis;
-    _interaction.move_select.anchor_grid = anchor;
-    _interaction.move_select.start_offset = Vec3i{fb.offset_x, fb.offset_y, fb.offset_z};
-    _interaction.drag_mode = DragMode::MoveSelect;
-    return YES;
-}
-
-- (void)updateMoveSelectAtPoint:(NSPoint)windowPoint {
-    macvoxel::FloatingBuffer& fb = _ctx->floating_buffer;
-    if (!fb.active) return;
-
-    const float plane_coord = (_interaction.move_select.axis == 0) ? _interaction.move_select.anchor_grid.x
-                            : (_interaction.move_select.axis == 1) ? _interaction.move_select.anchor_grid.y
-                                               : _interaction.move_select.anchor_grid.z;
-    const simd::float2 lp = [self localFromWindow:windowPoint];
-    simd::float3 hit;
-    if (![self viewContext].GridPlaneIntersect(
-            lp.x, lp.y, _interaction.move_select.axis, plane_coord, &hit)) {
-        // Grazing ray — leave the offset where it was rather than
-        // jumping to the bogus huge t the math gave.
-        return;
-    }
-
-    auto round_to_int = [](float f) -> int32_t {
-        return static_cast<int32_t>(std::lround(f));
-    };
-    int32_t nx = _interaction.move_select.start_offset.x;
-    int32_t ny = _interaction.move_select.start_offset.y;
-    int32_t nz = _interaction.move_select.start_offset.z;
-    if (_interaction.move_select.axis != 0) nx += round_to_int(hit.x - _interaction.move_select.anchor_grid.x);
-    if (_interaction.move_select.axis != 1) ny += round_to_int(hit.y - _interaction.move_select.anchor_grid.y);
-    if (_interaction.move_select.axis != 2) nz += round_to_int(hit.z - _interaction.move_select.anchor_grid.z);
-
-    if (nx == fb.offset_x && ny == fb.offset_y && nz == fb.offset_z) return;
-    fb.offset_x = nx;
-    fb.offset_y = ny;
-    fb.offset_z = nz;
-    // Note: fb.version stays put. The chunk-pool upload is unchanged;
-    // only the offset uniform updates next frame, which is the entire
-    // point of the floating-buffer model.
-}
-
-- (void)commitMoveSelect {
-    // Nothing to commit on mouseUp — the buffer stays floating until
-    // the user issues an explicit commit gesture (deselect, switch
-    // tools, render-mode toggle, save, ...). The auto-commit hooks
-    // handle those entry points.
-}
-
 // "User moved on to a different gesture" hook. When the floating
 // buffer is alive and the user's about to do anything that's not a
 // continuation of the move (new selection / brush stroke / shape
@@ -1429,53 +1297,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     macvoxel::Document* doc = &_ctx->document;
     if (doc == nullptr) return;
     macvoxel::CommitFloatingBuffer(*_ctx);
-}
-
-// Flood select: BFS from the seed cell across 6-connected neighbors
-// that share its palette index. Empty seed → no-op. Stops the BFS
-// at the first non-matching neighbor in each direction; doesn't
-// require the shape to be convex or simply connected.
-- (void)commitFloodSelectAt:(Vec3i)seed {
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr) return;
-    const macvoxel::VoxelGrid& grid = doc->grid;
-    const uint8_t target = grid.Get(seed.x, seed.y, seed.z);
-    macvoxel::Selection& sel = _ctx->selection;
-    if (target == 0) {
-        sel.Clear();
-        return;
-    }
-
-    std::unordered_set<int64_t> visited;
-    std::vector<std::array<int32_t, 3>> picked;
-    std::vector<Vec3i> queue;
-    queue.reserve(256);
-    visited.reserve(256);
-
-    queue.push_back(seed);
-    visited.insert(macvoxel::PackCellKey(seed.x, seed.y, seed.z));
-
-    static const int kStep[6][3] = {
-        { 1, 0, 0}, {-1, 0, 0},
-        { 0, 1, 0}, { 0,-1, 0},
-        { 0, 0, 1}, { 0, 0,-1},
-    };
-    while (!queue.empty()) {
-        const Vec3i c = queue.back();
-        queue.pop_back();
-        picked.push_back({c.x, c.y, c.z});
-        for (int i = 0; i < 6; ++i) {
-            const int32_t nx = c.x + kStep[i][0];
-            const int32_t ny = c.y + kStep[i][1];
-            const int32_t nz = c.z + kStep[i][2];
-            const int64_t key = macvoxel::PackCellKey(nx, ny, nz);
-            if (!visited.insert(key).second) continue;
-            if (grid.Get(nx, ny, nz) != target) continue;
-            queue.push_back({nx, ny, nz});
-        }
-    }
-
-    sel.SetVoxels(std::move(picked));
 }
 
 - (void)drawSelectionOverlay {

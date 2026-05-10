@@ -68,7 +68,10 @@ set(APP_SOURCES
     src/FloatingBufferOps.cpp
     src/EditorContext.cpp
     src/ViewContext.cpp
+    src/BoxSelectController.cpp
+    src/FloodSelectController.cpp
     src/MarqueeController.cpp
+    src/MoveSelectController.cpp
     src/ui/GeneratorPanel.cpp
     src/ui/LightPanel.cpp
     src/ui/ModelPanel.cpp
