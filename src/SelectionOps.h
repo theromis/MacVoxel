@@ -1,10 +1,22 @@
 #pragma once
 
+#include <cstdint>
+#include <functional>
+
 namespace macvoxel {
 
 struct EditorContext;
 
 enum class Axis { X, Y, Z };
+
+// Iterate every occupied cell in the document, call `pred` on each,
+// and replace the active selection with the cells where `pred`
+// returned true. Empty result clears the selection. One-shot
+// O(filled_count); used by both Marquee and BoxSelect at the commit
+// edge of the gesture.
+void SelectCellsWhere(
+    EditorContext& ctx,
+    const std::function<bool(int32_t, int32_t, int32_t, uint8_t)>& pred);
 
 // 90° rotation of the active selection around the named axis. `cw` is
 // "clockwise as viewed from +axis looking toward origin" (right-hand

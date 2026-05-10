@@ -6,7 +6,9 @@
 #include "EditorContext.h"
 #include "FloatingBuffer.h"
 #include "Selection.h"
+#include "VoxelGrid.h"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -14,6 +16,35 @@
 #include <vector>
 
 namespace macvoxel {
+
+void SelectCellsWhere(
+    EditorContext& ctx,
+    const std::function<bool(int32_t, int32_t, int32_t, uint8_t)>& pred) {
+    std::vector<std::array<int32_t, 3>> picked;
+    constexpr uint32_t kCS = VoxelGrid::kChunkSize;
+    for (const auto& [coord, chunk] : ctx.document.grid.chunks()) {
+        if (chunk->filled_count == 0) continue;
+        const int32_t base_x = coord.x * static_cast<int32_t>(kCS);
+        const int32_t base_y = coord.y * static_cast<int32_t>(kCS);
+        const int32_t base_z = coord.z * static_cast<int32_t>(kCS);
+        for (uint32_t lz = 0; lz < kCS; ++lz) {
+            for (uint32_t ly = 0; ly < kCS; ++ly) {
+                for (uint32_t lx = 0; lx < kCS; ++lx) {
+                    const size_t idx = lx + ly * kCS + lz * kCS * kCS;
+                    const uint8_t pal = chunk->cells[idx];
+                    if (pal == 0) continue;
+                    const int32_t cx = base_x + static_cast<int32_t>(lx);
+                    const int32_t cy = base_y + static_cast<int32_t>(ly);
+                    const int32_t cz = base_z + static_cast<int32_t>(lz);
+                    if (!pred(cx, cy, cz, pal)) continue;
+                    picked.push_back({cx, cy, cz});
+                }
+            }
+        }
+    }
+    ctx.selection.SetVoxels(std::move(picked));
+}
+
 namespace {
 
 // Apply a per-cell coordinate mapping to the active selection: clear

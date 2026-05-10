@@ -68,6 +68,7 @@ set(APP_SOURCES
     src/FloatingBufferOps.cpp
     src/EditorContext.cpp
     src/ViewContext.cpp
+    src/MarqueeController.cpp
     src/ui/GeneratorPanel.cpp
     src/ui/LightPanel.cpp
     src/ui/ModelPanel.cpp

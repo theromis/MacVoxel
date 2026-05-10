@@ -69,15 +69,15 @@ struct InteractionState {
         bool has_point = false;
     } hover;
 
-    // Marquee tool: the rectangle's two corners in NSWindow coords.
-    // We deliberately don't pick a voxel at mouseDown — the marquee
-    // selects what's *under* the rect on commit, so an anchor in
-    // empty space is fine. Both points get re-projected on mouseUp
-    // through the live camera matrix; no per-pixel work happens
-    // during drag.
+    // Marquee tool: the rectangle's two corners in view-local
+    // coords. We deliberately don't pick a voxel at mouseDown — the
+    // marquee selects what's *under* the rect on commit, so an anchor
+    // in empty space is fine. Both points get re-projected on mouseUp
+    // through the live camera matrix; no per-pixel work happens during
+    // drag.
     struct MarqueeDrag {
-        CGPoint anchor_window{};
-        CGPoint current_window{};
+        simd::float2 anchor_local{0.0f, 0.0f};
+        simd::float2 current_local{0.0f, 0.0f};
     } marquee;
 
     // Box-select tool: anchor cell at mouseDown; the selection's
