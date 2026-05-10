@@ -61,11 +61,11 @@ struct InteractionState {
         std::unordered_set<int64_t> drag_skip_cells;
     } brush;
 
-    // Cursor hover — last known mouse position in NSWindow coords,
+    // Cursor hover — last known mouse position in view-local coords,
     // and whether the cursor is currently inside the view. Drives
     // the hover overlay.
     struct Hover {
-        CGPoint window_point{};
+        simd::float2 local{0.0f, 0.0f};
         bool has_point = false;
     } hover;
 

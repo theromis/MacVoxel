@@ -77,6 +77,7 @@ set(APP_SOURCES
     src/MoveSelectController.cpp
     src/PreviewOps.cpp
     src/ShapeController.cpp
+    src/XformHandleController.cpp
     src/ui/GeneratorPanel.cpp
     src/ui/LightPanel.cpp
     src/ui/ModelPanel.cpp
