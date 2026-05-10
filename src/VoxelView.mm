@@ -27,6 +27,8 @@
 #include "BoxSelectController.h"
 #include "BrushController.h"
 #include "BrushOps.h"
+#include "PreviewOps.h"
+#include "ShapeController.h"
 #include "EditorContext.h"
 #include "FloodSelectController.h"
 #include "GeneratorState.h"
@@ -56,7 +58,6 @@ namespace {
 using DragMode = macvoxel::DragMode;
 
 using Vec3i = macvoxel::shapes::Vec3i;
-struct LineHit { int32_t x, y, z; int face_axis; };
 
 // (axis, sign) for face index 0..5. axis/2 = X|Y|Z; sign +1 for "max"
 // face, -1 for "min" face. Layout matches kFaceArrowOrder below.
@@ -838,40 +839,42 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     } else if (_ctx->tool.tool == macvoxel::ToolKind::Line ||
                _ctx->tool.tool == macvoxel::ToolKind::Circle ||
                _ctx->tool.tool == macvoxel::ToolKind::Square ||
-               _ctx->tool.tool == macvoxel::ToolKind::Box ||
-               _ctx->tool.tool == macvoxel::ToolKind::Generator) {
+               _ctx->tool.tool == macvoxel::ToolKind::Box) {
         [self autoCommitFloatingBuffer];
-        // Click-and-drag shape tools — anchor on mouseDown, preview while
-        // dragging, commit on mouseUp at the release point.
-        const macvoxel::ToolMode mode = hasCommand ? macvoxel::ToolMode::Remove
-                                                    : _ctx->tool.mode;
-        [self beginAnchorAtPoint:event.locationInWindow mode:mode];
-        if (_interaction.anchor.has_anchor) {
-            _interaction.drag_mode = DragMode::Shape;
+        const macvoxel::MouseEvent me = [self mouseEventFromNSEvent:event];
+        if (macvoxel::shape_controller::OnMouseDown(
+                *_ctx, _interaction, [self viewContext], me)) {
             // Track the cursor for the live preview while the button is
             // held — mouseMoved doesn't fire during a drag.
             _interaction.hover.window_point = event.locationInWindow;
             _interaction.hover.has_point = YES;
-            // Generator tool: activate the gizmo immediately so the
-            // AABB outline is visible from the first click rather than
-            // appearing only after release. _interaction.gen_gizmo.bounds starts as the
-            // anchor cell alone; refreshShapePreview's Generator case
-            // grows it as the user drags.
-            if (_ctx->tool.tool ==
-                macvoxel::ToolKind::Generator) {
-                _interaction.gen_gizmo.bounds = macvoxel::generators::Bounds3i{
-                    _interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
-                    _interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
-                };
-                _interaction.gen_gizmo.active = YES;
-                _interaction.gen_gizmo.last_kind =
-                    _ctx->generator.active_kind;
-                _interaction.gen_gizmo.last_bounds = _interaction.gen_gizmo.bounds;
-                _interaction.gen_gizmo.last_params =
-                    _ctx->generator.params;
-                _interaction.gen_gizmo.last_params.palette_idx =
-                    _ctx->tool.palette_idx;
-            }
+        } else {
+            _interaction.drag_mode = DragMode::None;
+        }
+    } else if (_ctx->tool.tool == macvoxel::ToolKind::Generator) {
+        [self autoCommitFloatingBuffer];
+        // Generator shares the two-click anchor pattern with the shape
+        // tools but also activates a face-handle gizmo immediately so
+        // the AABB outline shows from the first click. The gizmo
+        // lifecycle (commit / cancel / face-drag) lives on the view
+        // until GeneratorController extracts.
+        const macvoxel::ToolMode mode = hasCommand ? macvoxel::ToolMode::Remove
+                                                    : _ctx->tool.mode;
+        const macvoxel::MouseEvent me = [self mouseEventFromNSEvent:event];
+        if (macvoxel::shape_controller::BeginAnchor(
+                *_ctx, _interaction, [self viewContext], me, mode)) {
+            _interaction.drag_mode = DragMode::Shape;
+            _interaction.hover.window_point = event.locationInWindow;
+            _interaction.hover.has_point = YES;
+            _interaction.gen_gizmo.bounds = macvoxel::generators::Bounds3i{
+                _interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
+                _interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
+            };
+            _interaction.gen_gizmo.active = YES;
+            _interaction.gen_gizmo.last_kind = _ctx->generator.active_kind;
+            _interaction.gen_gizmo.last_bounds = _interaction.gen_gizmo.bounds;
+            _interaction.gen_gizmo.last_params = _ctx->generator.params;
+            _interaction.gen_gizmo.last_params.palette_idx = _ctx->tool.palette_idx;
             // Render the initial click-cell shape so a bare click (no
             // drag) shows its placement before mouseUp commits.
             [self refreshShapePreview];
@@ -977,7 +980,18 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             // history entry happens on mouseUp at the release point.
             _interaction.hover.window_point = p;
             _interaction.hover.has_point = YES;
-            [self refreshShapePreview];
+            if (_interaction.anchor.tool == macvoxel::ToolKind::Line ||
+                _interaction.anchor.tool == macvoxel::ToolKind::Circle ||
+                _interaction.anchor.tool == macvoxel::ToolKind::Square ||
+                _interaction.anchor.tool == macvoxel::ToolKind::Box) {
+                macvoxel::shape_controller::OnMouseDragged(
+                    *_ctx, _interaction, [self viewContext],
+                    [self mouseEventFromNSEvent:event]);
+            } else {
+                // Face / Generator drag-out — still on view until those
+                // controllers extract.
+                [self refreshShapePreview];
+            }
             break;
         case DragMode::GenHandle: {
             // Project the cursor delta onto the dragged face's normal,
@@ -1031,32 +1045,28 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         _interaction.drag_mode = DragMode::None;
         _interaction.gen_gizmo.active_drag_face = -1;
     } else if (_interaction.drag_mode == DragMode::Shape) {
-        if (_interaction.anchor.tool == macvoxel::ToolKind::Generator) {
-            // Gizmo went live on mouseDown and refreshShapePreview kept
-            // _interaction.gen_gizmo.bounds in sync with the drag, so the box is already
-            // in the right state. Just stop dragging and let the gizmo
-            // hold position until the user commits, cancels, or grabs
-            // a face handle.
-            _interaction.drag_mode = DragMode::None;
-            _interaction.anchor.has_anchor = NO;
-        } else {
-            // Line/Circle/Square/Box/Face all read their final cell list
-            // from PreviewOverlay — no rollback needed because the doc
-            // was never touched during the preview gesture.
-            _interaction.drag_mode = DragMode::None;
-            switch (_interaction.anchor.tool) {
-                case macvoxel::ToolKind::Line:
-                    [self commitLineAtPoint:event.locationInWindow]; break;
-                case macvoxel::ToolKind::Circle:
-                    [self commitCircleAtPoint:event.locationInWindow]; break;
-                case macvoxel::ToolKind::Square:
-                    [self commitSquareAtPoint:event.locationInWindow]; break;
-                case macvoxel::ToolKind::Box:
-                    [self commitBoxAtPoint:event.locationInWindow]; break;
-                case macvoxel::ToolKind::Face:
-                    [self commitFaceAtPoint:event.locationInWindow]; break;
-                default: _interaction.anchor.has_anchor = NO; break;
-            }
+        _interaction.drag_mode = DragMode::None;
+        switch (_interaction.anchor.tool) {
+            case macvoxel::ToolKind::Line:
+            case macvoxel::ToolKind::Circle:
+            case macvoxel::ToolKind::Square:
+            case macvoxel::ToolKind::Box:
+                macvoxel::shape_controller::OnMouseUp(*_ctx, _interaction);
+                break;
+            case macvoxel::ToolKind::Face:
+                [self commitFaceAtPoint:event.locationInWindow];
+                break;
+            case macvoxel::ToolKind::Generator:
+                // Gizmo went live on mouseDown; refreshShapePreview kept
+                // gen_gizmo.bounds in sync with the drag, so the box is
+                // already in the right state. Just stop dragging and let
+                // the gizmo hold position until the user commits,
+                // cancels, or grabs a face handle.
+                _interaction.anchor.has_anchor = NO;
+                break;
+            default:
+                _interaction.anchor.has_anchor = NO;
+                break;
         }
     }
     _interaction.drag_mode = DragMode::None;
@@ -1788,159 +1798,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     ++overlay.version;
 }
 
-// ---------------------------------------------------------------------------
-// Line tool — two-click point-to-point. Click 1 stores an anchor; click 2
-// enumerates the line and stamps the brush at every cell.
-// ---------------------------------------------------------------------------
-
-- (void)enumerateLineFromAnchorTo:(NSPoint)cursor
-                          straight:(BOOL)straight
-                            output:(std::vector<LineHit>&)out {
-    out.clear();
-    if (!_interaction.anchor.has_anchor) return;
-
-    const macvoxel::ViewContext vc = [self viewContext];
-    const simd::float2 cursor_local = [self localFromWindow:cursor];
-
-    if (straight) {
-        Vec3i endpoint;
-        int end_face = _interaction.anchor.face_axis;
-        if (!vc.ComputeLineEndpoint(cursor_local.x, cursor_local.y,
-                                    _interaction.anchor.mode,
-                                    &endpoint, &end_face)) {
-            // Endpoint picker only fails when no usable cell exists at all
-            // (e.g., camera looking up so the ground-plane fallback is
-            // behind the camera). Show just the anchor.
-            out.push_back({_interaction.anchor.cell.x, _interaction.anchor.cell.y,
-                           _interaction.anchor.cell.z, _interaction.anchor.face_axis});
-            return;
-        }
-        std::vector<Vec3i> cells;
-        macvoxel::shapes::EnumerateLine(_interaction.anchor.cell, endpoint, cells);
-        out.reserve(cells.size());
-        for (const Vec3i& c : cells) {
-            out.push_back({c.x, c.y, c.z, _interaction.anchor.face_axis});
-        }
-        return;
-    }
-
-    // Project mode: walk the screen-space segment from the anchor click
-    // pixel to the cursor pixel, raycasting at each step. Each hit is the
-    // cell a single Brush click at that pixel would have produced.
-    const simd::float2 s1 = _interaction.anchor.screen_local;
-    const simd::float2 s2 = cursor_local;
-    const float dx = s2.x - s1.x;
-    const float dy = s2.y - s1.y;
-    // Oversample 2× so oblique screen-space lines don't skip voxels whose
-    // projection sits between integer pixels.
-    const int steps = std::max(1, static_cast<int>(
-        2.0f * std::max(std::fabs(dx), std::fabs(dy))));
-    std::unordered_set<int64_t> seen;
-    seen.reserve(static_cast<size_t>(steps) + 1);
-    for (int i = 0; i <= steps; ++i) {
-        const float u = static_cast<float>(i) / static_cast<float>(steps);
-        const float px = s1.x + dx * u;
-        const float py = s1.y + dy * u;
-        Vec3i cell;
-        int face_axis = _interaction.anchor.face_axis;
-        if (!vc.ComputeTargetCell(px, py, _interaction.anchor.mode,
-                                  &cell, &face_axis)) {
-            continue;
-        }
-        const int64_t k = macvoxel::PackCellKey(cell.x, cell.y, cell.z);
-        if (!seen.insert(k).second) continue;
-        out.push_back({cell.x, cell.y, cell.z, face_axis});
-    }
-    // The anchor cell may not be among the per-step hits if the anchor
-    // started on the ground-plane fallback while the first stepped pixels
-    // hit different cells; ensure click 1's cell is always included so
-    // the line endpoint always reads as placed.
-    const int64_t anchor_k = macvoxel::PackCellKey(
-        _interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z);
-    if (seen.find(anchor_k) == seen.end()) {
-        out.insert(out.begin(), {_interaction.anchor.cell.x, _interaction.anchor.cell.y,
-                                 _interaction.anchor.cell.z, _interaction.anchor.face_axis});
-    }
-}
-
-// Walk the active PreviewOverlay and apply its additions / removals to
-// the document through one EditHistory op, then clear the overlay. Used
-// at the commit edge of overlay-backed tool gestures (Line / Circle /
-// Square / Box mouseUp; Generator-gizmo confirm). No-op when the overlay
-// is empty / inactive, so calling this through a cancelled gesture is
-// safe.
-- (void)commitPreviewOverlayThroughHistory {
-    macvoxel::PreviewOverlay& overlay = _ctx->preview;
-    if (!overlay.active) return;
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr) { overlay.Clear(); return; }
-
-    using VG = macvoxel::VoxelGrid;
-    macvoxel::EditHistory& history = _ctx->history;
-    bool op_open = false;
-    bool any_writes = false;
-    auto ensure_op = [&]() {
-        if (!op_open) {
-            history.BeginOp();
-            op_open = true;
-        }
-    };
-
-    // Additions: every non-zero cell in the additions chunk pool is a
-    // "write this palette index here". Skip cells whose value already
-    // matches the doc — Stamp turns those into ClearAt, so they normally
-    // don't appear, but a redundant pass costs nothing and guards against
-    // stale chunks from earlier in the gesture.
-    for (const auto& [coord, chunk] : overlay.additions.chunks()) {
-        if (chunk->filled_count == 0) continue;
-        for (uint32_t i = 0; i < VG::kChunkVolume; ++i) {
-            const uint8_t new_val = chunk->cells[i];
-            if (new_val == 0) continue;
-            const uint32_t lx = i & VG::kChunkMask;
-            const uint32_t ly = (i >> VG::kChunkBits) & VG::kChunkMask;
-            const uint32_t lz = i >> (2 * VG::kChunkBits);
-            const int32_t x = (coord.x << VG::kChunkBits) + (int32_t)lx;
-            const int32_t y = (coord.y << VG::kChunkBits) + (int32_t)ly;
-            const int32_t z = (coord.z << VG::kChunkBits) + (int32_t)lz;
-            const uint8_t old_val = doc->grid.Get(x, y, z);
-            if (old_val == new_val) continue;
-            ensure_op();
-            doc->grid.Set(x, y, z, new_val);
-            history.Record(x, y, z, old_val, new_val);
-            any_writes = true;
-        }
-    }
-    // Removals: every non-zero cell in the removals chunk pool is a
-    // "make this doc cell empty". Doc cells already empty are no-ops.
-    for (const auto& [coord, chunk] : overlay.removals.chunks()) {
-        if (chunk->filled_count == 0) continue;
-        for (uint32_t i = 0; i < VG::kChunkVolume; ++i) {
-            if (chunk->cells[i] == 0) continue;
-            const uint32_t lx = i & VG::kChunkMask;
-            const uint32_t ly = (i >> VG::kChunkBits) & VG::kChunkMask;
-            const uint32_t lz = i >> (2 * VG::kChunkBits);
-            const int32_t x = (coord.x << VG::kChunkBits) + (int32_t)lx;
-            const int32_t y = (coord.y << VG::kChunkBits) + (int32_t)ly;
-            const int32_t z = (coord.z << VG::kChunkBits) + (int32_t)lz;
-            const uint8_t old_val = doc->grid.Get(x, y, z);
-            if (old_val == 0) continue;
-            ensure_op();
-            doc->grid.Set(x, y, z, 0);
-            history.Record(x, y, z, old_val, 0);
-            any_writes = true;
-        }
-    }
-
-    if (op_open) history.CommitOp();
-    if (any_writes) doc->BumpGeometry();
-    overlay.Clear();
-}
-
-// Re-render the in-progress shape into the PreviewOverlay at the
-// current cursor. Stamps go through `stampBrushAtX:` (Line/Circle/
-// Square/Box) or `stampGeneratorCellsToOverlay:` (Generator); the
-// Face branch drives `transitionFaceTo:` which mutates the overlay
-// in place. The doc grid is not touched until commit.
+// Per-frame preview refresh for the Face tool and the Generator
+// drag-out, both of which still live on the view. ShapeController
+// owns the Line/Circle/Square/Box paths.
 - (void)refreshShapePreview {
     if (!_interaction.anchor.has_anchor || _interaction.drag_mode != DragMode::Shape) return;
 
@@ -1949,9 +1809,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // so dragging through layer boundaries costs O(seed_cells × Δd)
     // per frame rather than O(seed_cells × |d|).
     if (_interaction.anchor.tool == macvoxel::ToolKind::Face) {
-        // Click without drag previews as a single layer; once a non-zero
-        // d has been observed the override stops applying so dragging
-        // back to the anchor cleanly cancels.
         const simd::float2 hp = [self localFromWindow:_interaction.hover.window_point];
         int d = [self viewContext].FaceDragVoxels(
             hp.x, hp.y, _interaction.anchor.cell,
@@ -1973,230 +1830,42 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         return;
     }
 
-    // Other shape tools: rebuild from scratch every refresh, since their
-    // hit list is a continuous function of cursor position with no clean
-    // discrete short-circuit. Line/Circle/Square/Box/Generator stage
-    // into the overlay; the doc grid is left alone until commit.
-    macvoxel::PreviewOverlay& overlay = _ctx->preview;
-    overlay.Clear();
-    overlay.active = true;
+    // Generator drag-out: rebuild bounds from anchor + cursor, run the
+    // engine, stamp the result. Stays on view until GeneratorController
+    // extracts.
+    if (_interaction.anchor.tool == macvoxel::ToolKind::Generator) {
+        macvoxel::PreviewOverlay& overlay = _ctx->preview;
+        overlay.Clear();
+        overlay.active = true;
 
-    const macvoxel::ToolSettings& t = _ctx->tool;
-    std::vector<LineHit> hits;
-    switch (_interaction.anchor.tool) {
-        case macvoxel::ToolKind::Line: {
-            const BOOL straight =
-                t.line_mode == macvoxel::LineMode::Straight;
-            [self enumerateLineFromAnchorTo:_interaction.hover.window_point
-                                    straight:straight output:hits];
-            break;
-        }
-        case macvoxel::ToolKind::Circle:
-            [self enumerateCircleFromAnchorTo:_interaction.hover.window_point
-                                         fill:t.circle_fill
-                                         even:t.circle_even
-                                       output:hits];
-            break;
-        case macvoxel::ToolKind::Square:
-            [self enumerateSquareFromAnchorTo:_interaction.hover.window_point
-                                         fill:t.square_fill
-                                         even:t.square_even
-                                       output:hits];
-            break;
-        case macvoxel::ToolKind::Box:
-            [self enumerateBoxFromAnchorTo:_interaction.hover.window_point
-                                      fill:t.box_fill
-                                    output:hits];
-            break;
-        case macvoxel::ToolKind::Generator: {
-            // Engine emits final cells; brush footprint must NOT apply,
-            // so this path bypasses the per-hit stampBrushAtX loop and
-            // writes through stampGeneratorCellsToOverlay instead. The
-            // overlay has already been Cleared above (Generator counts as
-            // an overlay tool), so each refresh starts from a blank slate.
-            Vec3i endpoint = _interaction.anchor.cell;
-            int end_face = _interaction.anchor.face_axis;
-            const simd::float2 hp = [self localFromWindow:_interaction.hover.window_point];
-            [self viewContext].ComputeLineEndpoint(
-                hp.x, hp.y, _interaction.anchor.mode, &endpoint, &end_face);
-            macvoxel::generators::Bounds3i b{
-                std::min(_interaction.anchor.cell.x, endpoint.x),
-                std::min(_interaction.anchor.cell.y, endpoint.y),
-                std::min(_interaction.anchor.cell.z, endpoint.z),
-                std::max(_interaction.anchor.cell.x, endpoint.x),
-                std::max(_interaction.anchor.cell.y, endpoint.y),
-                std::max(_interaction.anchor.cell.z, endpoint.z),
-            };
-            macvoxel::generators::Params p =
-                _ctx->generator.params;
-            p.palette_idx = _ctx->tool.palette_idx;
-            std::vector<macvoxel::shapes::Vec3i> cells;
-            [_generatorEngine
-                generateInto:cells
-                        kind:_ctx->generator.active_kind
-                      bounds:b
-                      params:p];
-            [self stampGeneratorCellsToOverlay:cells mode:_interaction.anchor.mode];
-            // Keep gizmo state synced with the drag so drawGenGizmo
-            // sees the live bounds and the per-frame change-detector
-            // doesn't redundantly re-fire on the next frame.
-            _interaction.gen_gizmo.bounds = b;
-            _interaction.gen_gizmo.last_kind = _ctx->generator.active_kind;
-            _interaction.gen_gizmo.last_bounds = b;
-            _interaction.gen_gizmo.last_params = p;
-            return;
-        }
-        default: return;
+        Vec3i endpoint = _interaction.anchor.cell;
+        int end_face = _interaction.anchor.face_axis;
+        const simd::float2 hp = [self localFromWindow:_interaction.hover.window_point];
+        [self viewContext].ComputeLineEndpoint(
+            hp.x, hp.y, _interaction.anchor.mode, &endpoint, &end_face);
+        macvoxel::generators::Bounds3i b{
+            std::min(_interaction.anchor.cell.x, endpoint.x),
+            std::min(_interaction.anchor.cell.y, endpoint.y),
+            std::min(_interaction.anchor.cell.z, endpoint.z),
+            std::max(_interaction.anchor.cell.x, endpoint.x),
+            std::max(_interaction.anchor.cell.y, endpoint.y),
+            std::max(_interaction.anchor.cell.z, endpoint.z),
+        };
+        macvoxel::generators::Params p = _ctx->generator.params;
+        p.palette_idx = _ctx->tool.palette_idx;
+        std::vector<macvoxel::shapes::Vec3i> cells;
+        [_generatorEngine generateInto:cells
+                                  kind:_ctx->generator.active_kind
+                                bounds:b
+                                params:p];
+        [self stampGeneratorCellsToOverlay:cells mode:_interaction.anchor.mode];
+        // Keep gizmo state synced so drawGenGizmo sees the live bounds
+        // and the per-frame change-detector doesn't redundantly re-fire.
+        _interaction.gen_gizmo.bounds = b;
+        _interaction.gen_gizmo.last_kind = _ctx->generator.active_kind;
+        _interaction.gen_gizmo.last_bounds = b;
+        _interaction.gen_gizmo.last_params = p;
     }
-    for (const LineHit& h : hits) {
-        macvoxel::StampBrushFootprint(*_ctx, h.x, h.y, h.z, h.face_axis,
-                                      _interaction.anchor.mode,
-                                      /*preview=*/true, nullptr);
-    }
-    ++overlay.version;
-}
-
-- (void)beginAnchorAtPoint:(NSPoint)windowPoint mode:(macvoxel::ToolMode)mode {
-    Vec3i target;
-    int face_axis = 2;
-    const simd::float2 lp = [self localFromWindow:windowPoint];
-    if (![self viewContext].ComputeLineEndpoint(
-            lp.x, lp.y, mode, &target, &face_axis)) {
-        return;
-    }
-    _interaction.anchor.has_anchor = YES;
-    _interaction.anchor.cell = target;
-    _interaction.anchor.face_axis = face_axis;
-    _interaction.anchor.mode = mode;
-    _interaction.anchor.screen_local = lp;
-    _interaction.anchor.tool = _ctx->tool.tool;
-}
-
-- (void)commitLineAtPoint:(NSPoint)windowPoint {
-    (void)windowPoint;
-    if (!_interaction.anchor.has_anchor) return;
-    [self commitPreviewOverlayThroughHistory];
-    _interaction.anchor.has_anchor = NO;
-}
-
-// ---------------------------------------------------------------------------
-// Circle tool — two-click center-to-edge planar disc / ring.
-// ---------------------------------------------------------------------------
-
-- (void)enumerateCircleFromAnchorTo:(NSPoint)cursor
-                                fill:(BOOL)fill
-                                even:(BOOL)even
-                              output:(std::vector<LineHit>&)out {
-    out.clear();
-    if (!_interaction.anchor.has_anchor) return;
-
-    Vec3i endpoint;
-    int end_face = _interaction.anchor.face_axis;
-    const simd::float2 lp = [self localFromWindow:cursor];
-    if (![self viewContext].ComputeLineEndpoint(
-            lp.x, lp.y, _interaction.anchor.mode, &endpoint, &end_face)) {
-        out.push_back({_interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
-                       _interaction.anchor.face_axis});
-        return;
-    }
-
-    std::vector<Vec3i> cells;
-    macvoxel::shapes::EnumerateCirclePlanar(_interaction.anchor.cell, endpoint,
-                                            _interaction.anchor.face_axis, fill, even,
-                                            cells);
-    out.reserve(cells.size());
-    for (const Vec3i& c : cells) {
-        out.push_back({c.x, c.y, c.z, _interaction.anchor.face_axis});
-    }
-}
-
-- (void)commitCircleAtPoint:(NSPoint)windowPoint {
-    (void)windowPoint;
-    if (!_interaction.anchor.has_anchor) return;
-    [self commitPreviewOverlayThroughHistory];
-    _interaction.anchor.has_anchor = NO;
-}
-
-// ---------------------------------------------------------------------------
-// Square tool — two-click center-to-edge-midpoint planar square / frame.
-// Same shape as the Circle tool but with a Chebyshev (max-norm) predicate
-// instead of Euclidean. The cursor's offset from the anchor is interpreted
-// as the *midpoint of an edge* of the square, so the half-side is the
-// dominant axis of the offset (max(|du|, |dv|)) and the square is always
-// centered on the anchor cell — distinguishing it from a Box tool where
-// the cursor would be at one corner.
-// ---------------------------------------------------------------------------
-
-- (void)enumerateSquareFromAnchorTo:(NSPoint)cursor
-                                fill:(BOOL)fill
-                                even:(BOOL)even
-                              output:(std::vector<LineHit>&)out {
-    out.clear();
-    if (!_interaction.anchor.has_anchor) return;
-
-    Vec3i endpoint;
-    int end_face = _interaction.anchor.face_axis;
-    const simd::float2 lp = [self localFromWindow:cursor];
-    if (![self viewContext].ComputeLineEndpoint(
-            lp.x, lp.y, _interaction.anchor.mode, &endpoint, &end_face)) {
-        out.push_back({_interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
-                       _interaction.anchor.face_axis});
-        return;
-    }
-
-    std::vector<Vec3i> cells;
-    macvoxel::shapes::EnumerateSquarePlanar(_interaction.anchor.cell, endpoint,
-                                            _interaction.anchor.face_axis, fill, even,
-                                            cells);
-    out.reserve(cells.size());
-    for (const Vec3i& c : cells) {
-        out.push_back({c.x, c.y, c.z, _interaction.anchor.face_axis});
-    }
-}
-
-- (void)commitSquareAtPoint:(NSPoint)windowPoint {
-    (void)windowPoint;
-    if (!_interaction.anchor.has_anchor) return;
-    [self commitPreviewOverlayThroughHistory];
-    _interaction.anchor.has_anchor = NO;
-}
-
-// ---------------------------------------------------------------------------
-// Box tool — two-click corner-to-corner volumetric AABB / hollow shell.
-// Shares the same endpoint picker as Line (raycast hit, ground-plane
-// fallback), so click-in-empty-space drags the cursor along the ground
-// plane and the box spans from the anchor's depth down to it.
-// ---------------------------------------------------------------------------
-
-- (void)enumerateBoxFromAnchorTo:(NSPoint)cursor
-                             fill:(BOOL)fill
-                           output:(std::vector<LineHit>&)out {
-    out.clear();
-    if (!_interaction.anchor.has_anchor) return;
-
-    Vec3i endpoint;
-    int end_face = _interaction.anchor.face_axis;
-    const simd::float2 lp = [self localFromWindow:cursor];
-    if (![self viewContext].ComputeLineEndpoint(
-            lp.x, lp.y, _interaction.anchor.mode, &endpoint, &end_face)) {
-        out.push_back({_interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
-                       _interaction.anchor.face_axis});
-        return;
-    }
-
-    std::vector<Vec3i> cells;
-    macvoxel::shapes::EnumerateBox(_interaction.anchor.cell, endpoint, fill, cells);
-    out.reserve(cells.size());
-    for (const Vec3i& c : cells) {
-        out.push_back({c.x, c.y, c.z, _interaction.anchor.face_axis});
-    }
-}
-
-- (void)commitBoxAtPoint:(NSPoint)windowPoint {
-    (void)windowPoint;
-    if (!_interaction.anchor.has_anchor) return;
-    [self commitPreviewOverlayThroughHistory];
-    _interaction.anchor.has_anchor = NO;
 }
 
 // ---------------------------------------------------------------------------
@@ -2235,7 +1904,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // undo step, then exit gizmo state.
 - (void)commitGenGizmo {
     if (!_interaction.gen_gizmo.active) return;
-    [self commitPreviewOverlayThroughHistory];
+    macvoxel::CommitPreviewOverlayThroughHistory(*_ctx);
     _interaction.gen_gizmo.active = NO;
 }
 
@@ -2513,7 +2182,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         _ctx->tool.face_with != _interaction.face.applied_with) {
         [self transitionFaceTo:d];
     }
-    [self commitPreviewOverlayThroughHistory];
+    macvoxel::CommitPreviewOverlayThroughHistory(*_ctx);
     _interaction.anchor.has_anchor = NO;
     _interaction.face.seed_cells.clear();
 }

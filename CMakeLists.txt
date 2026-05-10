@@ -74,6 +74,8 @@ set(APP_SOURCES
     src/FloodSelectController.cpp
     src/MarqueeController.cpp
     src/MoveSelectController.cpp
+    src/PreviewOps.cpp
+    src/ShapeController.cpp
     src/ui/GeneratorPanel.cpp
     src/ui/LightPanel.cpp
     src/ui/ModelPanel.cpp
