@@ -72,6 +72,7 @@ set(APP_SOURCES
     src/FloatingBufferOps.cpp
     src/PreviewOverlay.cpp
     src/Clipboard.cpp
+    src/PanelState.cpp
     src/ui/GeneratorPanel.cpp
     src/ui/LightPanel.cpp
     src/ui/ModelPanel.cpp

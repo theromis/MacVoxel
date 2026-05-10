@@ -5,21 +5,18 @@
 #include "Fonts.h"
 #include "Material.h"
 #include "Palette.h"
+#include "PanelState.h"
 #include "RenderState.h"
 #include "ToolState.h"
 
 #include "imgui.h"
 
 #include <algorithm>
-#include <array>
 #include <cfloat>
 #include <cstdio>
-#include <optional>
 
 namespace macvoxel {
 namespace {
-bool g_save_render_clicked = false;
-
 const char* TypeName(MaterialType t) {
     switch (t) {
         case MaterialType::Diffuse:  return "Diffuse";
@@ -32,8 +29,9 @@ const char* TypeName(MaterialType t) {
 }  // namespace
 
 bool ConsumeSaveRenderClick() {
-    const bool was = g_save_render_clicked;
-    g_save_render_clicked = false;
+    bool& flag = CurrentPanelState().save_render_clicked;
+    const bool was = flag;
+    flag = false;
     return was;
 }
 
@@ -98,7 +96,7 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
         const bool can_save = rp.sample_count > 0;
         ImGui::BeginDisabled(!can_save);
         if (ImGui::Button("Save render…")) {
-            g_save_render_clicked = true;
+            CurrentPanelState().save_render_clicked = true;
         }
         ImGui::EndDisabled();
     }
@@ -164,33 +162,33 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
         // a slider drag (or a Combo pick) becomes a single Cmd-Z step.
         // Pre-drag values are snapshotted on the first dirty frame and
         // held until ImGui reports no widget is active any more — at
-        // which point we commit. Static state is panel-local; doc
-        // reload calls History.Clear() which is harmless here.
-        static bool mat_drag = false;
-        static std::array<std::optional<Material>, 256> mat_pre;
+        // which point we commit. State lives on PanelState so a future
+        // SwiftUI port has a real owner; doc reload calls
+        // History.Clear() which is harmless here.
+        auto& me = CurrentPanelState().material_edit;
 
         if (dirty) {
             EditHistory& hist = CurrentHistory();
-            if (!mat_drag) {
-                mat_drag = true;
-                for (auto& v : mat_pre) v.reset();
+            if (!me.drag) {
+                me.drag = true;
+                for (auto& v : me.pre) v.reset();
                 for (size_t i = 1; i < tool.selected_slots.size(); ++i) {
                     if (tool.selected_slots.test(i)) {
-                        mat_pre[i] = doc.palette.GetMaterial(
+                        me.pre[i] = doc.palette.GetMaterial(
                             static_cast<uint8_t>(i));
                     }
                 }
                 // Always include the active slot too — single-slot edits
                 // work even if the selection somehow lost the active idx.
-                if (idx != 0 && !mat_pre[idx].has_value()) {
-                    mat_pre[idx] = doc.palette.GetMaterial(idx);
+                if (idx != 0 && !me.pre[idx].has_value()) {
+                    me.pre[idx] = doc.palette.GetMaterial(idx);
                 }
                 hist.BeginOp();
             }
             auto apply_to = [&](uint8_t s) {
-                if (!mat_pre[s].has_value()) return;
+                if (!me.pre[s].has_value()) return;
                 doc.palette.SetMaterial(s, m);
-                hist.RecordMaterial(s, *mat_pre[s], m);
+                hist.RecordMaterial(s, *me.pre[s], m);
             };
             for (size_t i = 1; i < tool.selected_slots.size(); ++i) {
                 if (tool.selected_slots.test(i)) {
@@ -203,9 +201,9 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
         // Drag end: no widget is currently being interacted with and
         // there was no value change this frame. Close the op so the
         // next gesture starts a fresh undo step.
-        if (mat_drag && !dirty && !ImGui::IsAnyItemActive()) {
+        if (me.drag && !dirty && !ImGui::IsAnyItemActive()) {
             CurrentHistory().CommitOp();
-            mat_drag = false;
+            me.drag = false;
         }
     }
     ImGui::Unindent();

@@ -3,6 +3,7 @@
 #include "Document.h"
 #include "EditHistory.h"
 #include "Palette.h"
+#include "PanelState.h"
 #include "Selection.h"
 #include "ToolState.h"
 
@@ -43,40 +44,6 @@ void SlotPosition(uint8_t idx, int& col, int& row) {
     row = kPaletteRows - 1 - (n / kPaletteCols);
 }
 
-// Persistent UI state for click-drag rectangle selection. Lives across
-// frames between mouse-press and mouse-release.
-struct DragState {
-    bool active = false;
-    int start_col = 0;
-    int start_row = 0;
-    bool shift = false;  // snapshot of shift state at press time
-};
-DragState& Drag() {
-    static DragState s;
-    return s;
-}
-
-// The slot the user right-clicked to open the context menu. Captured at
-// popup-open time so menu actions don't depend on whatever the cursor
-// happens to be over while the popup is up.
-uint8_t& ContextSlot() {
-    static uint8_t s = 0;
-    return s;
-}
-
-// Single-color clipboard for the palette right-click "Copy/Paste color"
-// action. Separate from the voxel-region clipboard in Clipboard.h —
-// they're orthogonal: this one is RGBA only, used to ferry a color
-// value between palette slots.
-struct ColorClipboard {
-    Color color{};
-    bool has_value = false;
-};
-ColorClipboard& ColorClip() {
-    static ColorClipboard c;
-    return c;
-}
-
 // Clamp a (col, row) computed from raw mouse position to grid bounds so
 // drag sweeps that wander outside the panel still produce a valid rect.
 int Clamp(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
@@ -85,6 +52,7 @@ int Clamp(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 
 void DrawPalettePanel(Document& doc) {
     ToolSettings& tool = CurrentTool();
+    PanelState& panel = CurrentPanelState();
 
     ImGui::SetNextWindowSize(ImVec2(220, 660), ImGuiCond_FirstUseEver);
     ImGui::Begin("Palette");
@@ -140,10 +108,10 @@ void DrawPalettePanel(Document& doc) {
         // Track press / release. Press starts a drag; release commits
         // the rect-selection (a single-cell rect is the single-click case).
         if (ImGui::IsItemActivated()) {
-            Drag().active = true;
-            Drag().start_col = hover_col;
-            Drag().start_row = hover_row;
-            Drag().shift = ImGui::GetIO().KeyShift;
+            panel.palette_drag.active = true;
+            panel.palette_drag.start_col = hover_col;
+            panel.palette_drag.start_row = hover_row;
+            panel.palette_drag.shift = ImGui::GetIO().KeyShift;
         }
         // Right-click opens a context menu scoped to the slot under the
         // cursor. If that slot isn't already in the selection, replace
@@ -151,7 +119,7 @@ void DrawPalettePanel(Document& doc) {
         // what I just clicked".
         if (grid_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             const uint8_t ctx = SlotIndexAt(hover_col, hover_row);
-            ContextSlot() = ctx;
+            panel.palette_context_slot = ctx;
             if (!tool.selected_slots.test(ctx)) {
                 tool.selected_slots.reset();
                 tool.selected_slots.set(ctx);
@@ -159,18 +127,18 @@ void DrawPalettePanel(Document& doc) {
             }
             ImGui::OpenPopup("palette_ctx");
         }
-        if (ImGui::IsItemDeactivated() && Drag().active) {
-            const int min_c = std::min(Drag().start_col, hover_col);
-            const int max_c = std::max(Drag().start_col, hover_col);
-            const int min_r = std::min(Drag().start_row, hover_row);
-            const int max_r = std::max(Drag().start_row, hover_row);
+        if (ImGui::IsItemDeactivated() && panel.palette_drag.active) {
+            const int min_c = std::min(panel.palette_drag.start_col, hover_col);
+            const int max_c = std::max(panel.palette_drag.start_col, hover_col);
+            const int min_r = std::min(panel.palette_drag.start_row, hover_row);
+            const int max_r = std::max(panel.palette_drag.start_row, hover_row);
             // Replace selection on a plain click/drag; toggle each cell
             // in the rect on shift-click/drag.
-            if (!Drag().shift) tool.selected_slots.reset();
+            if (!panel.palette_drag.shift) tool.selected_slots.reset();
             for (int r = min_r; r <= max_r; ++r) {
                 for (int c = min_c; c <= max_c; ++c) {
                     const uint8_t i = SlotIndexAt(c, r);
-                    if (Drag().shift) {
+                    if (panel.palette_drag.shift) {
                         tool.selected_slots.flip(i);
                     } else {
                         tool.selected_slots.set(i);
@@ -182,7 +150,7 @@ void DrawPalettePanel(Document& doc) {
             // and the painting tool agree on which slot is "current".
             tool.palette_idx = SlotIndexAt(hover_col, hover_row);
             tool.selected_slots.set(tool.palette_idx);
-            Drag().active = false;
+            panel.palette_drag.active = false;
         }
 
         // Cell rendering pass. Iterates over the visible (col, row)
@@ -223,11 +191,11 @@ void DrawPalettePanel(Document& doc) {
             dl->AddRect(a, b, IM_COL32(255, 220, 80, 255), 0.0f, 0, 2.0f);
         }
         // Live drag rectangle overlay while the user is dragging.
-        if (Drag().active) {
-            const int min_c = std::min(Drag().start_col, hover_col);
-            const int max_c = std::max(Drag().start_col, hover_col);
-            const int min_r = std::min(Drag().start_row, hover_row);
-            const int max_r = std::max(Drag().start_row, hover_row);
+        if (panel.palette_drag.active) {
+            const int min_c = std::min(panel.palette_drag.start_col, hover_col);
+            const int max_c = std::max(panel.palette_drag.start_col, hover_col);
+            const int min_r = std::min(panel.palette_drag.start_row, hover_row);
+            const int max_r = std::max(panel.palette_drag.start_row, hover_row);
             const ImVec2 a{origin.x + min_c * step_x - 1.0f,
                            origin.y + min_r * step_y - 1.0f};
             const ImVec2 b{origin.x + (max_c + 1) * step_x,
@@ -236,17 +204,17 @@ void DrawPalettePanel(Document& doc) {
         }
 
         if (ImGui::BeginPopup("palette_ctx")) {
-            const uint8_t ctx = ContextSlot();
+            const uint8_t ctx = panel.palette_context_slot;
             const size_t n_sel = tool.selected_slots.count();
             ImGui::TextDisabled("idx %u  (%zu selected)", ctx, n_sel);
             ImGui::Separator();
             if (ImGui::MenuItem("Copy color")) {
-                ColorClip().color = doc.palette.Get(ctx);
-                ColorClip().has_value = true;
+                panel.color_clipboard.color = doc.palette.Get(ctx);
+                panel.color_clipboard.has_value = true;
             }
             if (ImGui::MenuItem("Paste color", nullptr, false,
-                                ColorClip().has_value)) {
-                const Color c = ColorClip().color;
+                                panel.color_clipboard.has_value)) {
+                const Color c = panel.color_clipboard.color;
                 bool any = false;
                 EditHistory& hist = CurrentHistory();
                 hist.BeginOp();
@@ -394,11 +362,11 @@ void DrawPalettePanel(Document& doc) {
     ImGui::Text("Index %u", idx);
     {
         // Coalesce a ColorEdit4 drag (the picker fires on every cursor
-        // frame) into one undo step. col_drag tracks whether an op is
-        // open across frames; col_pre holds the pre-drag color.
-        static bool col_drag = false;
-        static Color col_pre;
-        static uint8_t col_pre_idx = 0;
+        // frame) into one undo step. The drag-active flag tracks whether
+        // an op is open across frames; `pre` holds the pre-drag color
+        // and `pre_idx` lets us close out the prior op when the active
+        // palette index changes mid-gesture.
+        auto& ce = panel.palette_color_edit;
 
         Color c = doc.palette.Get(idx);
         float rgba[4] = {c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f};
@@ -412,24 +380,24 @@ void DrawPalettePanel(Document& doc) {
             nc.a = static_cast<uint8_t>(rgba[3] * 255.0f + 0.5f);
             if (!(nc == c)) {
                 EditHistory& hist = CurrentHistory();
-                if (!col_drag || col_pre_idx != idx) {
+                if (!ce.drag || ce.pre_idx != idx) {
                     // Either a fresh drag, or the user switched the
                     // active palette index mid-gesture (rare, but the
                     // pre-snapshot is no longer the right baseline).
-                    if (col_drag) hist.CommitOp();
+                    if (ce.drag) hist.CommitOp();
                     hist.BeginOp();
-                    col_drag = true;
-                    col_pre = c;
-                    col_pre_idx = idx;
+                    ce.drag = true;
+                    ce.pre = c;
+                    ce.pre_idx = idx;
                 }
                 doc.palette.Set(idx, nc);
-                hist.RecordPalette(idx, col_pre, nc);
+                hist.RecordPalette(idx, ce.pre, nc);
                 doc.BumpPalette();
             }
         }
-        if (col_drag && !changed && !ImGui::IsAnyItemActive()) {
+        if (ce.drag && !changed && !ImGui::IsAnyItemActive()) {
             CurrentHistory().CommitOp();
-            col_drag = false;
+            ce.drag = false;
         }
     }
 
