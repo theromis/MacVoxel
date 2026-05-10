@@ -30,15 +30,15 @@ void ApplyMappingToSelection(
     const std::function<std::array<int32_t, 3>(int32_t, int32_t, int32_t)>& map)
 {
     Selection& sel = CurrentSelection();
-    if (!sel.active || sel.voxels.empty()) return;
+    if (!sel.active() || sel.empty()) return;
 
     struct Source {
         int32_t x, y, z;
         uint8_t pal;
     };
     std::vector<Source> src;
-    src.reserve(sel.voxels.size());
-    for (const auto& v : sel.voxels) {
+    src.reserve(sel.size());
+    for (const auto& v : sel.voxels()) {
         const uint8_t pal = doc.grid.Get(v[0], v[1], v[2]);
         if (pal == 0) continue;  // selection went stale
         src.push_back({v[0], v[1], v[2], pal});
@@ -70,28 +70,13 @@ void ApplyMappingToSelection(
         hist.Record(x, y, z, orig, now);
     }
 
-    sel.voxels.clear();
-    sel.voxels.reserve(src.size());
-    int32_t bxmin = 0, bxmax = 0, bymin = 0, bymax = 0, bzmin = 0, bzmax = 0;
-    bool any = false;
+    std::vector<std::array<int32_t, 3>> mapped;
+    mapped.reserve(src.size());
     for (const auto& s : src) {
         const auto t = map(s.x, s.y, s.z);
-        sel.voxels.push_back({t[0], t[1], t[2]});
-        if (!any) {
-            bxmin = bxmax = t[0];
-            bymin = bymax = t[1];
-            bzmin = bzmax = t[2];
-            any = true;
-        } else {
-            bxmin = std::min(bxmin, t[0]); bxmax = std::max(bxmax, t[0]);
-            bymin = std::min(bymin, t[1]); bymax = std::max(bymax, t[1]);
-            bzmin = std::min(bzmin, t[2]); bzmax = std::max(bzmax, t[2]);
-        }
+        mapped.push_back({t[0], t[1], t[2]});
     }
-    sel.box.min_x = bxmin; sel.box.max_x = bxmax;
-    sel.box.min_y = bymin; sel.box.max_y = bymax;
-    sel.box.min_z = bzmin; sel.box.max_z = bzmax;
-    sel.active = true;
+    sel.SetVoxels(std::move(mapped));
 
     hist.RecordSelectionPost(sel);
     hist.CommitOp();
@@ -146,7 +131,7 @@ void RotateSelection(Document& doc, Axis axis, bool cw) {
     const bool floating = fb.active && !fb.grid.empty();
     if (!floating) {
         const Selection& sel = CurrentSelection();
-        if (!sel.active || sel.voxels.empty()) return;
+        if (!sel.active() || sel.empty()) return;
     }
 
     // Pivot at the AABB's continuous center. The voxel cell at (cx, cy, cz)
@@ -154,7 +139,7 @@ void RotateSelection(Document& doc, Axis axis, bool cw) {
     // (xmin + xmax + 1) / 2 — possibly half-integer, which is fine: cell
     // centers (c + 0.5) sit on the same half-step lattice and 90° rotation
     // round-trips them to integer cell coords (modulo lattice parity).
-    const Bounds3 b = floating ? fb.grid.Bounds() : CurrentSelection().box;
+    const Bounds3 b = floating ? fb.grid.Bounds() : CurrentSelection().bounds();
     const float px = (b.min_x + b.max_x + 1) * 0.5f;
     const float py = (b.min_y + b.max_y + 1) * 0.5f;
     const float pz = (b.min_z + b.max_z + 1) * 0.5f;
@@ -198,13 +183,13 @@ void FlipSelection(Document& doc, Axis axis) {
     const bool floating = fb.active && !fb.grid.empty();
     if (!floating) {
         const Selection& sel = CurrentSelection();
-        if (!sel.active || sel.voxels.empty()) return;
+        if (!sel.active() || sel.empty()) return;
     }
 
     // Cell-coord mirror through the AABB center. For x, the mirror plane
     // sits at x = (xmin + xmax + 1) / 2, which sends a cell at cx to
     // (xmin + xmax) - cx — an exact integer regardless of dimension parity.
-    const Bounds3 b = floating ? fb.grid.Bounds() : CurrentSelection().box;
+    const Bounds3 b = floating ? fb.grid.Bounds() : CurrentSelection().bounds();
     const int32_t sx = b.min_x + b.max_x;
     const int32_t sy = b.min_y + b.max_y;
     const int32_t sz = b.min_z + b.max_z;

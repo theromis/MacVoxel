@@ -15,7 +15,7 @@ namespace macvoxel {
 
 void LiftSelectionToFloating(Document& doc) {
     Selection& sel = CurrentSelection();
-    if (!sel.active || sel.voxels.empty()) return;
+    if (!sel.active() || sel.empty()) return;
     FloatingBuffer& fb = CurrentFloatingBuffer();
     if (fb.active) return;  // caller must commit / discard first
 
@@ -23,8 +23,8 @@ void LiftSelectionToFloating(Document& doc) {
     // list could in theory have duplicates; two-pass is the safe form).
     struct Pickup { int32_t x, y, z; uint8_t pal; };
     std::vector<Pickup> picked;
-    picked.reserve(sel.voxels.size());
-    for (const auto& v : sel.voxels) {
+    picked.reserve(sel.size());
+    for (const auto& v : sel.voxels()) {
         const uint8_t pal = doc.grid.Get(v[0], v[1], v[2]);
         if (pal == 0) continue;  // selection went stale
         picked.push_back({v[0], v[1], v[2], pal});
@@ -127,32 +127,14 @@ void CommitFloatingBuffer(Document& doc) {
     // Selection becomes the dropped cells (every entry in `changes`
     // whose new_val is non-zero).
     std::vector<std::array<int32_t, 3>> dropped;
-    int32_t bxmin = 0, bxmax = 0, bymin = 0, bymax = 0, bzmin = 0, bzmax = 0;
-    bool any = false;
     dropped.reserve(changes.size());
     for (const auto& [key, d] : changes) {
         if (d.new_val == 0) continue;
         int32_t x, y, z;
         UnpackCellKey(key, &x, &y, &z);
         dropped.push_back({x, y, z});
-        if (!any) {
-            bxmin = bxmax = x; bymin = bymax = y; bzmin = bzmax = z;
-            any = true;
-        } else {
-            bxmin = std::min(bxmin, x); bxmax = std::max(bxmax, x);
-            bymin = std::min(bymin, y); bymax = std::max(bymax, y);
-            bzmin = std::min(bzmin, z); bzmax = std::max(bzmax, z);
-        }
     }
-    if (any) {
-        sel.voxels = std::move(dropped);
-        sel.box.min_x = bxmin; sel.box.max_x = bxmax;
-        sel.box.min_y = bymin; sel.box.max_y = bymax;
-        sel.box.min_z = bzmin; sel.box.max_z = bzmax;
-        sel.active = true;
-    } else {
-        sel.Clear();
-    }
+    sel.SetVoxels(std::move(dropped));
 
     fb.Clear();
     hist.RecordSelectionPost(sel);
@@ -170,16 +152,12 @@ void CancelFloatingLift(Document& doc) {
         for (const auto& [c, pal] : fb.source_originals) {
             doc.grid.Set(c[0], c[1], c[2], pal);
         }
-        Selection& sel = CurrentSelection();
-        sel = fb.pre_lift_sel;
+        CurrentSelection() = fb.pre_lift_sel;
     } else {
         // Paste-style: just discard, leaving doc untouched. Selection
         // gets cleared too since the pasted cells were the only thing
         // it referenced.
-        Selection& sel = CurrentSelection();
-        sel.voxels.clear();
-        sel.box = Bounds3{};
-        sel.active = false;
+        CurrentSelection().Clear();
     }
     fb.Clear();
     doc.BumpGeometry();
@@ -226,10 +204,7 @@ void ResampleFloatingBuffer(const VoxelGrid& src,
 void DiscardFloatingBuffer() {
     FloatingBuffer& fb = CurrentFloatingBuffer();
     if (!fb.active) return;
-    Selection& sel = CurrentSelection();
-    sel.voxels.clear();
-    sel.box = Bounds3{};
-    sel.active = false;
+    CurrentSelection().Clear();
     fb.Clear();
 }
 
@@ -243,10 +218,8 @@ void LiftClipboardToFloating(Document& /*doc*/,
     if (fb.active) return;  // caller must commit / discard first
 
     fb.grid.Clear();
-    Selection& sel = CurrentSelection();
-    sel.voxels.clear();
-    int32_t bxmin = 0, bxmax = 0, bymin = 0, bymax = 0, bzmin = 0, bzmax = 0;
-    bool any = false;
+    std::vector<std::array<int32_t, 3>> sel_voxels;
+    sel_voxels.reserve(static_cast<size_t>(cb.size_x) * cb.size_y * cb.size_z);
     for (uint32_t z = 0; z < cb.size_z; ++z) {
         for (uint32_t y = 0; y < cb.size_y; ++y) {
             for (uint32_t x = 0; x < cb.size_x; ++x) {
@@ -256,21 +229,11 @@ void LiftClipboardToFloating(Document& /*doc*/,
                 const int32_t gy = origin_y + static_cast<int32_t>(y);
                 const int32_t gz = origin_z + static_cast<int32_t>(z);
                 fb.grid.Set(gx, gy, gz, v);
-                sel.voxels.push_back({gx, gy, gz});
-                if (!any) {
-                    bxmin = bxmax = gx;
-                    bymin = bymax = gy;
-                    bzmin = bzmax = gz;
-                    any = true;
-                } else {
-                    bxmin = std::min(bxmin, gx); bxmax = std::max(bxmax, gx);
-                    bymin = std::min(bymin, gy); bymax = std::max(bymax, gy);
-                    bzmin = std::min(bzmin, gz); bzmax = std::max(bzmax, gz);
-                }
+                sel_voxels.push_back({gx, gy, gz});
             }
         }
     }
-    if (!any) {
+    if (sel_voxels.empty()) {
         fb.Clear();
         return;
     }
@@ -278,10 +241,7 @@ void LiftClipboardToFloating(Document& /*doc*/,
     fb.active = true;
     fb.originated_from_lift = false;
     ++fb.version;
-    sel.box.min_x = bxmin; sel.box.max_x = bxmax;
-    sel.box.min_y = bymin; sel.box.max_y = bymax;
-    sel.box.min_z = bzmin; sel.box.max_z = bzmax;
-    sel.active = true;
+    CurrentSelection().SetVoxels(std::move(sel_voxels));
 }
 
 }  // namespace macvoxel

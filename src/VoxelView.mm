@@ -176,9 +176,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // the live camera matrix; no per-pixel work happens during drag.
     NSPoint _marqueeAnchorWindow;
     NSPoint _marqueeCurrentWindow;
-    // Box-select tool: anchor cell at mouseDown; sel.box grows live to
-    // [min(anchor, current), max] during drag; mouseUp populates the
-    // sparse sel.voxels list with every occupied cell inside.
+    // Box-select tool: anchor cell at mouseDown; the selection's AABB
+    // grows live to [min(anchor, current), max] during drag (via SetBox,
+    // which stages an AABB-only selection); mouseUp populates the sparse
+    // voxel list with every occupied cell inside.
     Vec3i _boxSelectAnchor;
     // MoveSelect (Cmd-drag on a selected voxel = move the selection in
     // the click face's tangent plane). The actual lift / commit is
@@ -881,15 +882,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         if ([self pickGridCellAtPoint:event.locationInWindow into:&pick]) {
             _boxSelectAnchor = pick;
             _dragMode = DragMode::BoxSelect;
-            macvoxel::Selection& sel = macvoxel::CurrentSelection();
-            sel.box.min_x = sel.box.max_x = pick.x;
-            sel.box.min_y = sel.box.max_y = pick.y;
-            sel.box.min_z = sel.box.max_z = pick.z;
-            sel.active = true;
-            // Drop any existing sparse list so the live preview only
-            // shows the AABB; mouseUp repopulates the sparse list with
-            // the occupied cells inside.
-            sel.voxels.clear();
+            // SetBox stages the live AABB without populating cells; the
+            // mouseUp handler scans the doc and SetVoxels-es the result.
+            macvoxel::Bounds3 b{};
+            b.min_x = b.max_x = pick.x;
+            b.min_y = b.max_y = pick.y;
+            b.min_z = b.max_z = pick.z;
+            macvoxel::CurrentSelection().SetBox(b);
         } else {
             _dragMode = DragMode::None;
         }
@@ -1034,14 +1033,14 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         case DragMode::BoxSelect: {
             Vec3i pick;
             if ([self pickGridCellAtPoint:p into:&pick]) {
-                macvoxel::Selection& sel = macvoxel::CurrentSelection();
-                sel.box.min_x = std::min(_boxSelectAnchor.x, pick.x);
-                sel.box.min_y = std::min(_boxSelectAnchor.y, pick.y);
-                sel.box.min_z = std::min(_boxSelectAnchor.z, pick.z);
-                sel.box.max_x = std::max(_boxSelectAnchor.x, pick.x);
-                sel.box.max_y = std::max(_boxSelectAnchor.y, pick.y);
-                sel.box.max_z = std::max(_boxSelectAnchor.z, pick.z);
-                sel.active = true;
+                macvoxel::Bounds3 b{};
+                b.min_x = std::min(_boxSelectAnchor.x, pick.x);
+                b.min_y = std::min(_boxSelectAnchor.y, pick.y);
+                b.min_z = std::min(_boxSelectAnchor.z, pick.z);
+                b.max_x = std::max(_boxSelectAnchor.x, pick.x);
+                b.max_y = std::max(_boxSelectAnchor.y, pick.y);
+                b.max_z = std::max(_boxSelectAnchor.z, pick.z);
+                macvoxel::CurrentSelection().SetBox(b);
             }
             break;
         }
@@ -1404,12 +1403,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     macvoxel::Document* doc = [delegate document];
     if (doc == nullptr) return;
 
-    macvoxel::Selection& sel = macvoxel::CurrentSelection();
     std::vector<std::array<int32_t, 3>> picked;
-    int32_t bxmin = 0, bymin = 0, bzmin = 0;
-    int32_t bxmax = 0, bymax = 0, bzmax = 0;
-    bool any = false;
-
     constexpr uint32_t kCS = macvoxel::VoxelGrid::kChunkSize;
     for (const auto& [coord, chunk] : doc->grid.chunks()) {
         if (chunk->filled_count == 0) continue;
@@ -1427,33 +1421,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                     const int32_t cz = base_z + static_cast<int32_t>(lz);
                     if (!pred(cx, cy, cz, pal)) continue;
                     picked.push_back({cx, cy, cz});
-                    if (!any) {
-                        bxmin = bxmax = cx;
-                        bymin = bymax = cy;
-                        bzmin = bzmax = cz;
-                        any = true;
-                    } else {
-                        bxmin = std::min(bxmin, cx);
-                        bymin = std::min(bymin, cy);
-                        bzmin = std::min(bzmin, cz);
-                        bxmax = std::max(bxmax, cx);
-                        bymax = std::max(bymax, cy);
-                        bzmax = std::max(bzmax, cz);
-                    }
                 }
             }
         }
     }
-
-    if (!any) {
-        sel.Clear();
-        return;
-    }
-    sel.voxels = std::move(picked);
-    sel.box.min_x = bxmin; sel.box.max_x = bxmax;
-    sel.box.min_y = bymin; sel.box.max_y = bymax;
-    sel.box.min_z = bzmin; sel.box.max_z = bzmax;
-    sel.active = true;
+    macvoxel::CurrentSelection().SetVoxels(std::move(picked));
 }
 
 // Marquee: project each occupied cell's center through the live
@@ -1507,10 +1479,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 // Box-select: every occupied cell within the AABB the user dragged
-// out. sel.box is already up-to-date from the live mouseDragged
-// previews; we just flesh out sel.voxels with the cells inside.
+// out. The selection's bounds are already up-to-date from the live
+// mouseDragged previews (SetBox calls); we just flesh out the voxel
+// list with the cells inside.
 - (void)commitBoxSelection {
-    const macvoxel::Bounds3 b = macvoxel::CurrentSelection().box;
+    const macvoxel::Bounds3 b = macvoxel::CurrentSelection().bounds();
     [self selectCellsWhere:^BOOL(int32_t cx, int32_t cy, int32_t cz,
                                  uint8_t /*pal*/) {
         return (cx >= b.min_x && cx <= b.max_x &&
@@ -1543,17 +1516,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
     if (!fb.active) {
         // Buffer is not floating yet → lift the on-grid selection into
-        // it. Click membership has to be against sel.voxels (the cells
-        // that the user can actually see on the document grid).
+        // it. Click membership has to be against the selected cells
+        // (the ones the user can actually see on the document grid).
         macvoxel::Selection& sel = macvoxel::CurrentSelection();
-        if (!sel.active || sel.voxels.empty()) return NO;
-        bool found = false;
-        for (const auto& v : sel.voxels) {
-            if (v[0] == cell.x && v[1] == cell.y && v[2] == cell.z) {
-                found = true; break;
-            }
-        }
-        if (!found) return NO;
+        if (!sel.active() || sel.empty()) return NO;
+        if (!sel.Contains(cell.x, cell.y, cell.z)) return NO;
         macvoxel::LiftSelectionToFloating(*doc);
         if (!fb.active) return NO;  // failsafe: lift had nothing to do
     } else {
@@ -1686,10 +1653,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     queue.push_back(seed);
     visited.insert(macvoxel::PackCellKey(seed.x, seed.y, seed.z));
 
-    int32_t bxmin = seed.x, bxmax = seed.x;
-    int32_t bymin = seed.y, bymax = seed.y;
-    int32_t bzmin = seed.z, bzmax = seed.z;
-
     static const int kStep[6][3] = {
         { 1, 0, 0}, {-1, 0, 0},
         { 0, 1, 0}, { 0,-1, 0},
@@ -1699,9 +1662,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         const Vec3i c = queue.back();
         queue.pop_back();
         picked.push_back({c.x, c.y, c.z});
-        bxmin = std::min(bxmin, c.x); bxmax = std::max(bxmax, c.x);
-        bymin = std::min(bymin, c.y); bymax = std::max(bymax, c.y);
-        bzmin = std::min(bzmin, c.z); bzmax = std::max(bzmax, c.z);
         for (int i = 0; i < 6; ++i) {
             const int32_t nx = c.x + kStep[i][0];
             const int32_t ny = c.y + kStep[i][1];
@@ -1713,11 +1673,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         }
     }
 
-    sel.voxels = std::move(picked);
-    sel.box.min_x = bxmin; sel.box.max_x = bxmax;
-    sel.box.min_y = bymin; sel.box.max_y = bymax;
-    sel.box.min_z = bzmin; sel.box.max_z = bzmax;
-    sel.active = true;
+    sel.SetVoxels(std::move(picked));
 }
 
 // Live screen-space rectangle while the user is dragging the marquee.
@@ -1743,7 +1699,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
     // Skip both per-voxel highlights and AABB outline when there's
     // nothing to highlight: empty doc selection AND no floating buffer.
-    const bool show_doc_sel = sel.active && !sel.box.empty();
+    const bool show_doc_sel = sel.active() && !sel.bounds().empty();
     const bool show_floating = fb.active && !fb.grid.empty();
     if (!show_doc_sel && !show_floating) return;
 
@@ -1798,9 +1754,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
     // Outer AABB. Voxels span [c, c+1] so the outer faces are at min..max+1.
     // When the floating buffer is active, take its bounds + offset; the
-    // doc-side sel.box is stale during a drag (we don't shift it per
-    // frame for performance reasons — the whole point of FloatingBuffer
-    // is O(1) drag work).
+    // doc-side selection bounds are stale during a drag (we don't shift
+    // them per frame for performance reasons — the whole point of
+    // FloatingBuffer is O(1) drag work).
     {
         macvoxel::Bounds3 b{};
         if (show_floating) {
@@ -1812,7 +1768,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             b.max_y = gb.max_y + fb.offset_y;
             b.max_z = gb.max_z + fb.offset_z;
         } else {
-            b = sel.box;
+            b = sel.bounds();
         }
         const simd::float3 box_min{static_cast<float>(b.min_x),
                                    static_cast<float>(b.min_y),
@@ -1905,10 +1861,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             }
         }
     } else {
-        if (sel.voxels.empty()) return;
-        cells.reserve(sel.voxels.size());
-        selected_set.reserve(sel.voxels.size() * 2);
-        for (const auto& v : sel.voxels) {
+        if (sel.empty()) return;
+        cells.reserve(sel.size());
+        selected_set.reserve(sel.size() * 2);
+        for (const auto& v : sel.voxels()) {
             cells.push_back(v);
             selected_set.insert(macvoxel::PackCellKey(v[0], v[1], v[2]));
         }
@@ -2042,9 +1998,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 // World-space AABB the gizmo handles sit on. Floating buffer wins when
-// alive (its bounds may differ from sel.box mid-drag); otherwise we
-// fall back to the on-grid selection's box. Returns NO when there's
-// nothing selected to scale.
+// alive (its bounds may differ from the selection's bounds mid-drag);
+// otherwise we fall back to the on-grid selection's bounds. Returns NO
+// when there's nothing selected to scale.
 - (BOOL)xformGizmoBounds:(macvoxel::Bounds3*)out {
     const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
     if (fb.active && !fb.grid.empty()) {
@@ -2056,8 +2012,8 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         return YES;
     }
     const macvoxel::Selection& sel = macvoxel::CurrentSelection();
-    if (sel.active && !sel.voxels.empty()) {
-        *out = sel.box;
+    if (sel.active() && !sel.empty()) {
+        *out = sel.bounds();
         return YES;
     }
     return NO;

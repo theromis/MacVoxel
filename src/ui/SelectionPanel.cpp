@@ -28,7 +28,7 @@ void DrawSelectionPanel(Document& doc) {
     // Either an on-grid selection or a floating buffer counts — the
     // op routes to whichever is active.
     const bool has_target =
-        (CurrentSelection().active && !CurrentSelection().voxels.empty()) ||
+        (CurrentSelection().active() && !CurrentSelection().empty()) ||
         (CurrentFloatingBuffer().active && !CurrentFloatingBuffer().grid.empty());
     ImGui::BeginDisabled(!has_target);
 

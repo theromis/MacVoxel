@@ -267,10 +267,7 @@ void DrawPalettePanel(Document& doc) {
             const bool any_slot_selected = (n_sel > 0);
             if (ImGui::MenuItem("Select voxels by color", nullptr, false,
                                 any_slot_selected)) {
-                Selection& sel = CurrentSelection();
-                sel.voxels.clear();
-                Bounds3 b{};
-                bool first = true;
+                std::vector<std::array<int32_t, 3>> matched;
                 for (const auto& kv : doc.grid.chunks()) {
                     const VoxelGrid::Chunk* ch = kv.second.get();
                     const int32_t base_x = kv.first.x << VoxelGrid::kChunkBits;
@@ -283,37 +280,21 @@ void DrawPalettePanel(Document& doc) {
                                     lx + ly * VoxelGrid::kChunkSize +
                                     lz * VoxelGrid::kChunkSize * VoxelGrid::kChunkSize];
                                 if (v == 0 || !tool.selected_slots.test(v)) continue;
-                                const int32_t x = base_x + static_cast<int32_t>(lx);
-                                const int32_t y = base_y + static_cast<int32_t>(ly);
-                                const int32_t z = base_z + static_cast<int32_t>(lz);
-                                sel.voxels.push_back({x, y, z});
-                                if (first) {
-                                    b.min_x = b.max_x = x;
-                                    b.min_y = b.max_y = y;
-                                    b.min_z = b.max_z = z;
-                                    first = false;
-                                } else {
-                                    b.min_x = std::min(b.min_x, x);
-                                    b.min_y = std::min(b.min_y, y);
-                                    b.min_z = std::min(b.min_z, z);
-                                    b.max_x = std::max(b.max_x, x);
-                                    b.max_y = std::max(b.max_y, y);
-                                    b.max_z = std::max(b.max_z, z);
-                                }
+                                matched.push_back({
+                                    base_x + static_cast<int32_t>(lx),
+                                    base_y + static_cast<int32_t>(ly),
+                                    base_z + static_cast<int32_t>(lz)});
                             }
                         }
                     }
                 }
-                sel.box = b;
-                sel.active = !sel.voxels.empty();
+                CurrentSelection().SetVoxels(std::move(matched));
             }
             // Paint operations need (a) a voxel selection to act on and
             // (b) the right number of palette slots selected — single
             // slot for the solid paint, multiple for the random pick.
             const Selection& sel_view = CurrentSelection();
-            const bool has_voxel_sel =
-                sel_view.active &&
-                (!sel_view.voxels.empty() || !sel_view.box.empty());
+            const bool has_voxel_sel = sel_view.active() && !sel_view.empty();
             // Collect selected slot indices once; reused by both paint
             // variants below.
             std::vector<uint8_t> selected_idx;
@@ -324,26 +305,18 @@ void DrawPalettePanel(Document& doc) {
             }
 
             auto paint_each = [&](auto&& choose) {
-                Selection& sel = CurrentSelection();
+                const Selection& sel = CurrentSelection();
                 EditHistory& hist = CurrentHistory();
                 hist.BeginOp();
                 bool any = false;
-                auto try_paint = [&](int32_t x, int32_t y, int32_t z) {
-                    const uint8_t old = doc.grid.Get(x, y, z);
-                    if (old == 0) return;  // empty cells aren't "voxels"
+                for (const auto& v : sel.voxels()) {
+                    const uint8_t old = doc.grid.Get(v[0], v[1], v[2]);
+                    if (old == 0) continue;  // empty cells aren't "voxels"
                     const uint8_t nv = choose();
-                    if (nv == 0 || nv == old) return;
-                    doc.grid.Set(x, y, z, nv);
-                    hist.Record(x, y, z, old, nv);
+                    if (nv == 0 || nv == old) continue;
+                    doc.grid.Set(v[0], v[1], v[2], nv);
+                    hist.Record(v[0], v[1], v[2], old, nv);
                     any = true;
-                };
-                if (!sel.voxels.empty()) {
-                    for (const auto& v : sel.voxels) try_paint(v[0], v[1], v[2]);
-                } else {
-                    for (int32_t z = sel.box.min_z; z <= sel.box.max_z; ++z)
-                        for (int32_t y = sel.box.min_y; y <= sel.box.max_y; ++y)
-                            for (int32_t x = sel.box.min_x; x <= sel.box.max_x; ++x)
-                                try_paint(x, y, z);
                 }
                 hist.CommitOp();
                 if (any) doc.BumpGeometry();

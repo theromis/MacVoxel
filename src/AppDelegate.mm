@@ -472,12 +472,12 @@
         const macvoxel::Selection& sel = macvoxel::CurrentSelection();
         const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
         if (fb.active && !fb.grid.empty()) return YES;
-        return sel.active && !sel.voxels.empty();
+        return sel.active() && !sel.empty();
     }
     if (action == @selector(deselect:)) {
         // Deselect just commits the floating buffer (if any) and
         // clears the marquee — fine whenever there's anything to drop.
-        return macvoxel::CurrentSelection().active ||
+        return macvoxel::CurrentSelection().active() ||
                macvoxel::CurrentFloatingBuffer().active;
     }
     if (action == @selector(paste:)) {
@@ -535,18 +535,19 @@
     }
 
     const macvoxel::Selection& sel = macvoxel::CurrentSelection();
-    if (!sel.active || sel.voxels.empty()) return;
-    cb.origin_x = sel.box.min_x;
-    cb.origin_y = sel.box.min_y;
-    cb.origin_z = sel.box.min_z;
-    cb.size_x = static_cast<uint32_t>(sel.box.size_x());
-    cb.size_y = static_cast<uint32_t>(sel.box.size_y());
-    cb.size_z = static_cast<uint32_t>(sel.box.size_z());
+    if (!sel.active() || sel.empty()) return;
+    const macvoxel::Bounds3& sb = sel.bounds();
+    cb.origin_x = sb.min_x;
+    cb.origin_y = sb.min_y;
+    cb.origin_z = sb.min_z;
+    cb.size_x = static_cast<uint32_t>(sb.size_x());
+    cb.size_y = static_cast<uint32_t>(sb.size_y());
+    cb.size_z = static_cast<uint32_t>(sb.size_z());
     cb.cells.assign(static_cast<size_t>(cb.size_x) * cb.size_y * cb.size_z, 0);
-    for (const auto& v : sel.voxels) {
-        const uint32_t lx = static_cast<uint32_t>(v[0] - sel.box.min_x);
-        const uint32_t ly = static_cast<uint32_t>(v[1] - sel.box.min_y);
-        const uint32_t lz = static_cast<uint32_t>(v[2] - sel.box.min_z);
+    for (const auto& v : sel.voxels()) {
+        const uint32_t lx = static_cast<uint32_t>(v[0] - sb.min_x);
+        const uint32_t ly = static_cast<uint32_t>(v[1] - sb.min_y);
+        const uint32_t lz = static_cast<uint32_t>(v[2] - sb.min_z);
         cb.cells[cb.LinearIndex(lx, ly, lz)] = _doc->grid.Get(v[0], v[1], v[2]);
     }
 }
@@ -569,10 +570,10 @@
         return;
     }
     const macvoxel::Selection& sel = macvoxel::CurrentSelection();
-    if (!sel.active || sel.voxels.empty()) return;
+    if (!sel.active() || sel.empty()) return;
     macvoxel::EditHistory& history = macvoxel::CurrentHistory();
     history.BeginOp();
-    for (const auto& v : sel.voxels) {
+    for (const auto& v : sel.voxels()) {
         const uint8_t old = _doc->grid.Get(v[0], v[1], v[2]);
         if (old != 0) {
             _doc->grid.Set(v[0], v[1], v[2], 0);
