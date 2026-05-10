@@ -9,7 +9,7 @@ namespace macvoxel {
 // volume (Bounds3i) lives elsewhere — it's set by the viewport's
 // gizmo, not by this panel.
 //
-// Single-document app convention, same as ToolState / EditHistory /
+// Single-document app convention, same as ToolSettings / EditHistory /
 // Selection / RenderSettings.
 struct GeneratorState {
     generators::Kind active_kind = generators::Kind::Ellipsoid;

@@ -84,7 +84,7 @@ int Clamp(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 }  // namespace
 
 void DrawPalettePanel(Document& doc) {
-    ToolState& tool = CurrentTool();
+    ToolSettings& tool = CurrentTool();
 
     ImGui::SetNextWindowSize(ImVec2(220, 660), ImGuiCond_FirstUseEver);
     ImGui::Begin("Palette");

@@ -26,7 +26,7 @@ void AccentButtonColors(bool active) {
 }  // namespace
 
 void DrawToolPanel() {
-    ToolState& t = CurrentTool();
+    ToolSettings& t = CurrentTool();
 
     ImGui::SetNextWindowSize(ImVec2(260, 260), ImGuiCond_FirstUseEver);
     ImGui::Begin("Tool");

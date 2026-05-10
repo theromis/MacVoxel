@@ -2,9 +2,9 @@
 
 namespace macvoxel {
 
-ToolState& CurrentTool() {
-    static ToolState s_state = []{
-        ToolState s;
+ToolSettings& CurrentTool() {
+    static ToolSettings s_state = []{
+        ToolSettings s;
         // Seed the selection with the default active slot so the first
         // material edit has somewhere to write.
         s.selected_slots.set(s.palette_idx);

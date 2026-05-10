@@ -971,7 +971,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         _faceObservedDrag = NO;
         _faceAppliedD = 0;
         _faceAppliedWith = macvoxel::CurrentTool().face_with;
-        const macvoxel::ToolState& t = macvoxel::CurrentTool();
+        const macvoxel::ToolSettings& t = macvoxel::CurrentTool();
         // FaceExtrudeKind::Geometry passes color=0 to the flood — that's
         // the "any non-empty cell" sentinel inside floodFaceFromCell:.
         const uint8_t flood_color =
@@ -1195,7 +1195,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // Eyedropper: cast a ray from the click into the grid; if it hits a
 // non-empty voxel, copy that voxel's palette index into the active
 // slot (and reset selected_slots to a single-selection of that index,
-// preserving ToolState's "palette_idx is always a member of
+// preserving ToolSettings' "palette_idx is always a member of
 // selected_slots when non-empty" invariant). Misses leave the
 // palette unchanged.
 - (BOOL)eyedropperAtPoint:(NSPoint)windowPoint {
@@ -1213,7 +1213,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         return NO;
     }
     if (hit.color == 0) return NO;
-    macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    macvoxel::ToolSettings& tool = macvoxel::CurrentTool();
     tool.palette_idx = hit.color;
     tool.selected_slots.reset();
     tool.selected_slots.set(hit.color);
@@ -1360,7 +1360,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // a stray duplicate.
     if (_genGizmoActive) return;
 
-    const macvoxel::ToolState& t = macvoxel::CurrentTool();
+    const macvoxel::ToolSettings& t = macvoxel::CurrentTool();
     const bool is_brush = t.tool == macvoxel::ToolKind::Brush;
     const bool is_two_click = (t.tool == macvoxel::ToolKind::Line ||
                                t.tool == macvoxel::ToolKind::Circle ||
@@ -2430,7 +2430,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     macvoxel::Document* doc = [delegate document];
     if (doc == nullptr) return;
 
-    macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    macvoxel::ToolSettings& tool = macvoxel::CurrentTool();
     const int size = std::max(1, tool.brush_size);
     const int lo = -((size - 1) / 2);
     const int hi = size / 2;
@@ -2717,7 +2717,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             _anchorMode == macvoxel::ToolMode::Paint) {
             d = std::abs(d);
         }
-        const macvoxel::ToolState& t = macvoxel::CurrentTool();
+        const macvoxel::ToolSettings& t = macvoxel::CurrentTool();
         if (d == _faceAppliedD && t.face_with == _faceAppliedWith) return;
         [self transitionFaceTo:d];
         return;
@@ -2731,7 +2731,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     overlay.Clear();
     overlay.active = true;
 
-    const macvoxel::ToolState& t = macvoxel::CurrentTool();
+    const macvoxel::ToolSettings& t = macvoxel::CurrentTool();
     std::vector<LineHit> hits;
     switch (_anchorTool) {
         case macvoxel::ToolKind::Line: {
@@ -3243,7 +3243,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         overlay.Stamp(x, y, z, new_val, doc->grid.Get(x, y, z));
     };
 
-    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    const macvoxel::ToolSettings& tool = macvoxel::CurrentTool();
     const macvoxel::ToolMode mode = _anchorMode;
     const int n = std::abs(d);
 
@@ -3315,7 +3315,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
     int da[3] = {0, 0, 0};
     da[_anchorFaceAxis] = _faceSign;
-    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    const macvoxel::ToolSettings& tool = macvoxel::CurrentTool();
     const macvoxel::ToolMode mode = _anchorMode;
     macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
 
@@ -3366,7 +3366,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // For Remove/Paint, `new_d` is expected pre-normalized to a non-negative
 // magnitude (always inward), so a sign flip is impossible.
 - (void)transitionFaceTo:(int)new_d {
-    const macvoxel::ToolState& tool = macvoxel::CurrentTool();
+    const macvoxel::ToolSettings& tool = macvoxel::CurrentTool();
     const macvoxel::ToolMode mode = _anchorMode;
 
     bool full_rebuild = false;

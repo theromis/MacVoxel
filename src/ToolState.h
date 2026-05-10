@@ -70,7 +70,7 @@ enum class BrushShape {
     Circle,
 };
 
-struct ToolState {
+struct ToolSettings {
     ToolKind tool = ToolKind::Brush;
     ToolMode mode = ToolMode::Add;
     uint8_t palette_idx = 1;  // current color (0 is "empty"; never used here)
@@ -115,6 +115,6 @@ struct ToolState {
 // Single global tool state — single-document app, single shared tool config.
 // If we ever grow into multi-document or multi-view, this becomes a member
 // of whichever object owns "current tool".
-ToolState& CurrentTool();
+ToolSettings& CurrentTool();
 
 }  // namespace macvoxel

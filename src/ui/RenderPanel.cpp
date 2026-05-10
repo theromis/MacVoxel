@@ -117,7 +117,7 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
     ImGui::PopFont();
     ImGui::Indent();
     {
-        ToolState& tool = CurrentTool();
+        ToolSettings& tool = CurrentTool();
         const uint8_t idx = tool.palette_idx;
         const size_t sel_count = tool.selected_slots.count();
         if (sel_count > 1) {
