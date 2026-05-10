@@ -25,6 +25,7 @@
 #include "FloatingBuffer.h"
 #include "FloatingBufferOps.h"
 #include "GeneratorState.h"
+#include "InteractionState.h"
 #include "PreviewOverlay.h"
 #include "Raycast.h"
 #include "RenderState.h"
@@ -42,8 +43,7 @@
 #include "ui/ToolPanel.h"
 
 namespace {
-enum class DragMode { None, Orbit, Pan, Paint, Marquee, BoxSelect,
-                      MoveSelect, XformHandle, Shape, GenHandle };
+using DragMode = macvoxel::DragMode;
 
 using Vec3i = macvoxel::shapes::Vec3i;
 struct LineHit { int32_t x, y, z; int face_axis; };
@@ -162,113 +162,27 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 @implementation VoxelView {
+    // Platform / lifetime — Metal queue, renderer references, ImGui /
+    // tracking state. Kept on the view because they're tied to the
+    // NSView/MTKView lifecycle, not to any modeling gesture.
     id<MTLCommandQueue> _commandQueue;
     RaycastRenderer* _raycastRenderer;
     PathTraceRenderer* _pathTraceRenderer;
     GeneratorEngine* _generatorEngine;
     macvoxel::Camera _camera;
-    DragMode _dragMode;
-    macvoxel::ToolMode _paintMode;
-    // Marquee tool: the rectangle's two corners in NSWindow coords.
-    // We deliberately don't pick a voxel at mouseDown — the marquee
-    // selects what's *under* the rect on commit, so an anchor in empty
-    // space is fine. Both points get re-projected on mouseUp through
-    // the live camera matrix; no per-pixel work happens during drag.
-    NSPoint _marqueeAnchorWindow;
-    NSPoint _marqueeCurrentWindow;
-    // Box-select tool: anchor cell at mouseDown; the selection's AABB
-    // grows live to [min(anchor, current), max] during drag (via SetBox,
-    // which stages an AABB-only selection); mouseUp populates the sparse
-    // voxel list with every occupied cell inside.
-    Vec3i _boxSelectAnchor;
-    // MoveSelect (Cmd-drag on a selected voxel = move the selection in
-    // the click face's tangent plane). The actual lift / commit is
-    // delegated to the FloatingBuffer; we just track the drag plane
-    // and the offset value at click time so each frame can compute a
-    // new absolute offset from the cumulative cursor delta.
-    int _moveAxis;
-    simd::float3 _moveAnchorGrid;
-    Vec3i _moveStartOffset;
-    // Floating-buffer transform gizmo. While a buffer is alive we draw
-    // 6 face-arrow handles around its world AABB; clicking a handle
-    // enters DragMode::XformHandle, which scales fb.grid along that
-    // face's axis. The orig-grid snapshot is captured at drag start so
-    // every frame's resample sees the lossless original (shrink-then-
-    // grow round-trips cleanly within one drag).
-    int _xformDragFace;          // 0..5 while dragging, -1 otherwise
-    NSPoint _xformDragStartCursor;
-    macvoxel::Bounds3 _xformDragStartBounds;
-    macvoxel::VoxelGrid _xformOrigGrid;
-    Vec3i _lastDragEditCell;
-    NSPoint _lastDragLocation;
-    NSPoint _hoverWindowPoint;
-    BOOL _hoverHasPoint;
-    // Cells placed during the current drag-Add stroke. The raycast
-    // ignores these so the cursor keeps targeting the *original*
-    // surface; otherwise each new voxel becomes the next event's hit
-    // and the target marches outward along the face normal.
-    std::unordered_set<int64_t> _dragSkipCells;
     NSTrackingArea* _trackingArea;
     BOOL _imguiAlive;
     bool _wasPathTraced;
-    // Two-click tools (Line, Circle, …): between click 1 and click 2.
-    // Anchor cell + face axis are computed at click 1 (via the line-endpoint
-    // picker); the screen-space anchor point is used as one endpoint of the
-    // screen-space segment in Line's Project mode. The mode and tool are
-    // frozen at click 1 so switching either mid-stroke doesn't surprise the
-    // user; the per-frame sweep cancels the anchor when they change.
-    BOOL _hasAnchor;
-    Vec3i _anchorCell;
-    int _anchorFaceAxis;
-    macvoxel::ToolMode _anchorMode;
-    NSPoint _anchorScreen;
-    macvoxel::ToolKind _anchorTool;
-    // Face tool only: result of the click-time flood fill (all coplanar
-    // same-color cells whose face on (_anchorFaceAxis, _faceSign) is
-    // exposed) and the source color used for extrusions. `_faceObservedDrag`
-    // is set the first time the cursor produces a non-zero voxel distance
-    // from the anchor; while it's still NO, a d=0 commit is treated as
-    // d=1 so a click without drag applies a single 1-voxel layer.
-    int _faceSign;
-    uint8_t _faceSeedColor;
-    BOOL _faceObservedDrag;
-    // The d value (normalized — signed for Add, |d| for Remove/Paint)
-    // currently materialised into the PreviewOverlay, plus the
-    // `face_with` value at the time those layers were applied. Used so
-    // each frame only does O(seed_cells × Δd) work as the user drags
-    // through layer boundaries, instead of rebuilding the whole preview
-    // every frame.
-    int _faceAppliedD;
-    macvoxel::FaceWithColor _faceAppliedWith;
-    std::vector<Vec3i> _faceSeedCells;
-    // Generator gizmo state. After the user releases the mouse from a
-    // Generator-tool drag-out, the box stays visible (along with the
-    // PreviewOverlay cells) until they confirm. Clicking outside the
-    // box commits the preview through EditHistory; Esc drops the
-    // overlay without a commit. The bounds + active-kind cache lets
-    // the per-frame loop detect param/kind changes from the panel and
-    // re-run the engine.
-    BOOL _genGizmoActive;
-    macvoxel::generators::Bounds3i _genBounds;
-    macvoxel::generators::Kind _genLastKind;
-    macvoxel::generators::Bounds3i _genLastBounds;
-    macvoxel::generators::Params _genLastParams;
-    // Face-handle drag state. _genActiveDragFace is 0..5 while a handle
-    // is being dragged (DragMode::GenHandle); -1 otherwise. The face
-    // index encodes (axis, sign): face/2 = axis, face&1 = (sign>0).
-    // _genHandleStartBounds locks in the bounds at drag-start so each
-    // frame's drag distance projects against the same NDC reference
-    // direction — without this, the projected normal moves as bounds
-    // change and the drag-to-voxels mapping drifts.
-    int _genActiveDragFace;
-    NSPoint _genHandleStartCursor;
-    macvoxel::generators::Bounds3i _genHandleStartBounds;
     // Tracks transitions for auto-committing the floating buffer:
     // switching tools / entering render mode / saving / opening etc.
     // are all "the user moved on" gestures, so we drop whatever's
     // floating before letting the new context see a stale buffer.
     macvoxel::ToolKind _lastToolForFB;
     bool _lastPathTracedForFB;
+
+    // Modeling-side gesture state — drag mode + per-tool sub-structs.
+    // See InteractionState.h for the breakdown.
+    macvoxel::InteractionState _interaction;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -313,7 +227,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     if (_generatorEngine == nil) {
         return nil;
     }
-    _genActiveDragFace = -1;  // 0 means "the -X face" — explicit nil-state.
+    _interaction.gen_gizmo.active_drag_face = -1;  // 0 means "the -X face" — explicit nil-state.
 
     [self setupImGuiWithDevice:device];
     return self;
@@ -572,19 +486,19 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // Cancel a pending shape anchor on Escape or when the user switches
     // tools mid-stroke. ImGui owns keyDown via its hidden KeyEventResponder,
     // so we read the IO-level state instead of overriding -keyDown:.
-    // Clearing _dragMode too means the upcoming mouseUp won't try to
+    // Clearing _interaction.drag_mode too means the upcoming mouseUp won't try to
     // commit the (now anchor-less) shape.
-    if (_hasAnchor) {
-        if (macvoxel::CurrentTool().tool != _anchorTool ||
+    if (_interaction.anchor.has_anchor) {
+        if (macvoxel::CurrentTool().tool != _interaction.anchor.tool ||
             ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-            if (_dragMode == DragMode::Shape) {
+            if (_interaction.drag_mode == DragMode::Shape) {
                 // Cancel = drop the overlay. The doc was never touched
                 // during the preview gesture.
                 macvoxel::CurrentPreview().Clear();
-                _dragMode = DragMode::None;
+                _interaction.drag_mode = DragMode::None;
             }
-            _hasAnchor = NO;
-            _faceSeedCells.clear();
+            _interaction.anchor.has_anchor = NO;
+            _interaction.face.seed_cells.clear();
         }
     }
 
@@ -592,7 +506,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // preview without writing history, switching tools cancels too. The
     // ImGui IsKeyPressed read happens after NewFrame so it sees this
     // frame's keyboard input.
-    if (_genGizmoActive) {
+    if (_interaction.gen_gizmo.active) {
         if (macvoxel::CurrentTool().tool != macvoxel::ToolKind::Generator ||
             ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
             [self cancelGenGizmo];
@@ -635,22 +549,22 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         // parameters; the tool's palette index may have changed too.
         // Detect any of those (plus a bounds change from a future face
         // handle) and re-run the engine.
-        if (_genGizmoActive) {
+        if (_interaction.gen_gizmo.active) {
             const auto& gs = macvoxel::CurrentGeneratorState();
             const uint8_t cur_palette = macvoxel::CurrentTool().palette_idx;
             const bool dirty =
-                gs.active_kind != _genLastKind ||
-                std::memcmp(&_genBounds, &_genLastBounds,
-                            sizeof(_genBounds)) != 0 ||
-                cur_palette != _genLastParams.palette_idx ||
-                gs.params.axis != _genLastParams.axis ||
-                gs.params.apex_at_max != _genLastParams.apex_at_max;
+                gs.active_kind != _interaction.gen_gizmo.last_kind ||
+                std::memcmp(&_interaction.gen_gizmo.bounds, &_interaction.gen_gizmo.last_bounds,
+                            sizeof(_interaction.gen_gizmo.bounds)) != 0 ||
+                cur_palette != _interaction.gen_gizmo.last_params.palette_idx ||
+                gs.params.axis != _interaction.gen_gizmo.last_params.axis ||
+                gs.params.apex_at_max != _interaction.gen_gizmo.last_params.apex_at_max;
             if (dirty) {
                 [self refreshGenGizmoPreview];
-                _genLastKind = gs.active_kind;
-                _genLastBounds = _genBounds;
-                _genLastParams = gs.params;
-                _genLastParams.palette_idx = cur_palette;
+                _interaction.gen_gizmo.last_kind = gs.active_kind;
+                _interaction.gen_gizmo.last_bounds = _interaction.gen_gizmo.bounds;
+                _interaction.gen_gizmo.last_params = gs.params;
+                _interaction.gen_gizmo.last_params.palette_idx = cur_palette;
             }
         }
         [self drawSelectionOverlay];
@@ -779,12 +693,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 - (void)mouseMoved:(NSEvent*)event {
-    _hoverWindowPoint = event.locationInWindow;
-    _hoverHasPoint = YES;
+    _interaction.hover.window_point = event.locationInWindow;
+    _interaction.hover.has_point = YES;
 }
 
 - (void)mouseExited:(NSEvent*)__unused event {
-    _hoverHasPoint = NO;
+    _interaction.hover.has_point = NO;
 }
 
 - (void)runSaveRenderPanel {
@@ -827,7 +741,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
 - (void)mouseDown:(NSEvent*)event {
     if (ImGui::GetIO().WantCaptureMouse) {
-        _dragMode = DragMode::None;
+        _interaction.drag_mode = DragMode::None;
         return;
     }
     const NSEventModifierFlags m = event.modifierFlags;
@@ -837,51 +751,51 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // disturb anchor / gizmo / drag state, just updates the palette.
     if (hasOption) {
         [self eyedropperAtPoint:event.locationInWindow];
-        _dragMode = DragMode::None;
+        _interaction.drag_mode = DragMode::None;
         return;
     }
     // Space + left-click = pan (the alt to middle-click on trackpads
     // and one-button mice). Camera orbit lives on right-click via
     // rightMouseDown:; pan also lives on otherMouseDown: (middle).
     if (ImGui::IsKeyDown(ImGuiKey_Space)) {
-        _dragMode = DragMode::Pan;
-        _lastDragLocation = event.locationInWindow;
-    } else if (_genGizmoActive) {
+        _interaction.drag_mode = DragMode::Pan;
+        _interaction.brush.last_drag_location = event.locationInWindow;
+    } else if (_interaction.gen_gizmo.active) {
         // Click on a face arrow handle → enter resize drag. Any other
         // click in the viewport commits the gizmo (the user signals
         // they're done by clicking outside the handles).
         const int face = [self pickGenHandleAtPoint:event.locationInWindow];
         if (face >= 0) {
-            _genActiveDragFace = face;
-            _genHandleStartCursor = event.locationInWindow;
-            _genHandleStartBounds = _genBounds;
-            _dragMode = DragMode::GenHandle;
+            _interaction.gen_gizmo.active_drag_face = face;
+            _interaction.gen_gizmo.handle_start_cursor = event.locationInWindow;
+            _interaction.gen_gizmo.handle_start_bounds = _interaction.gen_gizmo.bounds;
+            _interaction.drag_mode = DragMode::GenHandle;
         } else {
             [self commitGenGizmo];
-            _dragMode = DragMode::None;
+            _interaction.drag_mode = DragMode::None;
         }
     } else if ([self tryBeginXformHandleAtPoint:event.locationInWindow]) {
         // Click on a transform-gizmo face arrow → scale the selection
         // (lifting it into a floating buffer first if it wasn't
-        // already). tryBeginXformHandleAtPoint: set _dragMode.
+        // already). tryBeginXformHandleAtPoint: set _interaction.drag_mode.
     } else if (hasCommand &&
                (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Marquee ||
                 macvoxel::CurrentTool().tool == macvoxel::ToolKind::BoxSelect ||
                 macvoxel::CurrentTool().tool == macvoxel::ToolKind::FloodSelect) &&
                [self tryBeginMoveSelectAtPoint:event.locationInWindow]) {
         // Cmd-drag on a selected voxel takes over for the duration of
-        // the gesture; tryBeginMoveSelectAtPoint: set _dragMode for us.
+        // the gesture; tryBeginMoveSelectAtPoint: set _interaction.drag_mode for us.
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Marquee) {
         [self autoCommitFloatingBuffer];
-        _dragMode = DragMode::Marquee;
-        _marqueeAnchorWindow = event.locationInWindow;
-        _marqueeCurrentWindow = event.locationInWindow;
+        _interaction.drag_mode = DragMode::Marquee;
+        _interaction.marquee.anchor_window = event.locationInWindow;
+        _interaction.marquee.current_window = event.locationInWindow;
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::BoxSelect) {
         [self autoCommitFloatingBuffer];
         Vec3i pick;
         if ([self pickGridCellAtPoint:event.locationInWindow into:&pick]) {
-            _boxSelectAnchor = pick;
-            _dragMode = DragMode::BoxSelect;
+            _interaction.box_select.anchor = pick;
+            _interaction.drag_mode = DragMode::BoxSelect;
             // SetBox stages the live AABB without populating cells; the
             // mouseUp handler scans the doc and SetVoxels-es the result.
             macvoxel::Bounds3 b{};
@@ -890,7 +804,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             b.min_z = b.max_z = pick.z;
             macvoxel::CurrentSelection().SetBox(b);
         } else {
-            _dragMode = DragMode::None;
+            _interaction.drag_mode = DragMode::None;
         }
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::FloodSelect) {
         [self autoCommitFloatingBuffer];
@@ -904,7 +818,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         } else {
             macvoxel::CurrentSelection().Clear();
         }
-        _dragMode = DragMode::None;
+        _interaction.drag_mode = DragMode::None;
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Line ||
                macvoxel::CurrentTool().tool == macvoxel::ToolKind::Circle ||
                macvoxel::CurrentTool().tool == macvoxel::ToolKind::Square ||
@@ -916,37 +830,37 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         const macvoxel::ToolMode mode = hasCommand ? macvoxel::ToolMode::Remove
                                                     : macvoxel::CurrentTool().mode;
         [self beginAnchorAtPoint:event.locationInWindow mode:mode];
-        if (_hasAnchor) {
-            _dragMode = DragMode::Shape;
+        if (_interaction.anchor.has_anchor) {
+            _interaction.drag_mode = DragMode::Shape;
             // Track the cursor for the live preview while the button is
             // held — mouseMoved doesn't fire during a drag.
-            _hoverWindowPoint = event.locationInWindow;
-            _hoverHasPoint = YES;
+            _interaction.hover.window_point = event.locationInWindow;
+            _interaction.hover.has_point = YES;
             // Generator tool: activate the gizmo immediately so the
             // AABB outline is visible from the first click rather than
-            // appearing only after release. _genBounds starts as the
+            // appearing only after release. _interaction.gen_gizmo.bounds starts as the
             // anchor cell alone; refreshShapePreview's Generator case
             // grows it as the user drags.
             if (macvoxel::CurrentTool().tool ==
                 macvoxel::ToolKind::Generator) {
-                _genBounds = macvoxel::generators::Bounds3i{
-                    _anchorCell.x, _anchorCell.y, _anchorCell.z,
-                    _anchorCell.x, _anchorCell.y, _anchorCell.z,
+                _interaction.gen_gizmo.bounds = macvoxel::generators::Bounds3i{
+                    _interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
+                    _interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
                 };
-                _genGizmoActive = YES;
-                _genLastKind =
+                _interaction.gen_gizmo.active = YES;
+                _interaction.gen_gizmo.last_kind =
                     macvoxel::CurrentGeneratorState().active_kind;
-                _genLastBounds = _genBounds;
-                _genLastParams =
+                _interaction.gen_gizmo.last_bounds = _interaction.gen_gizmo.bounds;
+                _interaction.gen_gizmo.last_params =
                     macvoxel::CurrentGeneratorState().params;
-                _genLastParams.palette_idx =
+                _interaction.gen_gizmo.last_params.palette_idx =
                     macvoxel::CurrentTool().palette_idx;
             }
             // Render the initial click-cell shape so a bare click (no
             // drag) shows its placement before mouseUp commits.
             [self refreshShapePreview];
         } else {
-            _dragMode = DragMode::None;
+            _interaction.drag_mode = DragMode::None;
         }
     } else if (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Face) {
         [self autoCommitFloatingBuffer];
@@ -957,20 +871,20 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         uint8_t color = 0;
         if (![self pickFaceAtPoint:event.locationInWindow cell:&seed
                               axis:&axis sign:&sign color:&color]) {
-            _dragMode = DragMode::None;
+            _interaction.drag_mode = DragMode::None;
             return;
         }
-        _hasAnchor = YES;
-        _anchorCell = seed;
-        _anchorFaceAxis = axis;
-        _anchorMode = macvoxel::CurrentTool().mode;  // unused, kept for symmetry
-        _anchorScreen = event.locationInWindow;
-        _anchorTool = macvoxel::ToolKind::Face;
-        _faceSign = sign;
-        _faceSeedColor = color;
-        _faceObservedDrag = NO;
-        _faceAppliedD = 0;
-        _faceAppliedWith = macvoxel::CurrentTool().face_with;
+        _interaction.anchor.has_anchor = YES;
+        _interaction.anchor.cell = seed;
+        _interaction.anchor.face_axis = axis;
+        _interaction.anchor.mode = macvoxel::CurrentTool().mode;  // unused, kept for symmetry
+        _interaction.anchor.screen = event.locationInWindow;
+        _interaction.anchor.tool = macvoxel::ToolKind::Face;
+        _interaction.face.sign = sign;
+        _interaction.face.seed_color = color;
+        _interaction.face.observed_drag = NO;
+        _interaction.face.applied_d = 0;
+        _interaction.face.applied_with = macvoxel::CurrentTool().face_with;
         const macvoxel::ToolSettings& t = macvoxel::CurrentTool();
         // FaceExtrudeKind::Geometry passes color=0 to the flood — that's
         // the "any non-empty cell" sentinel inside floodFaceFromCell:.
@@ -978,14 +892,14 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             (t.face_extrude == macvoxel::FaceExtrudeKind::Color) ? color : 0;
         [self floodFaceFromCell:seed axis:axis sign:sign color:flood_color
               eightConnectivity:t.face_eight_connected
-                         output:_faceSeedCells];
-        _dragMode = DragMode::Shape;
-        _hoverWindowPoint = event.locationInWindow;
-        _hoverHasPoint = YES;
+                         output:_interaction.face.seed_cells];
+        _interaction.drag_mode = DragMode::Shape;
+        _interaction.hover.window_point = event.locationInWindow;
+        _interaction.hover.has_point = YES;
         // Face uses an incremental preview (transitionFaceTo only flips
         // the layers that changed), so the overlay is activated once at
         // mouseDown and only modified — never wholesale cleared — until
-        // commit/cancel. _faceAppliedD = 0 above already pairs with an
+        // commit/cancel. _interaction.face.applied_d = 0 above already pairs with an
         // empty overlay.
         macvoxel::CurrentPreview().Clear();
         macvoxel::CurrentPreview().active = true;
@@ -995,51 +909,51 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         [self refreshShapePreview];
     } else {
         [self autoCommitFloatingBuffer];
-        _dragMode = DragMode::Paint;
-        _paintMode = hasCommand ? macvoxel::ToolMode::Remove
+        _interaction.drag_mode = DragMode::Paint;
+        _interaction.brush.paint_mode = hasCommand ? macvoxel::ToolMode::Remove
                                 : macvoxel::CurrentTool().mode;
-        _lastDragEditCell = kInvalidCell;
-        _dragSkipCells.clear();
+        _interaction.brush.last_drag_edit_cell = kInvalidCell;
+        _interaction.brush.drag_skip_cells.clear();
         macvoxel::CurrentHistory().BeginOp();
-        [self performEditAtPoint:event.locationInWindow mode:_paintMode];
+        [self performEditAtPoint:event.locationInWindow mode:_interaction.brush.paint_mode];
     }
 }
 
 - (void)mouseDragged:(NSEvent*)event {
-    if (_dragMode == DragMode::None) {
+    if (_interaction.drag_mode == DragMode::None) {
         return;
     }
     const NSPoint p = event.locationInWindow;
-    const float dx = static_cast<float>(p.x - _lastDragLocation.x);
-    const float dy = static_cast<float>(p.y - _lastDragLocation.y);
-    _lastDragLocation = p;
+    const float dx = static_cast<float>(p.x - _interaction.brush.last_drag_location.x);
+    const float dy = static_cast<float>(p.y - _interaction.brush.last_drag_location.y);
+    _interaction.brush.last_drag_location = p;
 
-    switch (_dragMode) {
+    switch (_interaction.drag_mode) {
         case DragMode::Orbit: _camera.Orbit(dx, dy); break;
         case DragMode::Pan:   _camera.Pan(dx, dy);   break;
-        case DragMode::Paint: [self performEditAtPoint:p mode:_paintMode]; break;
+        case DragMode::Paint: [self performEditAtPoint:p mode:_interaction.brush.paint_mode]; break;
         case DragMode::Marquee:
-            _marqueeCurrentWindow = p;
+            _interaction.marquee.current_window = p;
             break;
         case DragMode::MoveSelect:
             [self updateMoveSelectAtPoint:p];
             break;
         case DragMode::XformHandle: {
-            const int dv = [self xformHandleDragVoxelsForFace:_xformDragFace
+            const int dv = [self xformHandleDragVoxelsForFace:_interaction.xform.drag_face
                                                        cursor:p];
-            [self applyXformHandleDelta:_xformDragFace deltaVoxels:dv];
+            [self applyXformHandleDelta:_interaction.xform.drag_face deltaVoxels:dv];
             break;
         }
         case DragMode::BoxSelect: {
             Vec3i pick;
             if ([self pickGridCellAtPoint:p into:&pick]) {
                 macvoxel::Bounds3 b{};
-                b.min_x = std::min(_boxSelectAnchor.x, pick.x);
-                b.min_y = std::min(_boxSelectAnchor.y, pick.y);
-                b.min_z = std::min(_boxSelectAnchor.z, pick.z);
-                b.max_x = std::max(_boxSelectAnchor.x, pick.x);
-                b.max_y = std::max(_boxSelectAnchor.y, pick.y);
-                b.max_z = std::max(_boxSelectAnchor.z, pick.z);
+                b.min_x = std::min(_interaction.box_select.anchor.x, pick.x);
+                b.min_y = std::min(_interaction.box_select.anchor.y, pick.y);
+                b.min_z = std::min(_interaction.box_select.anchor.z, pick.z);
+                b.max_x = std::max(_interaction.box_select.anchor.x, pick.x);
+                b.max_y = std::max(_interaction.box_select.anchor.y, pick.y);
+                b.max_z = std::max(_interaction.box_select.anchor.z, pick.z);
                 macvoxel::CurrentSelection().SetBox(b);
             }
             break;
@@ -1047,8 +961,8 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         case DragMode::Shape:
             // Re-render the live preview at the new cursor; the actual
             // history entry happens on mouseUp at the release point.
-            _hoverWindowPoint = p;
-            _hoverHasPoint = YES;
+            _interaction.hover.window_point = p;
+            _interaction.hover.has_point = YES;
             [self refreshShapePreview];
             break;
         case DragMode::GenHandle: {
@@ -1056,9 +970,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             // update bounds; the per-frame gizmo refresh picks up the
             // change and re-runs the engine.
             const int dv =
-                [self genHandleDragVoxelsForFace:_genActiveDragFace
+                [self genHandleDragVoxelsForFace:_interaction.gen_gizmo.active_drag_face
                                           cursor:p];
-            [self applyGenHandleDelta:_genActiveDragFace deltaVoxels:dv];
+            [self applyGenHandleDelta:_interaction.gen_gizmo.active_drag_face deltaVoxels:dv];
             break;
         }
         case DragMode::None:  break;
@@ -1066,50 +980,50 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 - (void)mouseUp:(NSEvent*)event {
-    if (_dragMode == DragMode::Paint) {
+    if (_interaction.drag_mode == DragMode::Paint) {
         macvoxel::CurrentHistory().CommitOp();
-    } else if (_dragMode == DragMode::Marquee) {
-        _marqueeCurrentWindow = event.locationInWindow;
+    } else if (_interaction.drag_mode == DragMode::Marquee) {
+        _interaction.marquee.current_window = event.locationInWindow;
         [self commitMarqueeSelection];
-        _dragMode = DragMode::None;
+        _interaction.drag_mode = DragMode::None;
         return;
-    } else if (_dragMode == DragMode::BoxSelect) {
+    } else if (_interaction.drag_mode == DragMode::BoxSelect) {
         [self commitBoxSelection];
-        _dragMode = DragMode::None;
+        _interaction.drag_mode = DragMode::None;
         return;
-    } else if (_dragMode == DragMode::MoveSelect) {
+    } else if (_interaction.drag_mode == DragMode::MoveSelect) {
         [self commitMoveSelect];
-        _dragMode = DragMode::None;
+        _interaction.drag_mode = DragMode::None;
         return;
-    } else if (_dragMode == DragMode::XformHandle) {
+    } else if (_interaction.drag_mode == DragMode::XformHandle) {
         // Buffer is at its final scaled state already (we resampled
         // each frame). The unified lift+commit op picks up the
         // current fb.grid when commit fires later.
-        _xformDragFace = -1;
-        _xformOrigGrid.Clear();
-        _dragMode = DragMode::None;
+        _interaction.xform.drag_face = -1;
+        _interaction.xform.orig_grid.Clear();
+        _interaction.drag_mode = DragMode::None;
         return;
-    } else if (_dragMode == DragMode::GenHandle) {
+    } else if (_interaction.drag_mode == DragMode::GenHandle) {
         // Drag finished — leave bounds where the user released them and
         // stay in gizmo state. Active face goes back to "none" so the
         // arrow color clears.
-        _dragMode = DragMode::None;
-        _genActiveDragFace = -1;
-    } else if (_dragMode == DragMode::Shape) {
-        if (_anchorTool == macvoxel::ToolKind::Generator) {
+        _interaction.drag_mode = DragMode::None;
+        _interaction.gen_gizmo.active_drag_face = -1;
+    } else if (_interaction.drag_mode == DragMode::Shape) {
+        if (_interaction.anchor.tool == macvoxel::ToolKind::Generator) {
             // Gizmo went live on mouseDown and refreshShapePreview kept
-            // _genBounds in sync with the drag, so the box is already
+            // _interaction.gen_gizmo.bounds in sync with the drag, so the box is already
             // in the right state. Just stop dragging and let the gizmo
             // hold position until the user commits, cancels, or grabs
             // a face handle.
-            _dragMode = DragMode::None;
-            _hasAnchor = NO;
+            _interaction.drag_mode = DragMode::None;
+            _interaction.anchor.has_anchor = NO;
         } else {
             // Line/Circle/Square/Box/Face all read their final cell list
             // from PreviewOverlay — no rollback needed because the doc
             // was never touched during the preview gesture.
-            _dragMode = DragMode::None;
-            switch (_anchorTool) {
+            _interaction.drag_mode = DragMode::None;
+            switch (_interaction.anchor.tool) {
                 case macvoxel::ToolKind::Line:
                     [self commitLineAtPoint:event.locationInWindow]; break;
                 case macvoxel::ToolKind::Circle:
@@ -1120,26 +1034,26 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                     [self commitBoxAtPoint:event.locationInWindow]; break;
                 case macvoxel::ToolKind::Face:
                     [self commitFaceAtPoint:event.locationInWindow]; break;
-                default: _hasAnchor = NO; break;
+                default: _interaction.anchor.has_anchor = NO; break;
             }
         }
     }
-    _dragMode = DragMode::None;
-    _dragSkipCells.clear();
+    _interaction.drag_mode = DragMode::None;
+    _interaction.brush.drag_skip_cells.clear();
 }
 
 // Right-click drives camera orbit, middle (other) click drives pan. Both
 // share the dragged-delta math in mouseDragged: by routing through the
-// same _dragMode state machine — the dragged callbacks just forward to
+// same _interaction.drag_mode state machine — the dragged callbacks just forward to
 // the left-button mouseDragged:, since the Orbit / Pan switch cases
 // don't care which button generated the event.
 - (void)rightMouseDown:(NSEvent*)event {
     if (ImGui::GetIO().WantCaptureMouse) {
-        _dragMode = DragMode::None;
+        _interaction.drag_mode = DragMode::None;
         return;
     }
-    _dragMode = DragMode::Orbit;
-    _lastDragLocation = event.locationInWindow;
+    _interaction.drag_mode = DragMode::Orbit;
+    _interaction.brush.last_drag_location = event.locationInWindow;
 }
 
 - (void)rightMouseDragged:(NSEvent*)event {
@@ -1147,16 +1061,16 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 - (void)rightMouseUp:(NSEvent*)__unused event {
-    if (_dragMode == DragMode::Orbit) _dragMode = DragMode::None;
+    if (_interaction.drag_mode == DragMode::Orbit) _interaction.drag_mode = DragMode::None;
 }
 
 - (void)otherMouseDown:(NSEvent*)event {
     if (ImGui::GetIO().WantCaptureMouse) {
-        _dragMode = DragMode::None;
+        _interaction.drag_mode = DragMode::None;
         return;
     }
-    _dragMode = DragMode::Pan;
-    _lastDragLocation = event.locationInWindow;
+    _interaction.drag_mode = DragMode::Pan;
+    _interaction.brush.last_drag_location = event.locationInWindow;
 }
 
 - (void)otherMouseDragged:(NSEvent*)event {
@@ -1164,7 +1078,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 - (void)otherMouseUp:(NSEvent*)__unused event {
-    if (_dragMode == DragMode::Pan) _dragMode = DragMode::None;
+    if (_interaction.drag_mode == DragMode::Pan) _interaction.drag_mode = DragMode::None;
 }
 
 - (void)scrollWheel:(NSEvent*)event {
@@ -1352,13 +1266,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // for Paint. Skipped during drag-paint (the drag itself shows what it's
 // doing) and when a panel has captured the mouse.
 - (void)drawHoverOverlay {
-    if (!_hoverHasPoint) return;
-    if (_dragMode != DragMode::None) return;
+    if (!_interaction.hover.has_point) return;
+    if (_interaction.drag_mode != DragMode::None) return;
     if (ImGui::GetIO().WantCaptureMouse) return;
     // Generator gizmo is the cursor indicator while it's live; the
     // would-place-cell wireframe would compete with it and read as
     // a stray duplicate.
-    if (_genGizmoActive) return;
+    if (_interaction.gen_gizmo.active) return;
 
     const macvoxel::ToolSettings& t = macvoxel::CurrentTool();
     const bool is_brush = t.tool == macvoxel::ToolKind::Brush;
@@ -1385,9 +1299,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // line-endpoint picker; Brush keeps the stricter behavior.
     Vec3i cell;
     const BOOL ok = is_two_click
-        ? [self computeLineEndpointAtPoint:_hoverWindowPoint mode:t.mode
+        ? [self computeLineEndpointAtPoint:_interaction.hover.window_point mode:t.mode
                                       into:&cell face:nullptr]
-        : [self computeTargetCellAtPoint:_hoverWindowPoint mode:t.mode
+        : [self computeTargetCellAtPoint:_interaction.hover.window_point mode:t.mode
                                     into:&cell face:nullptr];
     if (!ok) return;
     [self drawCellWireAtX:cell.x y:cell.y z:cell.z color:color_for_mode(t.mode)];
@@ -1437,8 +1351,8 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     const float h = static_cast<float>(self.bounds.size.height);
     if (w <= 0.0f || h <= 0.0f) return;
 
-    const NSPoint a_local = [self convertPoint:_marqueeAnchorWindow fromView:nil];
-    const NSPoint b_local = [self convertPoint:_marqueeCurrentWindow fromView:nil];
+    const NSPoint a_local = [self convertPoint:_interaction.marquee.anchor_window fromView:nil];
+    const NSPoint b_local = [self convertPoint:_interaction.marquee.current_window fromView:nil];
     const float rx_min = static_cast<float>(std::min(a_local.x, b_local.x));
     const float rx_max = static_cast<float>(std::max(a_local.x, b_local.x));
     const float ry_min = static_cast<float>(std::min(a_local.y, b_local.y));
@@ -1549,10 +1463,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         return NO;
     }
 
-    _moveAxis = axis;
-    _moveAnchorGrid = anchor;
-    _moveStartOffset = Vec3i{fb.offset_x, fb.offset_y, fb.offset_z};
-    _dragMode = DragMode::MoveSelect;
+    _interaction.move_select.axis = axis;
+    _interaction.move_select.anchor_grid = anchor;
+    _interaction.move_select.start_offset = Vec3i{fb.offset_x, fb.offset_y, fb.offset_z};
+    _interaction.drag_mode = DragMode::MoveSelect;
     return YES;
 }
 
@@ -1560,11 +1474,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
     if (!fb.active) return;
 
-    const float plane_coord = (_moveAxis == 0) ? _moveAnchorGrid.x
-                            : (_moveAxis == 1) ? _moveAnchorGrid.y
-                                               : _moveAnchorGrid.z;
+    const float plane_coord = (_interaction.move_select.axis == 0) ? _interaction.move_select.anchor_grid.x
+                            : (_interaction.move_select.axis == 1) ? _interaction.move_select.anchor_grid.y
+                                               : _interaction.move_select.anchor_grid.z;
     simd::float3 hit;
-    if (![self gridPlaneIntersect:windowPoint axis:_moveAxis coord:plane_coord
+    if (![self gridPlaneIntersect:windowPoint axis:_interaction.move_select.axis coord:plane_coord
                           output:&hit]) {
         // Grazing ray — leave the offset where it was rather than
         // jumping to the bogus huge t the math gave.
@@ -1574,12 +1488,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     auto round_to_int = [](float f) -> int32_t {
         return static_cast<int32_t>(std::lround(f));
     };
-    int32_t nx = _moveStartOffset.x;
-    int32_t ny = _moveStartOffset.y;
-    int32_t nz = _moveStartOffset.z;
-    if (_moveAxis != 0) nx += round_to_int(hit.x - _moveAnchorGrid.x);
-    if (_moveAxis != 1) ny += round_to_int(hit.y - _moveAnchorGrid.y);
-    if (_moveAxis != 2) nz += round_to_int(hit.z - _moveAnchorGrid.z);
+    int32_t nx = _interaction.move_select.start_offset.x;
+    int32_t ny = _interaction.move_select.start_offset.y;
+    int32_t nz = _interaction.move_select.start_offset.z;
+    if (_interaction.move_select.axis != 0) nx += round_to_int(hit.x - _interaction.move_select.anchor_grid.x);
+    if (_interaction.move_select.axis != 1) ny += round_to_int(hit.y - _interaction.move_select.anchor_grid.y);
+    if (_interaction.move_select.axis != 2) nz += round_to_int(hit.z - _interaction.move_select.anchor_grid.z);
 
     if (nx == fb.offset_x && ny == fb.offset_y && nz == fb.offset_z) return;
     fb.offset_x = nx;
@@ -1678,11 +1592,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
 // Live screen-space rectangle while the user is dragging the marquee.
 - (void)drawMarqueeOverlay {
-    if (_dragMode != DragMode::Marquee) return;
+    if (_interaction.drag_mode != DragMode::Marquee) return;
     const float h = static_cast<float>(self.bounds.size.height);
     if (h <= 0.0f) return;
-    const NSPoint a = [self convertPoint:_marqueeAnchorWindow fromView:nil];
-    const NSPoint b = [self convertPoint:_marqueeCurrentWindow fromView:nil];
+    const NSPoint a = [self convertPoint:_interaction.marquee.anchor_window fromView:nil];
+    const NSPoint b = [self convertPoint:_interaction.marquee.current_window fromView:nil];
     // NSPoint y is bottom-up; ImGui draws top-down — flip once on the
     // way out so the marquee follows the cursor exactly.
     const ImVec2 tl{static_cast<float>(std::min(a.x, b.x)),
@@ -1925,10 +1839,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     };
 
     int hover_face = -1;
-    if (_dragMode == DragMode::XformHandle) {
-        hover_face = _xformDragFace;
-    } else if (_hoverHasPoint && !ImGui::GetIO().WantCaptureMouse) {
-        hover_face = [self pickSelectionHandleAtPoint:_hoverWindowPoint];
+    if (_interaction.drag_mode == DragMode::XformHandle) {
+        hover_face = _interaction.xform.drag_face;
+    } else if (_interaction.hover.has_point && !ImGui::GetIO().WantCaptureMouse) {
+        hover_face = [self pickSelectionHandleAtPoint:_interaction.hover.window_point];
     }
 
     constexpr float kTipLengthVoxels = 4.0f;
@@ -1964,13 +1878,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
         const int axis = f / 2;
         const ImU32 color =
-            (_dragMode == DragMode::XformHandle && f == _xformDragFace)
+            (_interaction.drag_mode == DragMode::XformHandle && f == _interaction.xform.drag_face)
                 ? kAxisActive[axis]
             : (f == hover_face) ? kAxisHover[axis]
                                 : kAxisBase[axis];
         const float thickness =
             (f == hover_face ||
-             (_dragMode == DragMode::XformHandle && f == _xformDragFace))
+             (_interaction.drag_mode == DragMode::XformHandle && f == _interaction.xform.drag_face))
                 ? 2.8f : 2.0f;
         dl->AddLine(base, tip, color, thickness);
 
@@ -2063,7 +1977,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
 // Cursor → voxel delta along the dragged face's outward normal,
 // projected against the face's normal direction in NDC. Same shape
-// as genHandleDragVoxelsForFace: but anchored on _xformDragStartBounds
+// as genHandleDragVoxelsForFace: but anchored on _interaction.xform.drag_start_bounds
 // in world coords.
 - (int)xformHandleDragVoxelsForFace:(int)face cursor:(NSPoint)cursor {
     const float w = static_cast<float>(self.bounds.size.width);
@@ -2076,7 +1990,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // World-space face geometry of the *original* (drag-start) bounds
     // — anchoring against a moving face would make 1 voxel of cursor
     // travel ≠ 1 voxel of growth, so the drag mapping would drift.
-    macvoxel::Bounds3 wb = _xformDragStartBounds;
+    macvoxel::Bounds3 wb = _interaction.xform.drag_start_bounds;
     const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
     wb.min_x += fb.offset_x; wb.max_x += fb.offset_x;
     wb.min_y += fb.offset_y; wb.max_y += fb.offset_y;
@@ -2100,7 +2014,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     if (dir_len2 < 1e-8f) return 0;
 
     const NSPoint anchor_local =
-        [self convertPoint:_xformDragStartCursor fromView:nil];
+        [self convertPoint:_interaction.xform.drag_start_cursor fromView:nil];
     const NSPoint cursor_local = [self convertPoint:cursor fromView:nil];
     const simd::float2 drag{
         static_cast<float>((cursor_local.x - anchor_local.x) / w * 2.0f),
@@ -2129,11 +2043,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         if (!fb.active || fb.grid.empty()) return NO;
     }
 
-    _xformDragFace = face;
-    _xformDragStartCursor = windowPoint;
-    _xformDragStartBounds = fb.grid.Bounds();
-    _xformOrigGrid = fb.grid.Clone();
-    _dragMode = DragMode::XformHandle;
+    _interaction.xform.drag_face = face;
+    _interaction.xform.drag_start_cursor = windowPoint;
+    _interaction.xform.drag_start_bounds = fb.grid.Bounds();
+    _interaction.xform.orig_grid = fb.grid.Clone();
+    _interaction.drag_mode = DragMode::XformHandle;
     return YES;
 }
 
@@ -2145,7 +2059,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 - (void)applyXformHandleDelta:(int)face deltaVoxels:(int)delta {
     int axis, sign;
     XformFaceAxisSign(face, &axis, &sign);
-    macvoxel::Bounds3 nb = _xformDragStartBounds;
+    macvoxel::Bounds3 nb = _interaction.xform.drag_start_bounds;
     if (axis == 0) {
         if (sign < 0) nb.min_x = std::min(nb.max_x, nb.min_x - delta);
         else          nb.max_x = std::max(nb.min_x, nb.max_x + delta);
@@ -2156,18 +2070,18 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         if (sign < 0) nb.min_z = std::min(nb.max_z, nb.min_z - delta);
         else          nb.max_z = std::max(nb.min_z, nb.max_z + delta);
     }
-    macvoxel::ResampleFloatingBuffer(_xformOrigGrid, _xformDragStartBounds, nb);
+    macvoxel::ResampleFloatingBuffer(_interaction.xform.orig_grid, _interaction.xform.drag_start_bounds, nb);
     macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
     ++fb.version;
 }
 
-// Generator gizmo overlay: 12-edge AABB outline around _genBounds plus
+// Generator gizmo overlay: 12-edge AABB outline around _interaction.gen_gizmo.bounds plus
 // 6 face-normal arrow handles. Hovering a handle highlights it; the
 // actively-dragged handle gets the brightest tint. Click-tests for
 // "is the cursor over a handle" use the same projected tip positions
 // computed here, so visuals and hit-tests can't drift.
 - (void)drawGenGizmo {
-    if (!_genGizmoActive) return;
+    if (!_interaction.gen_gizmo.active) return;
     const float w = static_cast<float>(self.bounds.size.width);
     const float h = static_cast<float>(self.bounds.size.height);
     if (w <= 0.0f || h <= 0.0f) return;
@@ -2187,12 +2101,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     };
 
     // Box outline. Voxels span [c, c+1] so outer surfaces sit at min..max+1.
-    const float bx0 = static_cast<float>(_genBounds.x0);
-    const float by0 = static_cast<float>(_genBounds.y0);
-    const float bz0 = static_cast<float>(_genBounds.z0);
-    const float bx1 = static_cast<float>(_genBounds.x1 + 1);
-    const float by1 = static_cast<float>(_genBounds.y1 + 1);
-    const float bz1 = static_cast<float>(_genBounds.z1 + 1);
+    const float bx0 = static_cast<float>(_interaction.gen_gizmo.bounds.x0);
+    const float by0 = static_cast<float>(_interaction.gen_gizmo.bounds.y0);
+    const float bz0 = static_cast<float>(_interaction.gen_gizmo.bounds.z0);
+    const float bx1 = static_cast<float>(_interaction.gen_gizmo.bounds.x1 + 1);
+    const float by1 = static_cast<float>(_interaction.gen_gizmo.bounds.y1 + 1);
+    const float bz1 = static_cast<float>(_interaction.gen_gizmo.bounds.z1 + 1);
     const simd::float3 corners_grid[8] = {
         {bx0, by0, bz0}, {bx1, by0, bz0},
         {bx1, by1, bz0}, {bx0, by1, bz0},
@@ -2224,10 +2138,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // visually). When a panel has captured the mouse, suppress hover
     // so the cursor over a tooltip doesn't paint a handle hot.
     int hover_face = -1;
-    if (_dragMode == DragMode::GenHandle) {
-        hover_face = _genActiveDragFace;
-    } else if (_hoverHasPoint && !ImGui::GetIO().WantCaptureMouse) {
-        hover_face = [self pickGenHandleAtPoint:_hoverWindowPoint];
+    if (_interaction.drag_mode == DragMode::GenHandle) {
+        hover_face = _interaction.gen_gizmo.active_drag_face;
+    } else if (_interaction.hover.has_point && !ImGui::GetIO().WantCaptureMouse) {
+        hover_face = [self pickGenHandleAtPoint:_interaction.hover.window_point];
     }
 
     constexpr float kTipLengthVoxels = 4.0f;
@@ -2254,7 +2168,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
     for (int f = 0; f < 6; ++f) {
         simd::float3 cw, nw;
-        GizmoFaceWorldGeom(_genBounds, f, &cw, &nw);
+        GizmoFaceWorldGeom(_interaction.gen_gizmo.bounds, f, &cw, &nw);
         ImVec2 base, tip;
         bool base_v, tip_v;
         project(cw, &base, &base_v);
@@ -2263,10 +2177,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
         const int axis = f / 2;
         const ImU32 color =
-            (f == _genActiveDragFace) ? kAxisActive[axis] :
+            (f == _interaction.gen_gizmo.active_drag_face) ? kAxisActive[axis] :
             (f == hover_face)         ? kAxisHover[axis]  :
                                         kAxisBase[axis];
-        const float thickness = (f == hover_face || f == _genActiveDragFace)
+        const float thickness = (f == hover_face || f == _interaction.gen_gizmo.active_drag_face)
                                     ? 2.8f : 2.0f;
         dl->AddLine(base, tip, color, thickness);
 
@@ -2355,10 +2269,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // keeps hitting the original surface. Other modes (Remove, Paint)
     // and non-drag interactions raycast against the live grid.
     if (mode == macvoxel::ToolMode::Add &&
-        _dragMode == DragMode::Paint && !_dragSkipCells.empty()) {
+        _interaction.drag_mode == DragMode::Paint && !_interaction.brush.drag_skip_cells.empty()) {
         hit_voxel = macvoxel::RaycastIgnoring(doc->grid, ray_origin_grid,
                                               ray_dir_grid, 4096.0f,
-                                              _dragSkipCells, &hit);
+                                              _interaction.brush.drag_skip_cells, &hit);
     } else {
         hit_voxel = macvoxel::Raycast(doc->grid, ray_origin_grid,
                                       ray_dir_grid, 4096.0f, &hit);
@@ -2411,10 +2325,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // this, every pointer-move event during a drag (many per frame) would
     // re-apply the brush to the same cell, which is harmless for Add but
     // bloats the undo history and can produce N²-style work for Paint.
-    if (_dragMode == DragMode::Paint && SameCell(target, _lastDragEditCell)) {
+    if (_interaction.drag_mode == DragMode::Paint && SameCell(target, _interaction.brush.last_drag_edit_cell)) {
         return;
     }
-    _lastDragEditCell = target;
+    _interaction.brush.last_drag_edit_cell = target;
 
     [self stampBrushAtX:target.x y:target.y z:target.z
               faceAxis:face_axis mode:mode];
@@ -2438,12 +2352,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     macvoxel::EditHistory& history = macvoxel::CurrentHistory();
     macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
 
-    const BOOL track_skip = (_dragMode == DragMode::Paint &&
+    const BOOL track_skip = (_interaction.drag_mode == DragMode::Paint &&
                              mode == macvoxel::ToolMode::Add);
     // Shape tools (Line/Circle/Square/Box) stage previewed cells into the
     // overlay during DragMode::Shape; the doc grid is left alone until the
     // commit path reads back from the overlay through EditHistory.
-    const BOOL preview = (_dragMode == DragMode::Shape);
+    const BOOL preview = (_interaction.drag_mode == DragMode::Shape);
     auto apply = [&](int x, int y, int z) {
         const uint8_t old_val = doc->grid.Get(x, y, z);
         const uint8_t new_val = ComputeNewCellValue(old_val, mode,
@@ -2456,7 +2370,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         doc->grid.Set(x, y, z, new_val);
         history.Record(x, y, z, old_val, new_val);
         if (track_skip) {
-            _dragSkipCells.insert(macvoxel::PackCellKey(x, y, z));
+            _interaction.brush.drag_skip_cells.insert(macvoxel::PackCellKey(x, y, z));
         }
     };
 
@@ -2499,7 +2413,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
     // Preview path edits the overlay only — the doc is untouched, so no
     // doc bump. Renderer keys off PreviewOverlay::version.
-    if (_dragMode != DragMode::Shape) {
+    if (_interaction.drag_mode != DragMode::Shape) {
         doc->BumpGeometry();
     }
 }
@@ -2555,25 +2469,25 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                           straight:(BOOL)straight
                             output:(std::vector<LineHit>&)out {
     out.clear();
-    if (!_hasAnchor) return;
+    if (!_interaction.anchor.has_anchor) return;
 
     if (straight) {
         Vec3i endpoint;
-        int end_face = _anchorFaceAxis;
-        if (![self computeLineEndpointAtPoint:cursor mode:_anchorMode
+        int end_face = _interaction.anchor.face_axis;
+        if (![self computeLineEndpointAtPoint:cursor mode:_interaction.anchor.mode
                                          into:&endpoint face:&end_face]) {
             // Endpoint picker only fails when no usable cell exists at all
             // (e.g., camera looking up so the ground-plane fallback is
             // behind the camera). Show just the anchor.
-            out.push_back({_anchorCell.x, _anchorCell.y,
-                           _anchorCell.z, _anchorFaceAxis});
+            out.push_back({_interaction.anchor.cell.x, _interaction.anchor.cell.y,
+                           _interaction.anchor.cell.z, _interaction.anchor.face_axis});
             return;
         }
         std::vector<Vec3i> cells;
-        macvoxel::shapes::EnumerateLine(_anchorCell, endpoint, cells);
+        macvoxel::shapes::EnumerateLine(_interaction.anchor.cell, endpoint, cells);
         out.reserve(cells.size());
         for (const Vec3i& c : cells) {
-            out.push_back({c.x, c.y, c.z, _anchorFaceAxis});
+            out.push_back({c.x, c.y, c.z, _interaction.anchor.face_axis});
         }
         return;
     }
@@ -2581,7 +2495,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // Project mode: walk the screen-space segment from the anchor click
     // pixel to the cursor pixel, raycasting at each step. Each hit is the
     // cell a single Brush click at that pixel would have produced.
-    const NSPoint s1 = _anchorScreen;
+    const NSPoint s1 = _interaction.anchor.screen;
     const NSPoint s2 = cursor;
     const float dx = static_cast<float>(s2.x - s1.x);
     const float dy = static_cast<float>(s2.y - s1.y);
@@ -2596,8 +2510,8 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         const NSPoint p{static_cast<CGFloat>(s1.x + dx * u),
                         static_cast<CGFloat>(s1.y + dy * u)};
         Vec3i cell;
-        int face_axis = _anchorFaceAxis;
-        if (![self computeTargetCellAtPoint:p mode:_anchorMode
+        int face_axis = _interaction.anchor.face_axis;
+        if (![self computeTargetCellAtPoint:p mode:_interaction.anchor.mode
                                        into:&cell face:&face_axis]) {
             continue;
         }
@@ -2610,10 +2524,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // hit different cells; ensure click 1's cell is always included so
     // the line endpoint always reads as placed.
     const int64_t anchor_k = macvoxel::PackCellKey(
-        _anchorCell.x, _anchorCell.y, _anchorCell.z);
+        _interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z);
     if (seen.find(anchor_k) == seen.end()) {
-        out.insert(out.begin(), {_anchorCell.x, _anchorCell.y,
-                                 _anchorCell.z, _anchorFaceAxis});
+        out.insert(out.begin(), {_interaction.anchor.cell.x, _interaction.anchor.cell.y,
+                                 _interaction.anchor.cell.z, _interaction.anchor.face_axis});
     }
 }
 
@@ -2697,28 +2611,28 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // Face branch drives `transitionFaceTo:` which mutates the overlay
 // in place. The doc grid is not touched until commit.
 - (void)refreshShapePreview {
-    if (!_hasAnchor || _dragMode != DragMode::Shape) return;
+    if (!_interaction.anchor.has_anchor || _interaction.drag_mode != DragMode::Shape) return;
 
     // Face tool: drive the preview incrementally. Only the layers that
     // actually differ between the previous d and the new d get touched,
     // so dragging through layer boundaries costs O(seed_cells × Δd)
     // per frame rather than O(seed_cells × |d|).
-    if (_anchorTool == macvoxel::ToolKind::Face) {
+    if (_interaction.anchor.tool == macvoxel::ToolKind::Face) {
         // Click without drag previews as a single layer; once a non-zero
         // d has been observed the override stops applying so dragging
         // back to the anchor cleanly cancels.
-        int d = [self faceDragVoxelsAtCursor:_hoverWindowPoint];
-        if (d != 0) _faceObservedDrag = YES;
-        if (d == 0 && !_faceObservedDrag) d = 1;
+        int d = [self faceDragVoxelsAtCursor:_interaction.hover.window_point];
+        if (d != 0) _interaction.face.observed_drag = YES;
+        if (d == 0 && !_interaction.face.observed_drag) d = 1;
         // Remove/Paint don't care about drag sign — normalize to magnitude
         // so the short-circuit and the diff driver see equivalent gestures
         // as equivalent state.
-        if (_anchorMode == macvoxel::ToolMode::Remove ||
-            _anchorMode == macvoxel::ToolMode::Paint) {
+        if (_interaction.anchor.mode == macvoxel::ToolMode::Remove ||
+            _interaction.anchor.mode == macvoxel::ToolMode::Paint) {
             d = std::abs(d);
         }
         const macvoxel::ToolSettings& t = macvoxel::CurrentTool();
-        if (d == _faceAppliedD && t.face_with == _faceAppliedWith) return;
+        if (d == _interaction.face.applied_d && t.face_with == _interaction.face.applied_with) return;
         [self transitionFaceTo:d];
         return;
     }
@@ -2733,28 +2647,28 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
     const macvoxel::ToolSettings& t = macvoxel::CurrentTool();
     std::vector<LineHit> hits;
-    switch (_anchorTool) {
+    switch (_interaction.anchor.tool) {
         case macvoxel::ToolKind::Line: {
             const BOOL straight =
                 t.line_mode == macvoxel::LineMode::Straight;
-            [self enumerateLineFromAnchorTo:_hoverWindowPoint
+            [self enumerateLineFromAnchorTo:_interaction.hover.window_point
                                     straight:straight output:hits];
             break;
         }
         case macvoxel::ToolKind::Circle:
-            [self enumerateCircleFromAnchorTo:_hoverWindowPoint
+            [self enumerateCircleFromAnchorTo:_interaction.hover.window_point
                                          fill:t.circle_fill
                                          even:t.circle_even
                                        output:hits];
             break;
         case macvoxel::ToolKind::Square:
-            [self enumerateSquareFromAnchorTo:_hoverWindowPoint
+            [self enumerateSquareFromAnchorTo:_interaction.hover.window_point
                                          fill:t.square_fill
                                          even:t.square_even
                                        output:hits];
             break;
         case macvoxel::ToolKind::Box:
-            [self enumerateBoxFromAnchorTo:_hoverWindowPoint
+            [self enumerateBoxFromAnchorTo:_interaction.hover.window_point
                                       fill:t.box_fill
                                     output:hits];
             break;
@@ -2764,18 +2678,18 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             // writes through stampGeneratorCellsToOverlay instead. The
             // overlay has already been Cleared above (Generator counts as
             // an overlay tool), so each refresh starts from a blank slate.
-            Vec3i endpoint = _anchorCell;
-            int end_face = _anchorFaceAxis;
-            [self computeLineEndpointAtPoint:_hoverWindowPoint
-                                        mode:_anchorMode
+            Vec3i endpoint = _interaction.anchor.cell;
+            int end_face = _interaction.anchor.face_axis;
+            [self computeLineEndpointAtPoint:_interaction.hover.window_point
+                                        mode:_interaction.anchor.mode
                                         into:&endpoint face:&end_face];
             macvoxel::generators::Bounds3i b{
-                std::min(_anchorCell.x, endpoint.x),
-                std::min(_anchorCell.y, endpoint.y),
-                std::min(_anchorCell.z, endpoint.z),
-                std::max(_anchorCell.x, endpoint.x),
-                std::max(_anchorCell.y, endpoint.y),
-                std::max(_anchorCell.z, endpoint.z),
+                std::min(_interaction.anchor.cell.x, endpoint.x),
+                std::min(_interaction.anchor.cell.y, endpoint.y),
+                std::min(_interaction.anchor.cell.z, endpoint.z),
+                std::max(_interaction.anchor.cell.x, endpoint.x),
+                std::max(_interaction.anchor.cell.y, endpoint.y),
+                std::max(_interaction.anchor.cell.z, endpoint.z),
             };
             macvoxel::generators::Params p =
                 macvoxel::CurrentGeneratorState().params;
@@ -2786,21 +2700,21 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                         kind:macvoxel::CurrentGeneratorState().active_kind
                       bounds:b
                       params:p];
-            [self stampGeneratorCellsToOverlay:cells mode:_anchorMode];
+            [self stampGeneratorCellsToOverlay:cells mode:_interaction.anchor.mode];
             // Keep gizmo state synced with the drag so drawGenGizmo
             // sees the live bounds and the per-frame change-detector
             // doesn't redundantly re-fire on the next frame.
-            _genBounds = b;
-            _genLastKind = macvoxel::CurrentGeneratorState().active_kind;
-            _genLastBounds = b;
-            _genLastParams = p;
+            _interaction.gen_gizmo.bounds = b;
+            _interaction.gen_gizmo.last_kind = macvoxel::CurrentGeneratorState().active_kind;
+            _interaction.gen_gizmo.last_bounds = b;
+            _interaction.gen_gizmo.last_params = p;
             return;
         }
         default: return;
     }
     for (const LineHit& h : hits) {
         [self stampBrushAtX:h.x y:h.y z:h.z faceAxis:h.face_axis
-                       mode:_anchorMode];
+                       mode:_interaction.anchor.mode];
     }
     ++overlay.version;
 }
@@ -2812,19 +2726,19 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                                      face:&face_axis]) {
         return;
     }
-    _hasAnchor = YES;
-    _anchorCell = target;
-    _anchorFaceAxis = face_axis;
-    _anchorMode = mode;
-    _anchorScreen = windowPoint;
-    _anchorTool = macvoxel::CurrentTool().tool;
+    _interaction.anchor.has_anchor = YES;
+    _interaction.anchor.cell = target;
+    _interaction.anchor.face_axis = face_axis;
+    _interaction.anchor.mode = mode;
+    _interaction.anchor.screen = windowPoint;
+    _interaction.anchor.tool = macvoxel::CurrentTool().tool;
 }
 
 - (void)commitLineAtPoint:(NSPoint)windowPoint {
     (void)windowPoint;
-    if (!_hasAnchor) return;
+    if (!_interaction.anchor.has_anchor) return;
     [self commitPreviewOverlayThroughHistory];
-    _hasAnchor = NO;
+    _interaction.anchor.has_anchor = NO;
 }
 
 // ---------------------------------------------------------------------------
@@ -2836,32 +2750,32 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                                 even:(BOOL)even
                               output:(std::vector<LineHit>&)out {
     out.clear();
-    if (!_hasAnchor) return;
+    if (!_interaction.anchor.has_anchor) return;
 
     Vec3i endpoint;
-    int end_face = _anchorFaceAxis;
-    if (![self computeLineEndpointAtPoint:cursor mode:_anchorMode
+    int end_face = _interaction.anchor.face_axis;
+    if (![self computeLineEndpointAtPoint:cursor mode:_interaction.anchor.mode
                                      into:&endpoint face:&end_face]) {
-        out.push_back({_anchorCell.x, _anchorCell.y, _anchorCell.z,
-                       _anchorFaceAxis});
+        out.push_back({_interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
+                       _interaction.anchor.face_axis});
         return;
     }
 
     std::vector<Vec3i> cells;
-    macvoxel::shapes::EnumerateCirclePlanar(_anchorCell, endpoint,
-                                            _anchorFaceAxis, fill, even,
+    macvoxel::shapes::EnumerateCirclePlanar(_interaction.anchor.cell, endpoint,
+                                            _interaction.anchor.face_axis, fill, even,
                                             cells);
     out.reserve(cells.size());
     for (const Vec3i& c : cells) {
-        out.push_back({c.x, c.y, c.z, _anchorFaceAxis});
+        out.push_back({c.x, c.y, c.z, _interaction.anchor.face_axis});
     }
 }
 
 - (void)commitCircleAtPoint:(NSPoint)windowPoint {
     (void)windowPoint;
-    if (!_hasAnchor) return;
+    if (!_interaction.anchor.has_anchor) return;
     [self commitPreviewOverlayThroughHistory];
-    _hasAnchor = NO;
+    _interaction.anchor.has_anchor = NO;
 }
 
 // ---------------------------------------------------------------------------
@@ -2879,32 +2793,32 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                                 even:(BOOL)even
                               output:(std::vector<LineHit>&)out {
     out.clear();
-    if (!_hasAnchor) return;
+    if (!_interaction.anchor.has_anchor) return;
 
     Vec3i endpoint;
-    int end_face = _anchorFaceAxis;
-    if (![self computeLineEndpointAtPoint:cursor mode:_anchorMode
+    int end_face = _interaction.anchor.face_axis;
+    if (![self computeLineEndpointAtPoint:cursor mode:_interaction.anchor.mode
                                      into:&endpoint face:&end_face]) {
-        out.push_back({_anchorCell.x, _anchorCell.y, _anchorCell.z,
-                       _anchorFaceAxis});
+        out.push_back({_interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
+                       _interaction.anchor.face_axis});
         return;
     }
 
     std::vector<Vec3i> cells;
-    macvoxel::shapes::EnumerateSquarePlanar(_anchorCell, endpoint,
-                                            _anchorFaceAxis, fill, even,
+    macvoxel::shapes::EnumerateSquarePlanar(_interaction.anchor.cell, endpoint,
+                                            _interaction.anchor.face_axis, fill, even,
                                             cells);
     out.reserve(cells.size());
     for (const Vec3i& c : cells) {
-        out.push_back({c.x, c.y, c.z, _anchorFaceAxis});
+        out.push_back({c.x, c.y, c.z, _interaction.anchor.face_axis});
     }
 }
 
 - (void)commitSquareAtPoint:(NSPoint)windowPoint {
     (void)windowPoint;
-    if (!_hasAnchor) return;
+    if (!_interaction.anchor.has_anchor) return;
     [self commitPreviewOverlayThroughHistory];
-    _hasAnchor = NO;
+    _interaction.anchor.has_anchor = NO;
 }
 
 // ---------------------------------------------------------------------------
@@ -2918,36 +2832,36 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                              fill:(BOOL)fill
                            output:(std::vector<LineHit>&)out {
     out.clear();
-    if (!_hasAnchor) return;
+    if (!_interaction.anchor.has_anchor) return;
 
     Vec3i endpoint;
-    int end_face = _anchorFaceAxis;
-    if (![self computeLineEndpointAtPoint:cursor mode:_anchorMode
+    int end_face = _interaction.anchor.face_axis;
+    if (![self computeLineEndpointAtPoint:cursor mode:_interaction.anchor.mode
                                      into:&endpoint face:&end_face]) {
-        out.push_back({_anchorCell.x, _anchorCell.y, _anchorCell.z,
-                       _anchorFaceAxis});
+        out.push_back({_interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
+                       _interaction.anchor.face_axis});
         return;
     }
 
     std::vector<Vec3i> cells;
-    macvoxel::shapes::EnumerateBox(_anchorCell, endpoint, fill, cells);
+    macvoxel::shapes::EnumerateBox(_interaction.anchor.cell, endpoint, fill, cells);
     out.reserve(cells.size());
     for (const Vec3i& c : cells) {
-        out.push_back({c.x, c.y, c.z, _anchorFaceAxis});
+        out.push_back({c.x, c.y, c.z, _interaction.anchor.face_axis});
     }
 }
 
 - (void)commitBoxAtPoint:(NSPoint)windowPoint {
     (void)windowPoint;
-    if (!_hasAnchor) return;
+    if (!_interaction.anchor.has_anchor) return;
     [self commitPreviewOverlayThroughHistory];
-    _hasAnchor = NO;
+    _interaction.anchor.has_anchor = NO;
 }
 
 // ---------------------------------------------------------------------------
 // Generator tool — gizmo lifecycle. Activates on mouseDown (single-cell
 // box at the anchor), grows during drag-out via refreshShapePreview's
-// Generator case (which keeps _genBounds in sync), persists past
+// Generator case (which keeps _interaction.gen_gizmo.bounds in sync), persists past
 // mouseUp until the user commits, cancels (Esc / tool switch), or
 // grabs a face handle. Stamping bypasses the brush-footprint expansion
 // that stampBrushAtX: does for Line / Circle / Square / Box.
@@ -2957,7 +2871,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // kind + params, and re-stamp the result. Called whenever the gizmo
 // config changes (kind / bounds / params) while gizmo is active.
 - (void)refreshGenGizmoPreview {
-    if (!_genGizmoActive) return;
+    if (!_interaction.gen_gizmo.active) return;
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
     if (doc == nullptr) return;
@@ -2971,7 +2885,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     std::vector<macvoxel::shapes::Vec3i> cells;
     [_generatorEngine generateInto:cells
                               kind:macvoxel::CurrentGeneratorState().active_kind
-                            bounds:_genBounds
+                            bounds:_interaction.gen_gizmo.bounds
                             params:p];
     [self stampGeneratorCellsToOverlay:cells
                                   mode:macvoxel::CurrentTool().mode];
@@ -2980,20 +2894,20 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // Commit the current gizmo's preview through EditHistory as a single
 // undo step, then exit gizmo state.
 - (void)commitGenGizmo {
-    if (!_genGizmoActive) return;
+    if (!_interaction.gen_gizmo.active) return;
     [self commitPreviewOverlayThroughHistory];
-    _genGizmoActive = NO;
+    _interaction.gen_gizmo.active = NO;
 }
 
 // Discard the current gizmo without writing to history. Drops the
 // overlay (the doc was never touched). Also clears any in-progress
 // face-handle drag so the next mouse event lands cleanly.
 - (void)cancelGenGizmo {
-    if (!_genGizmoActive) return;
+    if (!_interaction.gen_gizmo.active) return;
     macvoxel::CurrentPreview().Clear();
-    _genGizmoActive = NO;
-    _genActiveDragFace = -1;
-    if (_dragMode == DragMode::GenHandle) _dragMode = DragMode::None;
+    _interaction.gen_gizmo.active = NO;
+    _interaction.gen_gizmo.active_drag_face = -1;
+    if (_interaction.drag_mode == DragMode::GenHandle) _interaction.drag_mode = DragMode::None;
 }
 
 // Project each gizmo face's arrow tip into screen space and pick the
@@ -3001,7 +2915,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // radius. Returns -1 if no handle is under the cursor. Faces whose tip
 // projects behind the camera are skipped.
 - (int)pickGenHandleAtPoint:(NSPoint)windowPoint {
-    if (!_genGizmoActive) return -1;
+    if (!_interaction.gen_gizmo.active) return -1;
     const float w = static_cast<float>(self.bounds.size.width);
     const float h = static_cast<float>(self.bounds.size.height);
     if (w <= 0.0f || h <= 0.0f) return -1;
@@ -3022,7 +2936,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     float best_d2 = kHitRadiusPx * kHitRadiusPx;
     for (int f = 0; f < 6; ++f) {
         simd::float3 cw, nw;
-        GizmoFaceWorldGeom(_genBounds, f, &cw, &nw);
+        GizmoFaceWorldGeom(_interaction.gen_gizmo.bounds, f, &cw, &nw);
         const simd::float3 tip = cw + nw * kTipLengthVoxels;
         const simd::float4 clip = simd_mul(
             vp, simd::float4{tip.x, tip.y, tip.z, 1.0f});
@@ -3055,7 +2969,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
 
     simd::float3 cw, nw;
-    GizmoFaceWorldGeom(_genHandleStartBounds, face, &cw, &nw);
+    GizmoFaceWorldGeom(_interaction.gen_gizmo.handle_start_bounds, face, &cw, &nw);
 
     auto to_ndc = [&](simd::float3 wp, simd::float2* ndc) -> bool {
         const simd::float4 clip = simd_mul(
@@ -3073,7 +2987,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     if (dir_len2 < 1e-8f) return 0;
 
     const NSPoint anchor_local =
-        [self convertPoint:_genHandleStartCursor fromView:nil];
+        [self convertPoint:_interaction.gen_gizmo.handle_start_cursor fromView:nil];
     const NSPoint cursor_local = [self convertPoint:cursor fromView:nil];
     const simd::float2 drag{
         static_cast<float>((cursor_local.x - anchor_local.x) / w * 2.0f),
@@ -3089,7 +3003,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 - (void)applyGenHandleDelta:(int)face deltaVoxels:(int)delta {
     int axis, sign;
     GenFaceAxisSign(face, &axis, &sign);
-    macvoxel::generators::Bounds3i b = _genHandleStartBounds;
+    macvoxel::generators::Bounds3i b = _interaction.gen_gizmo.handle_start_bounds;
     if (axis == 0) {
         if (sign < 0) b.x0 = std::min(b.x1, b.x0 - delta);
         else          b.x1 = std::max(b.x0, b.x1 + delta);
@@ -3100,7 +3014,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         if (sign < 0) b.z0 = std::min(b.z1, b.z0 - delta);
         else          b.z1 = std::max(b.z0, b.z1 + delta);
     }
-    _genBounds = b;
+    _interaction.gen_gizmo.bounds = b;
 }
 
 // ---------------------------------------------------------------------------
@@ -3185,14 +3099,14 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
 
     const simd::float3 p0_grid{
-        static_cast<float>(_anchorCell.x) + 0.5f,
-        static_cast<float>(_anchorCell.y) + 0.5f,
-        static_cast<float>(_anchorCell.z) + 0.5f};
+        static_cast<float>(_interaction.anchor.cell.x) + 0.5f,
+        static_cast<float>(_interaction.anchor.cell.y) + 0.5f,
+        static_cast<float>(_interaction.anchor.cell.z) + 0.5f};
     const simd::float3 p0_world{p0_grid.x, p0_grid.z, -p0_grid.y};
     simd::float3 n_grid{0, 0, 0};
-    if (_anchorFaceAxis == 0)      n_grid.x = static_cast<float>(_faceSign);
-    else if (_anchorFaceAxis == 1) n_grid.y = static_cast<float>(_faceSign);
-    else                            n_grid.z = static_cast<float>(_faceSign);
+    if (_interaction.anchor.face_axis == 0)      n_grid.x = static_cast<float>(_interaction.face.sign);
+    else if (_interaction.anchor.face_axis == 1) n_grid.y = static_cast<float>(_interaction.face.sign);
+    else                            n_grid.z = static_cast<float>(_interaction.face.sign);
     const simd::float3 n_world{n_grid.x, n_grid.z, -n_grid.y};
 
     auto to_ndc = [&](simd::float3 wp, simd::float2* ndc) -> bool {
@@ -3210,7 +3124,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     const float dir_len2 = dir.x * dir.x + dir.y * dir.y;
     if (dir_len2 < 1e-8f) return 0;
 
-    const NSPoint anchor_local = [self convertPoint:_anchorScreen fromView:nil];
+    const NSPoint anchor_local = [self convertPoint:_interaction.anchor.screen fromView:nil];
     const NSPoint cursor_local = [self convertPoint:cursor fromView:nil];
     const simd::float2 drag{
         static_cast<float>((cursor_local.x - anchor_local.x) / w * 2.0f),
@@ -3223,7 +3137,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // through the preview snapshot during DragMode::Shape (so each frame's
 // preview can be rolled back) and directly through EditHistory otherwise.
 //
-// Mode dispatch (mode is frozen at click in `_anchorMode`):
+// Mode dispatch (mode is frozen at click in `_interaction.anchor.mode`):
 //   Add    — signed d. Positive extrudes; negative insets (erases).
 //            Extrude color comes from `face_with` (read live so the user
 //            can flip Geometry/Palette mid-drag and see the change).
@@ -3231,20 +3145,20 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 //   Paint  — |d| inward layers, repaint existing voxels with the palette
 //            color. Empty cells are skipped (Paint never fills).
 - (void)applyFaceExtrusion:(int)d {
-    if (d == 0 || _faceSeedCells.empty()) return;
+    if (d == 0 || _interaction.face.seed_cells.empty()) return;
     AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
     macvoxel::Document* doc = [delegate document];
     if (doc == nullptr) return;
 
     int da[3] = {0, 0, 0};
-    da[_anchorFaceAxis] = _faceSign;
+    da[_interaction.anchor.face_axis] = _interaction.face.sign;
     macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
     auto write = [&](int x, int y, int z, uint8_t new_val) {
         overlay.Stamp(x, y, z, new_val, doc->grid.Get(x, y, z));
     };
 
     const macvoxel::ToolSettings& tool = macvoxel::CurrentTool();
-    const macvoxel::ToolMode mode = _anchorMode;
+    const macvoxel::ToolMode mode = _interaction.anchor.mode;
     const int n = std::abs(d);
 
     if (mode == macvoxel::ToolMode::Add && d > 0) {
@@ -3253,7 +3167,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         const BOOL with_geometry =
             (tool.face_with == macvoxel::FaceWithColor::Geometry);
         for (int k = 1; k <= d; ++k) {
-            for (const Vec3i& v : _faceSeedCells) {
+            for (const Vec3i& v : _interaction.face.seed_cells) {
                 const int x = v.x + k * da[0];
                 const int y = v.y + k * da[1];
                 const int z = v.z + k * da[2];
@@ -3268,7 +3182,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         // Inset (Add with negative drag): erase the seed plane and walk
         // |d| steps inward.
         for (int k = 0; k < n; ++k) {
-            for (const Vec3i& v : _faceSeedCells) {
+            for (const Vec3i& v : _interaction.face.seed_cells) {
                 const int x = v.x - k * da[0];
                 const int y = v.y - k * da[1];
                 const int z = v.z - k * da[2];
@@ -3278,7 +3192,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     } else if (mode == macvoxel::ToolMode::Remove) {
         // Always inset, magnitude only — drag direction is ignored.
         for (int k = 0; k < n; ++k) {
-            for (const Vec3i& v : _faceSeedCells) {
+            for (const Vec3i& v : _interaction.face.seed_cells) {
                 const int x = v.x - k * da[0];
                 const int y = v.y - k * da[1];
                 const int z = v.z - k * da[2];
@@ -3289,7 +3203,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         // Repaint existing voxels at the seed plane and |d|-1 layers in.
         // Skips empty cells (Paint mode never fills).
         for (int k = 0; k < n; ++k) {
-            for (const Vec3i& v : _faceSeedCells) {
+            for (const Vec3i& v : _interaction.face.seed_cells) {
                 const int x = v.x - k * da[0];
                 const int y = v.y - k * da[1];
                 const int z = v.z - k * da[2];
@@ -3314,12 +3228,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     if (doc == nullptr) return;
 
     int da[3] = {0, 0, 0};
-    da[_anchorFaceAxis] = _faceSign;
+    da[_interaction.anchor.face_axis] = _interaction.face.sign;
     const macvoxel::ToolSettings& tool = macvoxel::CurrentTool();
-    const macvoxel::ToolMode mode = _anchorMode;
+    const macvoxel::ToolMode mode = _interaction.anchor.mode;
     macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
 
-    for (const Vec3i& v : _faceSeedCells) {
+    for (const Vec3i& v : _interaction.face.seed_cells) {
         const int x = v.x + offset * da[0];
         const int y = v.y + offset * da[1];
         const int z = v.z + offset * da[2];
@@ -3346,9 +3260,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
 - (void)rollbackFaceLayerAtOffset:(int)offset {
     int da[3] = {0, 0, 0};
-    da[_anchorFaceAxis] = _faceSign;
+    da[_interaction.anchor.face_axis] = _interaction.face.sign;
     macvoxel::PreviewOverlay& overlay = macvoxel::CurrentPreview();
-    for (const Vec3i& v : _faceSeedCells) {
+    for (const Vec3i& v : _interaction.face.seed_cells) {
         const int x = v.x + offset * da[0];
         const int y = v.y + offset * da[1];
         const int z = v.z + offset * da[2];
@@ -3357,7 +3271,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     ++overlay.version;
 }
 
-// Move the Face preview from `_faceAppliedD` to `new_d` by adding /
+// Move the Face preview from `_interaction.face.applied_d` to `new_d` by adding /
 // removing only the layers that differ. Falls back to a full rebuild
 // when the preview's "direction" flips (Add positive ↔ negative drag)
 // or `face_with` changes — those rarely happen during a drag, so the
@@ -3367,13 +3281,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // magnitude (always inward), so a sign flip is impossible.
 - (void)transitionFaceTo:(int)new_d {
     const macvoxel::ToolSettings& tool = macvoxel::CurrentTool();
-    const macvoxel::ToolMode mode = _anchorMode;
+    const macvoxel::ToolMode mode = _interaction.anchor.mode;
 
     bool full_rebuild = false;
     if (mode == macvoxel::ToolMode::Add) {
-        if (tool.face_with != _faceAppliedWith) full_rebuild = true;
-        if (_faceAppliedD != 0 && new_d != 0 &&
-            ((_faceAppliedD > 0) != (new_d > 0))) {
+        if (tool.face_with != _interaction.face.applied_with) full_rebuild = true;
+        if (_interaction.face.applied_d != 0 && new_d != 0 &&
+            ((_interaction.face.applied_d > 0) != (new_d > 0))) {
             full_rebuild = true;
         }
     }
@@ -3385,19 +3299,19 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         overlay.additions.Clear();
         overlay.removals.Clear();
         ++overlay.version;
-        _faceAppliedD = 0;
+        _interaction.face.applied_d = 0;
         [self applyFaceExtrusion:new_d];
-        _faceAppliedD = new_d;
-        _faceAppliedWith = tool.face_with;
+        _interaction.face.applied_d = new_d;
+        _interaction.face.applied_with = tool.face_with;
         return;
     }
 
-    const int abs_old = std::abs(_faceAppliedD);
+    const int abs_old = std::abs(_interaction.face.applied_d);
     const int abs_new = std::abs(new_d);
     int dir_sign;  // +1 = outward (Add d>0), -1 = inward (Add d<0, Remove, Paint)
     if (mode == macvoxel::ToolMode::Add) {
-        if (_faceAppliedD == 0 && new_d == 0) return;
-        dir_sign = (_faceAppliedD != 0 ? _faceAppliedD : new_d) > 0 ? +1 : -1;
+        if (_interaction.face.applied_d == 0 && new_d == 0) return;
+        dir_sign = (_interaction.face.applied_d != 0 ? _interaction.face.applied_d : new_d) > 0 ? +1 : -1;
     } else {
         dir_sign = -1;
     }
@@ -3417,31 +3331,31 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             [self rollbackFaceLayerAtOffset:offset_for_idx(idx)];
         }
     }
-    _faceAppliedD = new_d;
-    _faceAppliedWith = tool.face_with;
+    _interaction.face.applied_d = new_d;
+    _interaction.face.applied_with = tool.face_with;
 }
 
 - (void)commitFaceAtPoint:(NSPoint)windowPoint {
-    if (!_hasAnchor) { _faceSeedCells.clear(); return; }
+    if (!_interaction.anchor.has_anchor) { _interaction.face.seed_cells.clear(); return; }
     // Re-run the incremental preview to the cursor's release location
     // so the overlay reflects the exact final state before commit. The
     // last mouseDragged event isn't guaranteed to fire at the same point
     // mouseUp arrives at — better to converge here than to ship one
     // layer off.
     int d = [self faceDragVoxelsAtCursor:windowPoint];
-    if (d != 0) _faceObservedDrag = YES;
-    if (d == 0 && !_faceObservedDrag) d = 1;
-    if (_anchorMode == macvoxel::ToolMode::Remove ||
-        _anchorMode == macvoxel::ToolMode::Paint) {
+    if (d != 0) _interaction.face.observed_drag = YES;
+    if (d == 0 && !_interaction.face.observed_drag) d = 1;
+    if (_interaction.anchor.mode == macvoxel::ToolMode::Remove ||
+        _interaction.anchor.mode == macvoxel::ToolMode::Paint) {
         d = std::abs(d);
     }
-    if (d != _faceAppliedD ||
-        macvoxel::CurrentTool().face_with != _faceAppliedWith) {
+    if (d != _interaction.face.applied_d ||
+        macvoxel::CurrentTool().face_with != _interaction.face.applied_with) {
         [self transitionFaceTo:d];
     }
     [self commitPreviewOverlayThroughHistory];
-    _hasAnchor = NO;
-    _faceSeedCells.clear();
+    _interaction.anchor.has_anchor = NO;
+    _interaction.face.seed_cells.clear();
 }
 
 @end
