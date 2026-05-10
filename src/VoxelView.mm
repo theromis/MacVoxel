@@ -28,6 +28,7 @@
 #include "BrushController.h"
 #include "BrushOps.h"
 #include "FaceController.h"
+#include "GeneratorController.h"
 #include "PreviewOps.h"
 #include "ShapeController.h"
 #include "EditorContext.h"
@@ -61,45 +62,7 @@ using DragMode = macvoxel::DragMode;
 
 using Vec3i = macvoxel::shapes::Vec3i;
 
-// (axis, sign) for face index 0..5. axis/2 = X|Y|Z; sign +1 for "max"
-// face, -1 for "min" face. Layout matches kFaceArrowOrder below.
-inline void GenFaceAxisSign(int face, int* axis, int* sign) {
-    *axis = face / 2;
-    *sign = (face & 1) ? +1 : -1;
-}
-
-void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
-                        simd::float3* out_center, simd::float3* out_normal) {
-    int axis, sign;
-    GenFaceAxisSign(face, &axis, &sign);
-    auto mid = [](int32_t a, int32_t b1) {
-        return (static_cast<float>(a) + static_cast<float>(b1) + 1.0f) * 0.5f;
-    };
-    const int32_t face_coord = (sign < 0)
-        ? (axis == 0 ? b.x0 : axis == 1 ? b.y0 : b.z0)
-        : ((axis == 0 ? b.x1 : axis == 1 ? b.y1 : b.z1) + 1);
-    float gx, gy, gz;
-    if (axis == 0) {
-        gx = static_cast<float>(face_coord);
-        gy = mid(b.y0, b.y1);
-        gz = mid(b.z0, b.z1);
-    } else if (axis == 1) {
-        gx = mid(b.x0, b.x1);
-        gy = static_cast<float>(face_coord);
-        gz = mid(b.z0, b.z1);
-    } else {
-        gx = mid(b.x0, b.x1);
-        gy = mid(b.y0, b.y1);
-        gz = static_cast<float>(face_coord);
-    }
-    *out_center = simd::float3{gx, gz, -gy};
-    simd::float3 n_grid{0, 0, 0};
-    if (axis == 0) n_grid.x = static_cast<float>(sign);
-    else if (axis == 1) n_grid.y = static_cast<float>(sign);
-    else n_grid.z = static_cast<float>(sign);
-    *out_normal = simd::float3{n_grid.x, n_grid.z, -n_grid.y};
-}
-}
+}  // namespace
 
 @implementation VoxelView {
     // Editor context — non-owning pointer; AppDelegate owns the unique
@@ -448,16 +411,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         }
     }
 
-    // Same logic for an active Generator gizmo: Esc cancels the live
-    // preview without writing history, switching tools cancels too. The
-    // ImGui IsKeyPressed read happens after NewFrame so it sees this
-    // frame's keyboard input.
-    if (_interaction.gen_gizmo.active) {
-        if (_ctx->tool.tool != macvoxel::ToolKind::Generator ||
-            ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-            [self cancelGenGizmo];
-        }
-    }
+    // Generator gizmo per-frame tick: Esc / tool-switch cancellation
+    // and dirty-detection that re-runs the engine on bounds / kind /
+    // params / palette changes.
+    macvoxel::generator_controller::Tick(
+        *_ctx, _interaction, _ctx->tool.tool,
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false),
+        [self generateFn]);
 
     [self setupDockspace];
 
@@ -490,34 +450,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         macvoxel::DrawGeneratorPanel(*_ctx);
         macvoxel::DrawSelectionPanel(*_ctx);
         macvoxel::DrawPalettePanel(*_ctx);
-        // Gizmo refresh: the panel may have changed the active kind or
-        // parameters; the tool's palette index may have changed too.
-        // Detect any of those (plus a bounds change from a future face
-        // handle) and re-run the engine.
-        if (_interaction.gen_gizmo.active) {
-            const auto& gs = _ctx->generator;
-            const uint8_t cur_palette = _ctx->tool.palette_idx;
-            const bool dirty =
-                gs.active_kind != _interaction.gen_gizmo.last_kind ||
-                std::memcmp(&_interaction.gen_gizmo.bounds, &_interaction.gen_gizmo.last_bounds,
-                            sizeof(_interaction.gen_gizmo.bounds)) != 0 ||
-                cur_palette != _interaction.gen_gizmo.last_params.palette_idx ||
-                gs.params.axis != _interaction.gen_gizmo.last_params.axis ||
-                gs.params.apex_at_max != _interaction.gen_gizmo.last_params.apex_at_max;
-            if (dirty) {
-                [self refreshGenGizmoPreview];
-                _interaction.gen_gizmo.last_kind = gs.active_kind;
-                _interaction.gen_gizmo.last_bounds = _interaction.gen_gizmo.bounds;
-                _interaction.gen_gizmo.last_params = gs.params;
-                _interaction.gen_gizmo.last_params.palette_idx = cur_palette;
-            }
-        }
         [self drawSelectionOverlay];
         macvoxel::xform_handle_controller::DrawOverlay(
             _interaction, [self viewContext]);
         macvoxel::marquee_controller::DrawOverlay(_interaction, [self viewContext]);
         [self drawHoverOverlay];
-        [self drawGenGizmo];
+        macvoxel::generator_controller::DrawOverlay(
+            _interaction, [self viewContext]);
 
         if (macvoxel::ConsumeSaveRenderClick(*_ctx)) {
             [self runSaveRenderPanel];
@@ -698,6 +637,19 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     return simd::float2{static_cast<float>(p.x), static_cast<float>(p.y)};
 }
 
+// Closure binding the Obj-C generator engine into the pure-C++
+// signature GeneratorController expects. Built on demand at the
+// call site; cheap (one block of captures + a vtable jump).
+- (macvoxel::generator_controller::GenerateFn)generateFn {
+    GeneratorEngine* engine = _generatorEngine;
+    return [engine](macvoxel::generators::Kind kind,
+                    macvoxel::generators::Bounds3i bounds,
+                    macvoxel::generators::Params params,
+                    std::vector<macvoxel::shapes::Vec3i>& out) {
+        [engine generateInto:out kind:kind bounds:bounds params:params];
+    };
+}
+
 - (macvoxel::MouseEvent)mouseEventFromNSEvent:(NSEvent*)event {
     const NSPoint w = event.locationInWindow;
     const simd::float2 local = [self localFromWindow:w];
@@ -746,21 +698,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         _interaction.drag_mode = DragMode::Pan;
         _interaction.brush.last_drag_location = event.locationInWindow;
     } else if (_interaction.gen_gizmo.active) {
-        // Click on a face arrow handle → enter resize drag. Any other
-        // click in the viewport commits the gizmo (the user signals
-        // they're done by clicking outside the handles).
-        const simd::float2 lp = [self localFromWindow:event.locationInWindow];
-        const int face = [self viewContext].PickGenHandle(
-            lp.x, lp.y, _interaction.gen_gizmo.bounds);
-        if (face >= 0) {
-            _interaction.gen_gizmo.active_drag_face = face;
-            _interaction.gen_gizmo.handle_start_local = lp;
-            _interaction.gen_gizmo.handle_start_bounds = _interaction.gen_gizmo.bounds;
-            _interaction.drag_mode = DragMode::GenHandle;
-        } else {
-            [self commitGenGizmo];
-            _interaction.drag_mode = DragMode::None;
-        }
+        macvoxel::generator_controller::OnGizmoClick(
+            *_ctx, _interaction, [self viewContext],
+            [self mouseEventFromNSEvent:event]);
     } else if (macvoxel::xform_handle_controller::OnMouseDown(
                    *_ctx, _interaction, [self viewContext],
                    [self mouseEventFromNSEvent:event])) {
@@ -809,31 +749,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         }
     } else if (_ctx->tool.tool == macvoxel::ToolKind::Generator) {
         [self autoCommitFloatingBuffer];
-        // Generator shares the two-click anchor pattern with the shape
-        // tools but also activates a face-handle gizmo immediately so
-        // the AABB outline shows from the first click. The gizmo
-        // lifecycle (commit / cancel / face-drag) lives on the view
-        // until GeneratorController extracts.
-        const macvoxel::ToolMode mode = hasCommand ? macvoxel::ToolMode::Remove
-                                                    : _ctx->tool.mode;
-        const macvoxel::MouseEvent me = [self mouseEventFromNSEvent:event];
-        if (macvoxel::shape_controller::BeginAnchor(
-                *_ctx, _interaction, [self viewContext], me, mode)) {
-            _interaction.drag_mode = DragMode::Shape;
+        if (macvoxel::generator_controller::BeginDragOut(
+                *_ctx, _interaction, [self viewContext],
+                [self mouseEventFromNSEvent:event],
+                [self generateFn])) {
             _interaction.hover.local = [self localFromWindow:event.locationInWindow];
             _interaction.hover.has_point = YES;
-            _interaction.gen_gizmo.bounds = macvoxel::generators::Bounds3i{
-                _interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
-                _interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
-            };
-            _interaction.gen_gizmo.active = YES;
-            _interaction.gen_gizmo.last_kind = _ctx->generator.active_kind;
-            _interaction.gen_gizmo.last_bounds = _interaction.gen_gizmo.bounds;
-            _interaction.gen_gizmo.last_params = _ctx->generator.params;
-            _interaction.gen_gizmo.last_params.palette_idx = _ctx->tool.palette_idx;
-            // Render the initial click-cell shape so a bare click (no
-            // drag) shows its placement before mouseUp commits.
-            [self refreshShapePreview];
         } else {
             _interaction.drag_mode = DragMode::None;
         }
@@ -908,26 +829,18 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                 macvoxel::face_controller::OnMouseDragged(
                     *_ctx, _interaction, [self viewContext],
                     [self mouseEventFromNSEvent:event]);
-            } else {
-                // Generator drag-out — still on view until that
-                // controller extracts.
-                [self refreshShapePreview];
+            } else if (_interaction.anchor.tool == macvoxel::ToolKind::Generator) {
+                macvoxel::generator_controller::UpdateDragOut(
+                    *_ctx, _interaction, [self viewContext],
+                    [self mouseEventFromNSEvent:event],
+                    [self generateFn]);
             }
             break;
-        case DragMode::GenHandle: {
-            // Project the cursor delta onto the dragged face's normal,
-            // update bounds; the per-frame gizmo refresh picks up the
-            // change and re-runs the engine.
-            const simd::float2 lp = [self localFromWindow:p];
-            const int dv = [self viewContext].GenHandleDragVoxels(
-                _interaction.gen_gizmo.active_drag_face,
-                lp.x, lp.y,
-                _interaction.gen_gizmo.handle_start_local.x,
-                _interaction.gen_gizmo.handle_start_local.y,
-                _interaction.gen_gizmo.handle_start_bounds);
-            [self applyGenHandleDelta:_interaction.gen_gizmo.active_drag_face deltaVoxels:dv];
+        case DragMode::GenHandle:
+            macvoxel::generator_controller::UpdateHandleDrag(
+                _interaction, [self viewContext],
+                [self mouseEventFromNSEvent:event]);
             break;
-        }
         case DragMode::None:  break;
     }
 }
@@ -956,11 +869,8 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         _interaction.drag_mode = DragMode::None;
         return;
     } else if (_interaction.drag_mode == DragMode::GenHandle) {
-        // Drag finished — leave bounds where the user released them and
-        // stay in gizmo state. Active face goes back to "none" so the
-        // arrow color clears.
+        macvoxel::generator_controller::EndHandleDrag(_interaction);
         _interaction.drag_mode = DragMode::None;
-        _interaction.gen_gizmo.active_drag_face = -1;
     } else if (_interaction.drag_mode == DragMode::Shape) {
         _interaction.drag_mode = DragMode::None;
         switch (_interaction.anchor.tool) {
@@ -976,12 +886,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                     [self mouseEventFromNSEvent:event]);
                 break;
             case macvoxel::ToolKind::Generator:
-                // Gizmo went live on mouseDown; refreshShapePreview kept
-                // gen_gizmo.bounds in sync with the drag, so the box is
-                // already in the right state. Just stop dragging and let
-                // the gizmo hold position until the user commits,
-                // cancels, or grabs a face handle.
-                _interaction.anchor.has_anchor = NO;
+                macvoxel::generator_controller::EndDragOut(_interaction);
                 break;
             default:
                 _interaction.anchor.has_anchor = NO;
@@ -1403,279 +1308,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                          voxel_color, 1.0f);
         }
     }
-}
-
-// Generator gizmo overlay: 12-edge AABB outline around _interaction.gen_gizmo.bounds plus
-// 6 face-normal arrow handles. Hovering a handle highlights it; the
-// actively-dragged handle gets the brightest tint. Click-tests for
-// "is the cursor over a handle" use the same projected tip positions
-// computed here, so visuals and hit-tests can't drift.
-- (void)drawGenGizmo {
-    if (!_interaction.gen_gizmo.active) return;
-    const float w = static_cast<float>(self.bounds.size.width);
-    const float h = static_cast<float>(self.bounds.size.height);
-    if (w <= 0.0f || h <= 0.0f) return;
-    const float aspect = w / h;
-    const simd::float4x4 vp =
-        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
-
-    auto project = [&](simd::float3 wpos, ImVec2* screen, bool* valid) {
-        const simd::float4 clip =
-            simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
-        *valid = clip.w > 0.001f;
-        if (!*valid) return;
-        const float ndc_x = clip.x / clip.w;
-        const float ndc_y = clip.y / clip.w;
-        screen->x = (ndc_x * 0.5f + 0.5f) * w;
-        screen->y = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;
-    };
-
-    // Box outline. Voxels span [c, c+1] so outer surfaces sit at min..max+1.
-    const float bx0 = static_cast<float>(_interaction.gen_gizmo.bounds.x0);
-    const float by0 = static_cast<float>(_interaction.gen_gizmo.bounds.y0);
-    const float bz0 = static_cast<float>(_interaction.gen_gizmo.bounds.z0);
-    const float bx1 = static_cast<float>(_interaction.gen_gizmo.bounds.x1 + 1);
-    const float by1 = static_cast<float>(_interaction.gen_gizmo.bounds.y1 + 1);
-    const float bz1 = static_cast<float>(_interaction.gen_gizmo.bounds.z1 + 1);
-    const simd::float3 corners_grid[8] = {
-        {bx0, by0, bz0}, {bx1, by0, bz0},
-        {bx1, by1, bz0}, {bx0, by1, bz0},
-        {bx0, by0, bz1}, {bx1, by0, bz1},
-        {bx1, by1, bz1}, {bx0, by1, bz1},
-    };
-    ImVec2 screen[8];
-    bool valid[8];
-    for (int i = 0; i < 8; ++i) {
-        const simd::float3 g = corners_grid[i];
-        project(simd::float3{g.x, g.z, -g.y}, &screen[i], &valid[i]);
-    }
-    static const int kEdges[12][2] = {
-        {0, 1}, {1, 2}, {2, 3}, {3, 0},
-        {4, 5}, {5, 6}, {6, 7}, {7, 4},
-        {0, 4}, {1, 5}, {2, 6}, {3, 7},
-    };
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    const ImU32 outline_color = IM_COL32(120, 200, 255, 230);
-    for (int i = 0; i < 12; ++i) {
-        const int a = kEdges[i][0];
-        const int b = kEdges[i][1];
-        if (!valid[a] || !valid[b]) continue;
-        dl->AddLine(screen[a], screen[b], outline_color, 1.5f);
-    }
-
-    // Hover face: derived per-frame from the cursor unless we're
-    // already mid-drag (then the dragged face is the "hovered" one,
-    // visually). When a panel has captured the mouse, suppress hover
-    // so the cursor over a tooltip doesn't paint a handle hot.
-    int hover_face = -1;
-    if (_interaction.drag_mode == DragMode::GenHandle) {
-        hover_face = _interaction.gen_gizmo.active_drag_face;
-    } else if (_interaction.hover.has_point && !ImGui::GetIO().WantCaptureMouse) {
-        const simd::float2 hp = _interaction.hover.local;
-        hover_face = [self viewContext].PickGenHandle(
-            hp.x, hp.y, _interaction.gen_gizmo.bounds);
-    }
-
-    constexpr float kTipLengthVoxels = 4.0f;
-    constexpr float kArrowheadLenPx = 14.0f;
-    constexpr float kArrowheadHalfWidthPx = 7.0f;
-    // Standard X / Y / Z = red / green / blue, with brighter variants
-    // for hover and active states. Both the +axis and -axis face share
-    // their axis's color — position on the box disambiguates direction.
-    const ImU32 kAxisBase[3] = {
-        IM_COL32(230,  80,  80, 255),
-        IM_COL32( 90, 200, 100, 255),
-        IM_COL32( 90, 140, 240, 255),
-    };
-    const ImU32 kAxisHover[3] = {
-        IM_COL32(255, 160, 160, 255),
-        IM_COL32(170, 250, 180, 255),
-        IM_COL32(160, 200, 255, 255),
-    };
-    const ImU32 kAxisActive[3] = {
-        IM_COL32(255, 220, 220, 255),
-        IM_COL32(220, 255, 230, 255),
-        IM_COL32(220, 240, 255, 255),
-    };
-
-    for (int f = 0; f < 6; ++f) {
-        simd::float3 cw, nw;
-        GizmoFaceWorldGeom(_interaction.gen_gizmo.bounds, f, &cw, &nw);
-        ImVec2 base, tip;
-        bool base_v, tip_v;
-        project(cw, &base, &base_v);
-        project(cw + nw * kTipLengthVoxels, &tip, &tip_v);
-        if (!base_v || !tip_v) continue;
-
-        const int axis = f / 2;
-        const ImU32 color =
-            (f == _interaction.gen_gizmo.active_drag_face) ? kAxisActive[axis] :
-            (f == hover_face)         ? kAxisHover[axis]  :
-                                        kAxisBase[axis];
-        const float thickness = (f == hover_face || f == _interaction.gen_gizmo.active_drag_face)
-                                    ? 2.8f : 2.0f;
-        dl->AddLine(base, tip, color, thickness);
-
-        // Solid filled-triangle arrowhead. The triangle's base sits at
-        // `back` (pulled back along the stem from the tip by the
-        // arrowhead length); leg1 / leg2 are perpendicular offsets in
-        // screen space, so the arrowhead reads at consistent pixel
-        // size regardless of camera distance.
-        const float stem_dx = tip.x - base.x;
-        const float stem_dy = tip.y - base.y;
-        const float stem_len = std::sqrt(stem_dx * stem_dx +
-                                         stem_dy * stem_dy);
-        if (stem_len > 1e-3f) {
-            const float ux = stem_dx / stem_len;
-            const float uy = stem_dy / stem_len;
-            const float px = -uy;   // perpendicular in screen space
-            const float py =  ux;
-            const ImVec2 back{
-                tip.x - ux * kArrowheadLenPx,
-                tip.y - uy * kArrowheadLenPx};
-            const ImVec2 leg1{
-                back.x + px * kArrowheadHalfWidthPx,
-                back.y + py * kArrowheadHalfWidthPx};
-            const ImVec2 leg2{
-                back.x - px * kArrowheadHalfWidthPx,
-                back.y - py * kArrowheadHalfWidthPx};
-            dl->AddTriangleFilled(tip, leg1, leg2, color);
-        }
-    }
-}
-
-// Single-cell stamp pipeline for the Generator tool. Each cell from a
-// generator kernel is a "this exact cell should be filled" instruction —
-// brush size / shape / 2D / 3D options must NOT expand the footprint
-// (the kernel already produced the final cell list). Stages the result
-// into PreviewOverlay; commitGenGizmo / cancelGenGizmo close the gesture.
-- (void)stampGeneratorCellsToOverlay:
-        (const std::vector<macvoxel::shapes::Vec3i>&)cells
-                                mode:(macvoxel::ToolMode)mode {
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr || cells.empty()) return;
-
-    const uint8_t palette_idx = _ctx->tool.palette_idx;
-    macvoxel::PreviewOverlay& overlay = _ctx->preview;
-    for (const macvoxel::shapes::Vec3i& c : cells) {
-        const uint8_t old_val = doc->grid.Get(c.x, c.y, c.z);
-        const uint8_t new_val = macvoxel::ComputeNewCellValue(old_val, mode, palette_idx);
-        overlay.Stamp(c.x, c.y, c.z, new_val, old_val);
-    }
-    ++overlay.version;
-}
-
-// Per-frame Generator drag-out preview. Stays on the view until
-// GeneratorController extracts; ShapeController owns Line/Circle/
-// Square/Box; FaceController owns Face.
-- (void)refreshShapePreview {
-    if (!_interaction.anchor.has_anchor ||
-        _interaction.drag_mode != DragMode::Shape) return;
-    if (_interaction.anchor.tool != macvoxel::ToolKind::Generator) return;
-
-    macvoxel::PreviewOverlay& overlay = _ctx->preview;
-    overlay.Clear();
-    overlay.active = true;
-
-    Vec3i endpoint = _interaction.anchor.cell;
-    int end_face = _interaction.anchor.face_axis;
-    const simd::float2 hp = _interaction.hover.local;
-    [self viewContext].ComputeLineEndpoint(
-        hp.x, hp.y, _interaction.anchor.mode, &endpoint, &end_face);
-    macvoxel::generators::Bounds3i b{
-        std::min(_interaction.anchor.cell.x, endpoint.x),
-        std::min(_interaction.anchor.cell.y, endpoint.y),
-        std::min(_interaction.anchor.cell.z, endpoint.z),
-        std::max(_interaction.anchor.cell.x, endpoint.x),
-        std::max(_interaction.anchor.cell.y, endpoint.y),
-        std::max(_interaction.anchor.cell.z, endpoint.z),
-    };
-    macvoxel::generators::Params p = _ctx->generator.params;
-    p.palette_idx = _ctx->tool.palette_idx;
-    std::vector<macvoxel::shapes::Vec3i> cells;
-    [_generatorEngine generateInto:cells
-                              kind:_ctx->generator.active_kind
-                            bounds:b
-                            params:p];
-    [self stampGeneratorCellsToOverlay:cells mode:_interaction.anchor.mode];
-    // Keep gizmo state synced so drawGenGizmo sees the live bounds
-    // and the per-frame change-detector doesn't redundantly re-fire.
-    _interaction.gen_gizmo.bounds = b;
-    _interaction.gen_gizmo.last_kind = _ctx->generator.active_kind;
-    _interaction.gen_gizmo.last_bounds = b;
-    _interaction.gen_gizmo.last_params = p;
-}
-
-// ---------------------------------------------------------------------------
-// Generator tool — gizmo lifecycle. Activates on mouseDown (single-cell
-// box at the anchor), grows during drag-out via refreshShapePreview's
-// Generator case (which keeps _interaction.gen_gizmo.bounds in sync), persists past
-// mouseUp until the user commits, cancels (Esc / tool switch), or
-// grabs a face handle. Stamping bypasses the brush-footprint expansion
-// that stampBrushAtX: does for Line / Circle / Square / Box.
-// ---------------------------------------------------------------------------
-
-// Roll back the live preview, run the engine for the current bounds +
-// kind + params, and re-stamp the result. Called whenever the gizmo
-// config changes (kind / bounds / params) while gizmo is active.
-- (void)refreshGenGizmoPreview {
-    if (!_interaction.gen_gizmo.active) return;
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr) return;
-
-    macvoxel::PreviewOverlay& overlay = _ctx->preview;
-    overlay.Clear();
-    overlay.active = true;
-
-    macvoxel::generators::Params p = _ctx->generator.params;
-    p.palette_idx = _ctx->tool.palette_idx;
-    std::vector<macvoxel::shapes::Vec3i> cells;
-    [_generatorEngine generateInto:cells
-                              kind:_ctx->generator.active_kind
-                            bounds:_interaction.gen_gizmo.bounds
-                            params:p];
-    [self stampGeneratorCellsToOverlay:cells
-                                  mode:_ctx->tool.mode];
-}
-
-// Commit the current gizmo's preview through EditHistory as a single
-// undo step, then exit gizmo state.
-- (void)commitGenGizmo {
-    if (!_interaction.gen_gizmo.active) return;
-    macvoxel::CommitPreviewOverlayThroughHistory(*_ctx);
-    _interaction.gen_gizmo.active = NO;
-}
-
-// Discard the current gizmo without writing to history. Drops the
-// overlay (the doc was never touched). Also clears any in-progress
-// face-handle drag so the next mouse event lands cleanly.
-- (void)cancelGenGizmo {
-    if (!_interaction.gen_gizmo.active) return;
-    _ctx->preview.Clear();
-    _interaction.gen_gizmo.active = NO;
-    _interaction.gen_gizmo.active_drag_face = -1;
-    if (_interaction.drag_mode == DragMode::GenHandle) _interaction.drag_mode = DragMode::None;
-}
-
-// Apply a drag delta (in voxels along the face normal) to the gizmo
-// bounds. Positive delta moves the face outward; negative inward.
-// Clamps against the opposite face so the box stays at least 1 voxel
-// thick on each axis.
-- (void)applyGenHandleDelta:(int)face deltaVoxels:(int)delta {
-    int axis, sign;
-    GenFaceAxisSign(face, &axis, &sign);
-    macvoxel::generators::Bounds3i b = _interaction.gen_gizmo.handle_start_bounds;
-    if (axis == 0) {
-        if (sign < 0) b.x0 = std::min(b.x1, b.x0 - delta);
-        else          b.x1 = std::max(b.x0, b.x1 + delta);
-    } else if (axis == 1) {
-        if (sign < 0) b.y0 = std::min(b.y1, b.y0 - delta);
-        else          b.y1 = std::max(b.y0, b.y1 + delta);
-    } else {
-        if (sign < 0) b.z0 = std::min(b.z1, b.z0 - delta);
-        else          b.z1 = std::max(b.z0, b.z1 + delta);
-    }
-    _interaction.gen_gizmo.bounds = b;
 }
 
 @end

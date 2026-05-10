@@ -73,6 +73,7 @@ set(APP_SOURCES
     src/BrushOps.cpp
     src/FaceController.cpp
     src/FloodSelectController.cpp
+    src/GeneratorController.cpp
     src/MarqueeController.cpp
     src/MoveSelectController.cpp
     src/PreviewOps.cpp
