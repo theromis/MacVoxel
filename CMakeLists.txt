@@ -67,6 +67,7 @@ set(APP_SOURCES
     src/SelectionOps.cpp
     src/FloatingBufferOps.cpp
     src/EditorContext.cpp
+    src/ViewContext.cpp
     src/ui/GeneratorPanel.cpp
     src/ui/LightPanel.cpp
     src/ui/ModelPanel.cpp

@@ -106,7 +106,7 @@ struct InteractionState {
     // drag).
     struct XformHandle {
         int drag_face = -1;          // 0..5 while dragging, -1 otherwise
-        CGPoint drag_start_cursor{};
+        simd::float2 drag_start_local{0.0f, 0.0f};
         Bounds3 drag_start_bounds{};
         VoxelGrid orig_grid{};
     } xform;
@@ -123,7 +123,7 @@ struct InteractionState {
         shapes::Vec3i cell{0, 0, 0};
         int face_axis = 0;
         ToolMode mode = ToolMode::Add;
-        CGPoint screen{};
+        simd::float2 screen_local{0.0f, 0.0f};
         ToolKind tool = ToolKind::Brush;
     } anchor;
 
@@ -165,7 +165,7 @@ struct InteractionState {
         generators::Bounds3i last_bounds{};
         generators::Params last_params{};
         int active_drag_face = -1;
-        CGPoint handle_start_cursor{};
+        simd::float2 handle_start_local{0.0f, 0.0f};
         generators::Bounds3i handle_start_bounds{};
     } gen_gizmo;
 };

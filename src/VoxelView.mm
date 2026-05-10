@@ -33,6 +33,7 @@
 #include "Selection.h"
 #include "Shapes.h"
 #include "ToolState.h"
+#include "ViewContext.h"
 #include "ui/Fonts.h"
 #include "ui/GeneratorPanel.h"
 #include "ui/LightPanel.h"
@@ -50,6 +51,10 @@ using Vec3i = macvoxel::shapes::Vec3i;
 struct LineHit { int32_t x, y, z; int face_axis; };
 
 constexpr Vec3i kInvalidCell{INT32_MIN, INT32_MIN, INT32_MIN};
+
+// Reused as the "no skip" argument to ViewContext::ComputeTargetCell so
+// non-Paint dispatches don't allocate a fresh empty set per call.
+const std::unordered_set<int64_t> kEmptySkipSet;
 
 bool SameCell(const Vec3i& a, const Vec3i& b) {
     return a.x == b.x && a.y == b.y && a.z == b.z;
@@ -738,6 +743,27 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 }
 
 // ---------------------------------------------------------------------------
+// View-context + input helpers. ViewContext is built fresh per call —
+// it owns nothing but a Camera-by-value and an EditorContext pointer,
+// so the cost is two pointers and a struct copy. AppKit-aware
+// translation (NSWindow → view-local) lives here; ViewContext sees
+// only floats.
+// ---------------------------------------------------------------------------
+- (macvoxel::ViewContext)viewContext {
+    return macvoxel::ViewContext{
+        _camera,
+        static_cast<float>(self.bounds.size.width),
+        static_cast<float>(self.bounds.size.height),
+        _ctx,
+    };
+}
+
+- (simd::float2)localFromWindow:(NSPoint)windowPoint {
+    const NSPoint p = [self convertPoint:windowPoint fromView:nil];
+    return simd::float2{static_cast<float>(p.x), static_cast<float>(p.y)};
+}
+
+// ---------------------------------------------------------------------------
 // Mouse input — gated on ImGui's WantCaptureMouse so dragging inside an
 // ImGui window never moves the camera or edits the scene.
 //
@@ -774,10 +800,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         // Click on a face arrow handle → enter resize drag. Any other
         // click in the viewport commits the gizmo (the user signals
         // they're done by clicking outside the handles).
-        const int face = [self pickGenHandleAtPoint:event.locationInWindow];
+        const simd::float2 lp = [self localFromWindow:event.locationInWindow];
+        const int face = [self viewContext].PickGenHandle(
+            lp.x, lp.y, _interaction.gen_gizmo.bounds);
         if (face >= 0) {
             _interaction.gen_gizmo.active_drag_face = face;
-            _interaction.gen_gizmo.handle_start_cursor = event.locationInWindow;
+            _interaction.gen_gizmo.handle_start_local = lp;
             _interaction.gen_gizmo.handle_start_bounds = _interaction.gen_gizmo.bounds;
             _interaction.drag_mode = DragMode::GenHandle;
         } else {
@@ -803,7 +831,8 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     } else if (_ctx->tool.tool == macvoxel::ToolKind::BoxSelect) {
         [self autoCommitFloatingBuffer];
         Vec3i pick;
-        if ([self pickGridCellAtPoint:event.locationInWindow into:&pick]) {
+        const simd::float2 lp = [self localFromWindow:event.locationInWindow];
+        if ([self viewContext].PickCell(lp.x, lp.y, &pick)) {
             _interaction.box_select.anchor = pick;
             _interaction.drag_mode = DragMode::BoxSelect;
             // SetBox stages the live AABB without populating cells; the
@@ -823,7 +852,8 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         // empty-space click clears the selection (lets the user undo
         // a previous flood without switching tools).
         Vec3i pick;
-        if ([self pickGridCellAtPoint:event.locationInWindow into:&pick]) {
+        const simd::float2 lp = [self localFromWindow:event.locationInWindow];
+        if ([self viewContext].PickCell(lp.x, lp.y, &pick)) {
             [self commitFloodSelectAt:pick];
         } else {
             _ctx->selection.Clear();
@@ -879,8 +909,8 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         Vec3i seed;
         int axis = 2, sign = 1;
         uint8_t color = 0;
-        if (![self pickFaceAtPoint:event.locationInWindow cell:&seed
-                              axis:&axis sign:&sign color:&color]) {
+        const simd::float2 lp = [self localFromWindow:event.locationInWindow];
+        if (![self viewContext].PickFace(lp.x, lp.y, &seed, &axis, &sign, &color)) {
             _interaction.drag_mode = DragMode::None;
             return;
         }
@@ -888,7 +918,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         _interaction.anchor.cell = seed;
         _interaction.anchor.face_axis = axis;
         _interaction.anchor.mode = _ctx->tool.mode;  // unused, kept for symmetry
-        _interaction.anchor.screen = event.locationInWindow;
+        _interaction.anchor.screen_local = lp;
         _interaction.anchor.tool = macvoxel::ToolKind::Face;
         _interaction.face.sign = sign;
         _interaction.face.seed_color = color;
@@ -949,14 +979,19 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             [self updateMoveSelectAtPoint:p];
             break;
         case DragMode::XformHandle: {
-            const int dv = [self xformHandleDragVoxelsForFace:_interaction.xform.drag_face
-                                                       cursor:p];
+            const simd::float2 lp = [self localFromWindow:p];
+            const int dv = [self viewContext].XformHandleDragVoxels(
+                _interaction.xform.drag_face, lp.x, lp.y,
+                _interaction.xform.drag_start_local.x,
+                _interaction.xform.drag_start_local.y,
+                _interaction.xform.drag_start_bounds);
             [self applyXformHandleDelta:_interaction.xform.drag_face deltaVoxels:dv];
             break;
         }
         case DragMode::BoxSelect: {
             Vec3i pick;
-            if ([self pickGridCellAtPoint:p into:&pick]) {
+            const simd::float2 lp = [self localFromWindow:p];
+            if ([self viewContext].PickCell(lp.x, lp.y, &pick)) {
                 macvoxel::Bounds3 b{};
                 b.min_x = std::min(_interaction.box_select.anchor.x, pick.x);
                 b.min_y = std::min(_interaction.box_select.anchor.y, pick.y);
@@ -979,9 +1014,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             // Project the cursor delta onto the dragged face's normal,
             // update bounds; the per-frame gizmo refresh picks up the
             // change and re-runs the engine.
-            const int dv =
-                [self genHandleDragVoxelsForFace:_interaction.gen_gizmo.active_drag_face
-                                          cursor:p];
+            const simd::float2 lp = [self localFromWindow:p];
+            const int dv = [self viewContext].GenHandleDragVoxels(
+                _interaction.gen_gizmo.active_drag_face,
+                lp.x, lp.y,
+                _interaction.gen_gizmo.handle_start_local.x,
+                _interaction.gen_gizmo.handle_start_local.y,
+                _interaction.gen_gizmo.handle_start_bounds);
             [self applyGenHandleDelta:_interaction.gen_gizmo.active_drag_face deltaVoxels:dv];
             break;
         }
@@ -1125,12 +1164,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 - (BOOL)eyedropperAtPoint:(NSPoint)windowPoint {
     macvoxel::Document* doc = &_ctx->document;
     if (doc == nullptr) return NO;
+    const simd::float2 lp = [self localFromWindow:windowPoint];
     simd::float3 ray_origin, ray_dir;
-    if (![self gridRayAtPoint:windowPoint
-                       origin:&ray_origin
-                    direction:&ray_dir]) {
-        return NO;
-    }
+    if (![self viewContext].RayAt(lp.x, lp.y, &ray_origin, &ray_dir)) return NO;
     macvoxel::RayHit hit;
     if (!macvoxel::Raycast(doc->grid, ray_origin, ray_dir, 4096.0f, &hit)) {
         return NO;
@@ -1140,75 +1176,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     tool.palette_idx = hit.color;
     tool.selected_slots.reset();
     tool.selected_slots.set(hit.color);
-    return YES;
-}
-
-- (BOOL)pickGridCellAtPoint:(NSPoint)windowPoint into:(Vec3i*)outCell {
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr) return NO;
-
-    const NSPoint local = [self convertPoint:windowPoint fromView:nil];
-    const float w = static_cast<float>(self.bounds.size.width);
-    const float h = static_cast<float>(self.bounds.size.height);
-    if (w <= 0.0f || h <= 0.0f) return NO;
-
-    const float ndc_x = (static_cast<float>(local.x) / w) * 2.0f - 1.0f;
-    const float ndc_y = (static_cast<float>(local.y) / h) * 2.0f - 1.0f;
-
-    const float aspect = w / h;
-    const simd::float4x4 vmat = _camera.ViewMatrix();
-    const simd::float4x4 pmat = _camera.ProjectionMatrix(aspect);
-    const simd::float4x4 inv_vp = simd_inverse(pmat * vmat);
-    auto unproject = [&](float z) -> simd::float3 {
-        simd::float4 clip{ndc_x, ndc_y, z, 1.0f};
-        simd::float4 wh = simd_mul(inv_vp, clip);
-        return simd::float3{wh.x / wh.w, wh.y / wh.w, wh.z / wh.w};
-    };
-    const simd::float3 near_world = unproject(0.0f);
-    const simd::float3 far_world = unproject(1.0f);
-    const simd::float3 ray_dir_world = simd::normalize(far_world - near_world);
-    const simd::float3 ray_origin_world = _camera.Position();
-
-    const simd::float3 ray_origin_grid{ray_origin_world.x,
-                                       -ray_origin_world.z,
-                                       ray_origin_world.y};
-    const simd::float3 ray_dir_grid{ray_dir_world.x,
-                                    -ray_dir_world.z,
-                                    ray_dir_world.y};
-
-    // Match the GPU dual-volume DDA: raycast both the document grid
-    // and (if active) the floating buffer, take whichever the ray hits
-    // first. Without this, Cmd-drag on a buffer that's been moved off
-    // its lifted-from doc cells fails because the picker can't see
-    // them — they exist only in the buffer.
-    macvoxel::RayHit hit_doc, hit_buf;
-    bool got_doc = macvoxel::Raycast(doc->grid, ray_origin_grid, ray_dir_grid,
-                                     4096.0f, &hit_doc);
-    bool got_buf = false;
-    const macvoxel::FloatingBuffer& fb = _ctx->floating_buffer;
-    if (fb.active && !fb.grid.empty()) {
-        const simd::float3 origin_buf{
-            ray_origin_grid.x - static_cast<float>(fb.offset_x),
-            ray_origin_grid.y - static_cast<float>(fb.offset_y),
-            ray_origin_grid.z - static_cast<float>(fb.offset_z),
-        };
-        got_buf = macvoxel::Raycast(fb.grid, origin_buf, ray_dir_grid,
-                                    4096.0f, &hit_buf);
-    }
-    if (got_doc || got_buf) {
-        const bool from_buf = got_buf && (!got_doc || hit_buf.t < hit_doc.t);
-        const macvoxel::RayHit& hit = from_buf ? hit_buf : hit_doc;
-        outCell->x = hit.x + (from_buf ? fb.offset_x : 0);
-        outCell->y = hit.y + (from_buf ? fb.offset_y : 0);
-        outCell->z = hit.z + (from_buf ? fb.offset_z : 0);
-        return YES;
-    }
-    if (std::abs(ray_dir_grid.z) < 1e-6f) return NO;
-    const float t = -ray_origin_grid.z / ray_dir_grid.z;
-    if (t < 0.0f || t > 4096.0f) return NO;
-    outCell->x = static_cast<int32_t>(std::floor(ray_origin_grid.x + t * ray_dir_grid.x));
-    outCell->y = static_cast<int32_t>(std::floor(ray_origin_grid.y + t * ray_dir_grid.y));
-    outCell->z = 0;
     return YES;
 }
 
@@ -1306,11 +1273,11 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // accept empty-space anchors for Remove/Paint, so they use the
     // line-endpoint picker; Brush keeps the stricter behavior.
     Vec3i cell;
-    const BOOL ok = is_two_click
-        ? [self computeLineEndpointAtPoint:_interaction.hover.window_point mode:t.mode
-                                      into:&cell face:nullptr]
-        : [self computeTargetCellAtPoint:_interaction.hover.window_point mode:t.mode
-                                    into:&cell face:nullptr];
+    const simd::float2 lp = [self localFromWindow:_interaction.hover.window_point];
+    const macvoxel::ViewContext vc = [self viewContext];
+    const bool ok = is_two_click
+        ? vc.ComputeLineEndpoint(lp.x, lp.y, t.mode, &cell, nullptr)
+        : vc.ComputeTargetCell(lp.x, lp.y, t.mode, &cell, nullptr);
     if (!ok) return;
     [self drawCellWireAtX:cell.x y:cell.y z:cell.z color:color_for_mode(t.mode)];
 }
@@ -1428,8 +1395,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     int axis = 2;
     int sign = 1;
     uint8_t color = 0;
-    if (![self pickFaceAtPoint:windowPoint cell:&cell axis:&axis sign:&sign
-                          color:&color]) {
+    const simd::float2 lp = [self localFromWindow:windowPoint];
+    const macvoxel::ViewContext vc = [self viewContext];
+    if (!vc.PickFace(lp.x, lp.y, &cell, &axis, &sign, &color)) {
         return NO;
     }
 
@@ -1464,8 +1432,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         ? (sign > 0 ? static_cast<float>(cell.y + 1) : static_cast<float>(cell.y))
         : (sign > 0 ? static_cast<float>(cell.z + 1) : static_cast<float>(cell.z));
     simd::float3 anchor;
-    if (![self gridPlaneIntersect:windowPoint axis:axis coord:plane_coord
-                          output:&anchor]) {
+    if (!vc.GridPlaneIntersect(lp.x, lp.y, axis, plane_coord, &anchor)) {
         return NO;
     }
 
@@ -1483,9 +1450,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     const float plane_coord = (_interaction.move_select.axis == 0) ? _interaction.move_select.anchor_grid.x
                             : (_interaction.move_select.axis == 1) ? _interaction.move_select.anchor_grid.y
                                                : _interaction.move_select.anchor_grid.z;
+    const simd::float2 lp = [self localFromWindow:windowPoint];
     simd::float3 hit;
-    if (![self gridPlaneIntersect:windowPoint axis:_interaction.move_select.axis coord:plane_coord
-                          output:&hit]) {
+    if (![self viewContext].GridPlaneIntersect(
+            lp.x, lp.y, _interaction.move_select.axis, plane_coord, &hit)) {
         // Grazing ray — leave the offset where it was rather than
         // jumping to the bogus huge t the math gave.
         return;
@@ -1527,24 +1495,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     macvoxel::Document* doc = &_ctx->document;
     if (doc == nullptr) return;
     macvoxel::CommitFloatingBuffer(*_ctx);
-}
-
-// Camera ray at `windowPoint` intersected with the grid-space plane
-// axis=axis, coord=plane_coord. Returns NO when the ray is grazing
-// the plane (rd_axis ≈ 0) or the intersection is behind the camera.
-- (BOOL)gridPlaneIntersect:(NSPoint)windowPoint
-                      axis:(int)axis
-                     coord:(float)plane_coord
-                    output:(simd::float3*)out {
-    simd::float3 ro, rd;
-    if (![self gridRayAtPoint:windowPoint origin:&ro direction:&rd]) return NO;
-    const float ro_ax = (axis == 0) ? ro.x : (axis == 1) ? ro.y : ro.z;
-    const float rd_ax = (axis == 0) ? rd.x : (axis == 1) ? rd.y : rd.z;
-    if (std::fabs(rd_ax) < 1e-6f) return NO;
-    const float t = (plane_coord - ro_ax) / rd_ax;
-    if (t <= 0.0f) return NO;
-    *out = ro + rd * t;
-    return YES;
 }
 
 // Flood select: BFS from the seed cell across 6-connected neighbors
@@ -1822,8 +1772,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // has somewhere to write. Visual is just the arrows — the existing
 // selection overlay already draws the AABB outline.
 - (void)drawSelectionGizmo {
+    const macvoxel::ViewContext vc = [self viewContext];
     macvoxel::Bounds3 wb;
-    if (![self xformGizmoBounds:&wb]) return;
+    if (!vc.XformGizmoBounds(&wb)) return;
     const float w = static_cast<float>(self.bounds.size.width);
     const float h = static_cast<float>(self.bounds.size.height);
     if (w <= 0.0f || h <= 0.0f) return;
@@ -1846,7 +1797,8 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     if (_interaction.drag_mode == DragMode::XformHandle) {
         hover_face = _interaction.xform.drag_face;
     } else if (_interaction.hover.has_point && !ImGui::GetIO().WantCaptureMouse) {
-        hover_face = [self pickSelectionHandleAtPoint:_interaction.hover.window_point];
+        const simd::float2 hp = [self localFromWindow:_interaction.hover.window_point];
+        hover_face = vc.PickXformHandle(hp.x, hp.y);
     }
 
     constexpr float kTipLengthVoxels = 4.0f;
@@ -1915,118 +1867,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     }
 }
 
-// World-space AABB the gizmo handles sit on. Floating buffer wins when
-// alive (its bounds may differ from the selection's bounds mid-drag);
-// otherwise we fall back to the on-grid selection's bounds. Returns NO
-// when there's nothing selected to scale.
-- (BOOL)xformGizmoBounds:(macvoxel::Bounds3*)out {
-    const macvoxel::FloatingBuffer& fb = _ctx->floating_buffer;
-    if (fb.active && !fb.grid.empty()) {
-        macvoxel::Bounds3 wb = fb.grid.Bounds();
-        wb.min_x += fb.offset_x; wb.max_x += fb.offset_x;
-        wb.min_y += fb.offset_y; wb.max_y += fb.offset_y;
-        wb.min_z += fb.offset_z; wb.max_z += fb.offset_z;
-        *out = wb;
-        return YES;
-    }
-    const macvoxel::Selection& sel = _ctx->selection;
-    if (sel.active() && !sel.empty()) {
-        *out = sel.bounds();
-        return YES;
-    }
-    return NO;
-}
-
-// Returns 0..5 if the cursor is over a transform handle, -1 otherwise.
-// Mirrors pickGenHandleAtPoint:.
-- (int)pickSelectionHandleAtPoint:(NSPoint)windowPoint {
-    macvoxel::Bounds3 wb;
-    if (![self xformGizmoBounds:&wb]) return -1;
-    const float w = static_cast<float>(self.bounds.size.width);
-    const float h = static_cast<float>(self.bounds.size.height);
-    if (w <= 0.0f || h <= 0.0f) return -1;
-    const float aspect = w / h;
-    const simd::float4x4 vp =
-        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
-
-    const NSPoint local = [self convertPoint:windowPoint fromView:nil];
-    const float cur_x = static_cast<float>(local.x);
-    const float cur_y = static_cast<float>(h - local.y);
-
-    constexpr float kTipLengthVoxels = 4.0f;
-    constexpr float kHitRadiusPx = 16.0f;
-    int best = -1;
-    float best_d2 = kHitRadiusPx * kHitRadiusPx;
-    for (int f = 0; f < 6; ++f) {
-        simd::float3 cw, nw;
-        XformFaceWorldGeom(wb, f, &cw, &nw);
-        const simd::float3 tip = cw + nw * kTipLengthVoxels;
-        const simd::float4 clip = simd_mul(
-            vp, simd::float4{tip.x, tip.y, tip.z, 1.0f});
-        if (clip.w <= 0.001f) continue;
-        const float ndc_x = clip.x / clip.w;
-        const float ndc_y = clip.y / clip.w;
-        const float sx = (ndc_x * 0.5f + 0.5f) * w;
-        const float sy = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;
-        const float dx = sx - cur_x;
-        const float dy = sy - cur_y;
-        const float d2 = dx * dx + dy * dy;
-        if (d2 < best_d2) {
-            best_d2 = d2;
-            best = f;
-        }
-    }
-    return best;
-}
-
-// Cursor → voxel delta along the dragged face's outward normal,
-// projected against the face's normal direction in NDC. Same shape
-// as genHandleDragVoxelsForFace: but anchored on _interaction.xform.drag_start_bounds
-// in world coords.
-- (int)xformHandleDragVoxelsForFace:(int)face cursor:(NSPoint)cursor {
-    const float w = static_cast<float>(self.bounds.size.width);
-    const float h = static_cast<float>(self.bounds.size.height);
-    if (w <= 0.0f || h <= 0.0f) return 0;
-    const float aspect = w / h;
-    const simd::float4x4 vp =
-        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
-
-    // World-space face geometry of the *original* (drag-start) bounds
-    // — anchoring against a moving face would make 1 voxel of cursor
-    // travel ≠ 1 voxel of growth, so the drag mapping would drift.
-    macvoxel::Bounds3 wb = _interaction.xform.drag_start_bounds;
-    const macvoxel::FloatingBuffer& fb = _ctx->floating_buffer;
-    wb.min_x += fb.offset_x; wb.max_x += fb.offset_x;
-    wb.min_y += fb.offset_y; wb.max_y += fb.offset_y;
-    wb.min_z += fb.offset_z; wb.max_z += fb.offset_z;
-
-    simd::float3 cw, nw;
-    XformFaceWorldGeom(wb, face, &cw, &nw);
-    auto to_ndc = [&](simd::float3 wp, simd::float2* ndc) -> bool {
-        const simd::float4 clip = simd_mul(
-            vp, simd::float4{wp.x, wp.y, wp.z, 1.0f});
-        if (clip.w <= 1e-6f) return false;
-        ndc->x = clip.x / clip.w;
-        ndc->y = clip.y / clip.w;
-        return true;
-    };
-    simd::float2 ndc0{}, ndc1{};
-    if (!to_ndc(cw, &ndc0)) return 0;
-    if (!to_ndc(cw + nw, &ndc1)) return 0;
-    const simd::float2 dir{ndc1.x - ndc0.x, ndc1.y - ndc0.y};
-    const float dir_len2 = dir.x * dir.x + dir.y * dir.y;
-    if (dir_len2 < 1e-8f) return 0;
-
-    const NSPoint anchor_local =
-        [self convertPoint:_interaction.xform.drag_start_cursor fromView:nil];
-    const NSPoint cursor_local = [self convertPoint:cursor fromView:nil];
-    const simd::float2 drag{
-        static_cast<float>((cursor_local.x - anchor_local.x) / w * 2.0f),
-        static_cast<float>((cursor_local.y - anchor_local.y) / h * 2.0f)};
-    const float t = (drag.x * dir.x + drag.y * dir.y) / dir_len2;
-    return static_cast<int>(std::round(t));
-}
-
 // Hit-test the cursor against the transform gizmo's face arrows;
 // if one is hit, snapshot the floating-buffer state for resampling
 // and enter DragMode::XformHandle. If the on-grid selection isn't
@@ -2035,7 +1875,8 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // to Cmd-drag first. Returns YES iff the gesture took ownership of
 // the drag.
 - (BOOL)tryBeginXformHandleAtPoint:(NSPoint)windowPoint {
-    const int face = [self pickSelectionHandleAtPoint:windowPoint];
+    const simd::float2 lp = [self localFromWindow:windowPoint];
+    const int face = [self viewContext].PickXformHandle(lp.x, lp.y);
     if (face < 0) return NO;
 
     macvoxel::FloatingBuffer& fb = _ctx->floating_buffer;
@@ -2045,7 +1886,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     }
 
     _interaction.xform.drag_face = face;
-    _interaction.xform.drag_start_cursor = windowPoint;
+    _interaction.xform.drag_start_local = lp;
     _interaction.xform.drag_start_bounds = fb.grid.Bounds();
     _interaction.xform.orig_grid = fb.grid.Clone();
     _interaction.drag_mode = DragMode::XformHandle;
@@ -2142,7 +1983,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     if (_interaction.drag_mode == DragMode::GenHandle) {
         hover_face = _interaction.gen_gizmo.active_drag_face;
     } else if (_interaction.hover.has_point && !ImGui::GetIO().WantCaptureMouse) {
-        hover_face = [self pickGenHandleAtPoint:_interaction.hover.window_point];
+        const simd::float2 hp = [self localFromWindow:_interaction.hover.window_point];
+        hover_face = [self viewContext].PickGenHandle(
+            hp.x, hp.y, _interaction.gen_gizmo.bounds);
     }
 
     constexpr float kTipLengthVoxels = 4.0f;
@@ -2217,107 +2060,16 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // Editing — raycast a click into the grid, then place or erase.
 // ---------------------------------------------------------------------------
 
-- (BOOL)gridRayAtPoint:(NSPoint)windowPoint
-                origin:(simd::float3*)out_origin
-             direction:(simd::float3*)out_dir {
-    const NSPoint local = [self convertPoint:windowPoint fromView:nil];
-    const float w = static_cast<float>(self.bounds.size.width);
-    const float h = static_cast<float>(self.bounds.size.height);
-    if (w <= 0.0f || h <= 0.0f) return NO;
-
-    const float ndc_x = (static_cast<float>(local.x) / w) * 2.0f - 1.0f;
-    const float ndc_y = (static_cast<float>(local.y) / h) * 2.0f - 1.0f;
-
-    const float aspect = w / h;
-    const simd::float4x4 vmat = _camera.ViewMatrix();
-    const simd::float4x4 pmat = _camera.ProjectionMatrix(aspect);
-    const simd::float4x4 inv_vp = simd_inverse(pmat * vmat);
-
-    auto unproject = [&](float z) -> simd::float3 {
-        simd::float4 clip{ndc_x, ndc_y, z, 1.0f};
-        simd::float4 wh = simd_mul(inv_vp, clip);
-        return simd::float3{wh.x / wh.w, wh.y / wh.w, wh.z / wh.w};
-    };
-    const simd::float3 near_world = unproject(0.0f);
-    const simd::float3 far_world  = unproject(1.0f);
-    const simd::float3 dir_world = simd::normalize(far_world - near_world);
-    const simd::float3 origin_world = _camera.Position();
-
-    // World -> grid: invert the renderer's R = (gx, gz, -gy).
-    *out_origin = simd::float3{origin_world.x, -origin_world.z, origin_world.y};
-    *out_dir    = simd::float3{dir_world.x,    -dir_world.z,    dir_world.y};
-    return YES;
-}
-
-- (BOOL)computeTargetCellAtPoint:(NSPoint)windowPoint
-                            mode:(macvoxel::ToolMode)mode
-                            into:(Vec3i*)out
-                            face:(int*)out_face_axis {
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr) return NO;
-
-    simd::float3 ray_origin_grid, ray_dir_grid;
-    if (![self gridRayAtPoint:windowPoint
-                       origin:&ray_origin_grid
-                    direction:&ray_dir_grid]) {
-        return NO;
-    }
-
-    macvoxel::RayHit hit;
-    bool hit_voxel;
-    // During a drag-Add stroke, skip cells we just placed so the raycast
-    // keeps hitting the original surface. Other modes (Remove, Paint)
-    // and non-drag interactions raycast against the live grid.
-    if (mode == macvoxel::ToolMode::Add &&
-        _interaction.drag_mode == DragMode::Paint && !_interaction.brush.drag_skip_cells.empty()) {
-        hit_voxel = macvoxel::RaycastIgnoring(doc->grid, ray_origin_grid,
-                                              ray_dir_grid, 4096.0f,
-                                              _interaction.brush.drag_skip_cells, &hit);
-    } else {
-        hit_voxel = macvoxel::Raycast(doc->grid, ray_origin_grid,
-                                      ray_dir_grid, 4096.0f, &hit);
-    }
-
-    int target_x = 0;
-    int target_y = 0;
-    int target_z = 0;
-    int face_axis = 2;  // ground-plane fallback faces +Z
-    if (hit_voxel) {
-        target_x = hit.x;
-        target_y = hit.y;
-        target_z = hit.z;
-        if (hit.axis >= 0) face_axis = hit.axis;
-        if (mode == macvoxel::ToolMode::Add) {
-            if (hit.axis < 0) return NO;  // ray started inside a voxel
-            if (hit.axis == 0) target_x += hit.sign;
-            else if (hit.axis == 1) target_y += hit.sign;
-            else if (hit.axis == 2) target_z += hit.sign;
-        }
-    } else {
-        // Empty-space click. Add falls back to the implicit ground plane
-        // (grid z=0, matching MagicaVoxel's convention). Remove/Paint need
-        // a real voxel to act on, so they no-op here.
-        if (mode != macvoxel::ToolMode::Add) return NO;
-        if (std::abs(ray_dir_grid.z) < 1e-6f) return NO;
-        const float t = -ray_origin_grid.z / ray_dir_grid.z;
-        if (t < 0.0f || t > 4096.0f) return NO;
-        const float hx = ray_origin_grid.x + t * ray_dir_grid.x;
-        const float hy = ray_origin_grid.y + t * ray_dir_grid.y;
-        target_x = static_cast<int>(std::floor(hx));
-        target_y = static_cast<int>(std::floor(hy));
-        target_z = 0;
-    }
-
-    *out = Vec3i{target_x, target_y, target_z};
-    if (out_face_axis) *out_face_axis = face_axis;
-    return YES;
-}
-
 - (void)performEditAtPoint:(NSPoint)windowPoint mode:(macvoxel::ToolMode)mode {
     Vec3i target;
     int face_axis = 2;
-    if (![self computeTargetCellAtPoint:windowPoint mode:mode into:&target
-                                   face:&face_axis]) {
+    const simd::float2 lp = [self localFromWindow:windowPoint];
+    const std::unordered_set<int64_t>& skip =
+        (_interaction.drag_mode == DragMode::Paint)
+            ? _interaction.brush.drag_skip_cells
+            : kEmptySkipSet;
+    if (![self viewContext].ComputeTargetCell(lp.x, lp.y, mode, &target,
+                                              &face_axis, skip)) {
         return;
     }
 
@@ -2443,37 +2195,21 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // enumerates the line and stamps the brush at every cell.
 // ---------------------------------------------------------------------------
 
-// Endpoint picker for the Line tool. Like computeTargetCellAtPoint: but
-// also accepts empty-space clicks for Remove/Paint, falling through to the
-// same ground-plane fallback Add uses. Lets the user anchor a Remove or
-// Paint line on either side of the geometry it should pass through.
-// Per-step picking inside Project mode keeps the strict picker so empty
-// pixels between solid surfaces don't introduce phantom hits.
-- (BOOL)computeLineEndpointAtPoint:(NSPoint)windowPoint
-                              mode:(macvoxel::ToolMode)mode
-                              into:(Vec3i*)out
-                              face:(int*)out_face_axis {
-    if ([self computeTargetCellAtPoint:windowPoint mode:mode into:out
-                                  face:out_face_axis]) {
-        return YES;
-    }
-    if (mode == macvoxel::ToolMode::Add) return NO;
-    return [self computeTargetCellAtPoint:windowPoint
-                                     mode:macvoxel::ToolMode::Add
-                                     into:out face:out_face_axis];
-}
-
 - (void)enumerateLineFromAnchorTo:(NSPoint)cursor
                           straight:(BOOL)straight
                             output:(std::vector<LineHit>&)out {
     out.clear();
     if (!_interaction.anchor.has_anchor) return;
 
+    const macvoxel::ViewContext vc = [self viewContext];
+    const simd::float2 cursor_local = [self localFromWindow:cursor];
+
     if (straight) {
         Vec3i endpoint;
         int end_face = _interaction.anchor.face_axis;
-        if (![self computeLineEndpointAtPoint:cursor mode:_interaction.anchor.mode
-                                         into:&endpoint face:&end_face]) {
+        if (!vc.ComputeLineEndpoint(cursor_local.x, cursor_local.y,
+                                    _interaction.anchor.mode,
+                                    &endpoint, &end_face)) {
             // Endpoint picker only fails when no usable cell exists at all
             // (e.g., camera looking up so the ground-plane fallback is
             // behind the camera). Show just the anchor.
@@ -2493,10 +2229,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // Project mode: walk the screen-space segment from the anchor click
     // pixel to the cursor pixel, raycasting at each step. Each hit is the
     // cell a single Brush click at that pixel would have produced.
-    const NSPoint s1 = _interaction.anchor.screen;
-    const NSPoint s2 = cursor;
-    const float dx = static_cast<float>(s2.x - s1.x);
-    const float dy = static_cast<float>(s2.y - s1.y);
+    const simd::float2 s1 = _interaction.anchor.screen_local;
+    const simd::float2 s2 = cursor_local;
+    const float dx = s2.x - s1.x;
+    const float dy = s2.y - s1.y;
     // Oversample 2× so oblique screen-space lines don't skip voxels whose
     // projection sits between integer pixels.
     const int steps = std::max(1, static_cast<int>(
@@ -2505,12 +2241,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     seen.reserve(static_cast<size_t>(steps) + 1);
     for (int i = 0; i <= steps; ++i) {
         const float u = static_cast<float>(i) / static_cast<float>(steps);
-        const NSPoint p{static_cast<CGFloat>(s1.x + dx * u),
-                        static_cast<CGFloat>(s1.y + dy * u)};
+        const float px = s1.x + dx * u;
+        const float py = s1.y + dy * u;
         Vec3i cell;
         int face_axis = _interaction.anchor.face_axis;
-        if (![self computeTargetCellAtPoint:p mode:_interaction.anchor.mode
-                                       into:&cell face:&face_axis]) {
+        if (!vc.ComputeTargetCell(px, py, _interaction.anchor.mode,
+                                  &cell, &face_axis)) {
             continue;
         }
         const int64_t k = macvoxel::PackCellKey(cell.x, cell.y, cell.z);
@@ -2618,7 +2354,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         // Click without drag previews as a single layer; once a non-zero
         // d has been observed the override stops applying so dragging
         // back to the anchor cleanly cancels.
-        int d = [self faceDragVoxelsAtCursor:_interaction.hover.window_point];
+        const simd::float2 hp = [self localFromWindow:_interaction.hover.window_point];
+        int d = [self viewContext].FaceDragVoxels(
+            hp.x, hp.y, _interaction.anchor.cell,
+            _interaction.anchor.face_axis, _interaction.face.sign,
+            _interaction.anchor.screen_local.x,
+            _interaction.anchor.screen_local.y);
         if (d != 0) _interaction.face.observed_drag = YES;
         if (d == 0 && !_interaction.face.observed_drag) d = 1;
         // Remove/Paint don't care about drag sign — normalize to magnitude
@@ -2677,9 +2418,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             // an overlay tool), so each refresh starts from a blank slate.
             Vec3i endpoint = _interaction.anchor.cell;
             int end_face = _interaction.anchor.face_axis;
-            [self computeLineEndpointAtPoint:_interaction.hover.window_point
-                                        mode:_interaction.anchor.mode
-                                        into:&endpoint face:&end_face];
+            const simd::float2 hp = [self localFromWindow:_interaction.hover.window_point];
+            [self viewContext].ComputeLineEndpoint(
+                hp.x, hp.y, _interaction.anchor.mode, &endpoint, &end_face);
             macvoxel::generators::Bounds3i b{
                 std::min(_interaction.anchor.cell.x, endpoint.x),
                 std::min(_interaction.anchor.cell.y, endpoint.y),
@@ -2719,15 +2460,16 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 - (void)beginAnchorAtPoint:(NSPoint)windowPoint mode:(macvoxel::ToolMode)mode {
     Vec3i target;
     int face_axis = 2;
-    if (![self computeLineEndpointAtPoint:windowPoint mode:mode into:&target
-                                     face:&face_axis]) {
+    const simd::float2 lp = [self localFromWindow:windowPoint];
+    if (![self viewContext].ComputeLineEndpoint(
+            lp.x, lp.y, mode, &target, &face_axis)) {
         return;
     }
     _interaction.anchor.has_anchor = YES;
     _interaction.anchor.cell = target;
     _interaction.anchor.face_axis = face_axis;
     _interaction.anchor.mode = mode;
-    _interaction.anchor.screen = windowPoint;
+    _interaction.anchor.screen_local = lp;
     _interaction.anchor.tool = _ctx->tool.tool;
 }
 
@@ -2751,8 +2493,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
     Vec3i endpoint;
     int end_face = _interaction.anchor.face_axis;
-    if (![self computeLineEndpointAtPoint:cursor mode:_interaction.anchor.mode
-                                     into:&endpoint face:&end_face]) {
+    const simd::float2 lp = [self localFromWindow:cursor];
+    if (![self viewContext].ComputeLineEndpoint(
+            lp.x, lp.y, _interaction.anchor.mode, &endpoint, &end_face)) {
         out.push_back({_interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
                        _interaction.anchor.face_axis});
         return;
@@ -2794,8 +2537,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
     Vec3i endpoint;
     int end_face = _interaction.anchor.face_axis;
-    if (![self computeLineEndpointAtPoint:cursor mode:_interaction.anchor.mode
-                                     into:&endpoint face:&end_face]) {
+    const simd::float2 lp = [self localFromWindow:cursor];
+    if (![self viewContext].ComputeLineEndpoint(
+            lp.x, lp.y, _interaction.anchor.mode, &endpoint, &end_face)) {
         out.push_back({_interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
                        _interaction.anchor.face_axis});
         return;
@@ -2833,8 +2577,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 
     Vec3i endpoint;
     int end_face = _interaction.anchor.face_axis;
-    if (![self computeLineEndpointAtPoint:cursor mode:_interaction.anchor.mode
-                                     into:&endpoint face:&end_face]) {
+    const simd::float2 lp = [self localFromWindow:cursor];
+    if (![self viewContext].ComputeLineEndpoint(
+            lp.x, lp.y, _interaction.anchor.mode, &endpoint, &end_face)) {
         out.push_back({_interaction.anchor.cell.x, _interaction.anchor.cell.y, _interaction.anchor.cell.z,
                        _interaction.anchor.face_axis});
         return;
@@ -2906,92 +2651,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     if (_interaction.drag_mode == DragMode::GenHandle) _interaction.drag_mode = DragMode::None;
 }
 
-// Project each gizmo face's arrow tip into screen space and pick the
-// face whose tip is closest to `windowPoint` within a 14-point click
-// radius. Returns -1 if no handle is under the cursor. Faces whose tip
-// projects behind the camera are skipped.
-- (int)pickGenHandleAtPoint:(NSPoint)windowPoint {
-    if (!_interaction.gen_gizmo.active) return -1;
-    const float w = static_cast<float>(self.bounds.size.width);
-    const float h = static_cast<float>(self.bounds.size.height);
-    if (w <= 0.0f || h <= 0.0f) return -1;
-    const float aspect = w / h;
-    const simd::float4x4 vp =
-        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
-
-    const NSPoint local = [self convertPoint:windowPoint fromView:nil];
-    const float cur_x = static_cast<float>(local.x);
-    const float cur_y = static_cast<float>(h - local.y);  // ImGui Y-down
-
-    // Match drawGenGizmo's stem length so the click target lines up
-    // with the rendered arrow tip; the radius covers the full
-    // 14-px-long arrowhead so any click on the visible arrow lands.
-    constexpr float kTipLengthVoxels = 4.0f;
-    constexpr float kHitRadiusPx = 16.0f;
-    int best = -1;
-    float best_d2 = kHitRadiusPx * kHitRadiusPx;
-    for (int f = 0; f < 6; ++f) {
-        simd::float3 cw, nw;
-        GizmoFaceWorldGeom(_interaction.gen_gizmo.bounds, f, &cw, &nw);
-        const simd::float3 tip = cw + nw * kTipLengthVoxels;
-        const simd::float4 clip = simd_mul(
-            vp, simd::float4{tip.x, tip.y, tip.z, 1.0f});
-        if (clip.w <= 0.001f) continue;
-        const float ndc_x = clip.x / clip.w;
-        const float ndc_y = clip.y / clip.w;
-        const float sx = (ndc_x * 0.5f + 0.5f) * w;
-        const float sy = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;
-        const float dx = sx - cur_x;
-        const float dy = sy - cur_y;
-        const float d2 = dx * dx + dy * dy;
-        if (d2 < best_d2) {
-            best_d2 = d2;
-            best = f;
-        }
-    }
-    return best;
-}
-
-// Convert a cursor delta from drag-start into a signed voxel count
-// along face `face`'s normal. Same projection trick as the Face tool's
-// faceDragVoxelsAtCursor:: build the NDC-space direction "1 voxel of
-// normal travel" looks like, project the cursor delta onto it.
-- (int)genHandleDragVoxelsForFace:(int)face cursor:(NSPoint)cursor {
-    const float w = static_cast<float>(self.bounds.size.width);
-    const float h = static_cast<float>(self.bounds.size.height);
-    if (w <= 0.0f || h <= 0.0f) return 0;
-    const float aspect = w / h;
-    const simd::float4x4 vp =
-        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
-
-    simd::float3 cw, nw;
-    GizmoFaceWorldGeom(_interaction.gen_gizmo.handle_start_bounds, face, &cw, &nw);
-
-    auto to_ndc = [&](simd::float3 wp, simd::float2* ndc) -> bool {
-        const simd::float4 clip = simd_mul(
-            vp, simd::float4{wp.x, wp.y, wp.z, 1.0f});
-        if (clip.w <= 1e-6f) return false;
-        ndc->x = clip.x / clip.w;
-        ndc->y = clip.y / clip.w;
-        return true;
-    };
-    simd::float2 ndc0{}, ndc1{};
-    if (!to_ndc(cw, &ndc0)) return 0;
-    if (!to_ndc(cw + nw, &ndc1)) return 0;
-    const simd::float2 dir{ndc1.x - ndc0.x, ndc1.y - ndc0.y};
-    const float dir_len2 = dir.x * dir.x + dir.y * dir.y;
-    if (dir_len2 < 1e-8f) return 0;
-
-    const NSPoint anchor_local =
-        [self convertPoint:_interaction.gen_gizmo.handle_start_cursor fromView:nil];
-    const NSPoint cursor_local = [self convertPoint:cursor fromView:nil];
-    const simd::float2 drag{
-        static_cast<float>((cursor_local.x - anchor_local.x) / w * 2.0f),
-        static_cast<float>((cursor_local.y - anchor_local.y) / h * 2.0f)};
-    const float t = (drag.x * dir.x + drag.y * dir.y) / dir_len2;
-    return static_cast<int>(std::round(t));
-}
-
 // Apply a drag delta (in voxels along the face normal) to the gizmo
 // bounds. Positive delta moves the face outward; negative inward.
 // Clamps against the opposite face so the box stays at least 1 voxel
@@ -3020,52 +2679,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
 // of voxel layers along the face normal.
 // ---------------------------------------------------------------------------
 
-// Like computeTargetCellAtPoint:'s hit branch but exposes hit.sign too,
-// since the Face tool needs both axis and sign of the clicked face.
-- (BOOL)pickFaceAtPoint:(NSPoint)windowPoint
-                  cell:(Vec3i*)outCell
-                  axis:(int*)outAxis
-                  sign:(int*)outSign
-                 color:(uint8_t*)outColor {
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr) return NO;
-    simd::float3 ray_origin_grid, ray_dir_grid;
-    if (![self gridRayAtPoint:windowPoint
-                       origin:&ray_origin_grid
-                    direction:&ray_dir_grid]) {
-        return NO;
-    }
-    // Same dual-volume strategy the renderer uses: try both grids and
-    // take whichever is hit first. Without this, Cmd-drag on a moved
-    // floating buffer fails because the doc-only picker can't see the
-    // lifted cells anymore.
-    macvoxel::RayHit hit_doc, hit_buf;
-    bool got_doc = macvoxel::Raycast(doc->grid, ray_origin_grid, ray_dir_grid,
-                                     4096.0f, &hit_doc);
-    bool got_buf = false;
-    const macvoxel::FloatingBuffer& fb = _ctx->floating_buffer;
-    if (fb.active && !fb.grid.empty()) {
-        const simd::float3 origin_buf{
-            ray_origin_grid.x - static_cast<float>(fb.offset_x),
-            ray_origin_grid.y - static_cast<float>(fb.offset_y),
-            ray_origin_grid.z - static_cast<float>(fb.offset_z),
-        };
-        got_buf = macvoxel::Raycast(fb.grid, origin_buf, ray_dir_grid,
-                                    4096.0f, &hit_buf);
-    }
-    if (!got_doc && !got_buf) return NO;
-    const bool from_buf = got_buf && (!got_doc || hit_buf.t < hit_doc.t);
-    const macvoxel::RayHit& hit = from_buf ? hit_buf : hit_doc;
-    if (hit.axis < 0) return NO;  // ray started inside a voxel — no face
-    outCell->x = hit.x + (from_buf ? fb.offset_x : 0);
-    outCell->y = hit.y + (from_buf ? fb.offset_y : 0);
-    outCell->z = hit.z + (from_buf ? fb.offset_z : 0);
-    *outAxis = hit.axis;
-    *outSign = hit.sign;
-    if (outColor) *outColor = hit.color;
-    return YES;
-}
-
 - (void)floodFaceFromCell:(Vec3i)seed
                      axis:(int)axis sign:(int)sign
                     color:(uint8_t)color
@@ -3076,55 +2689,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     if (doc == nullptr) return;
     macvoxel::shapes::FloodCoplanarFace(doc->grid, seed, axis, sign, color,
                                         eightConn ? true : false, out);
-}
-
-// Convert the cursor's screen-space drag (relative to the click) into a
-// signed integer voxel distance along the face normal. Projects the face
-// normal into NDC at the anchor cell's depth — the drag is then scaled
-// against that direction so one voxel of normal travel equals exactly the
-// pixel distance the camera sees per voxel at that depth. Looking exactly
-// edge-on to the face yields a degenerate direction and 0 voxels.
-- (int)faceDragVoxelsAtCursor:(NSPoint)cursor {
-    const float w = static_cast<float>(self.bounds.size.width);
-    const float h = static_cast<float>(self.bounds.size.height);
-    if (w <= 0 || h <= 0) return 0;
-    const float aspect = w / h;
-    const simd::float4x4 vp =
-        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
-
-    const simd::float3 p0_grid{
-        static_cast<float>(_interaction.anchor.cell.x) + 0.5f,
-        static_cast<float>(_interaction.anchor.cell.y) + 0.5f,
-        static_cast<float>(_interaction.anchor.cell.z) + 0.5f};
-    const simd::float3 p0_world{p0_grid.x, p0_grid.z, -p0_grid.y};
-    simd::float3 n_grid{0, 0, 0};
-    if (_interaction.anchor.face_axis == 0)      n_grid.x = static_cast<float>(_interaction.face.sign);
-    else if (_interaction.anchor.face_axis == 1) n_grid.y = static_cast<float>(_interaction.face.sign);
-    else                            n_grid.z = static_cast<float>(_interaction.face.sign);
-    const simd::float3 n_world{n_grid.x, n_grid.z, -n_grid.y};
-
-    auto to_ndc = [&](simd::float3 wp, simd::float2* ndc) -> bool {
-        const simd::float4 clip =
-            simd_mul(vp, simd::float4{wp.x, wp.y, wp.z, 1.0f});
-        if (clip.w <= 1e-6f) return false;
-        ndc->x = clip.x / clip.w;
-        ndc->y = clip.y / clip.w;
-        return true;
-    };
-    simd::float2 ndc0{}, ndc1{};
-    if (!to_ndc(p0_world, &ndc0)) return 0;
-    if (!to_ndc(p0_world + n_world, &ndc1)) return 0;
-    const simd::float2 dir{ndc1.x - ndc0.x, ndc1.y - ndc0.y};
-    const float dir_len2 = dir.x * dir.x + dir.y * dir.y;
-    if (dir_len2 < 1e-8f) return 0;
-
-    const NSPoint anchor_local = [self convertPoint:_interaction.anchor.screen fromView:nil];
-    const NSPoint cursor_local = [self convertPoint:cursor fromView:nil];
-    const simd::float2 drag{
-        static_cast<float>((cursor_local.x - anchor_local.x) / w * 2.0f),
-        static_cast<float>((cursor_local.y - anchor_local.y) / h * 2.0f)};
-    const float t = (drag.x * dir.x + drag.y * dir.y) / dir_len2;
-    return static_cast<int>(std::round(t));
 }
 
 // Apply the extrusion / inset / paint to the document. Routes writes
@@ -3334,7 +2898,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     // last mouseDragged event isn't guaranteed to fire at the same point
     // mouseUp arrives at — better to converge here than to ship one
     // layer off.
-    int d = [self faceDragVoxelsAtCursor:windowPoint];
+    const simd::float2 lp = [self localFromWindow:windowPoint];
+    int d = [self viewContext].FaceDragVoxels(
+        lp.x, lp.y, _interaction.anchor.cell,
+        _interaction.anchor.face_axis, _interaction.face.sign,
+        _interaction.anchor.screen_local.x,
+        _interaction.anchor.screen_local.y);
     if (d != 0) _interaction.face.observed_drag = YES;
     if (d == 0 && !_interaction.face.observed_drag) d = 1;
     if (_interaction.anchor.mode == macvoxel::ToolMode::Remove ||
