@@ -185,6 +185,44 @@ void CancelFloatingLift(Document& doc) {
     ++doc.version;
 }
 
+void ResampleFloatingBuffer(const VoxelGrid& src,
+                            const Bounds3& src_bounds,
+                            const Bounds3& new_bounds) {
+    FloatingBuffer& fb = CurrentFloatingBuffer();
+    fb.grid.Clear();
+    if (src_bounds.empty() || new_bounds.empty()) return;
+
+    const int64_t old_sx = static_cast<int64_t>(src_bounds.size_x());
+    const int64_t old_sy = static_cast<int64_t>(src_bounds.size_y());
+    const int64_t old_sz = static_cast<int64_t>(src_bounds.size_z());
+    const int64_t new_sx = static_cast<int64_t>(new_bounds.size_x());
+    const int64_t new_sy = static_cast<int64_t>(new_bounds.size_y());
+    const int64_t new_sz = static_cast<int64_t>(new_bounds.size_z());
+    if (old_sx == 0 || old_sy == 0 || old_sz == 0) return;
+
+    // Nearest-neighbor sample the centre of each new cell back to a
+    // source cell. The half-cell offset (i + 0.5) keeps the mapping
+    // symmetric — a 1× scale resamples to itself, and a 2× scale
+    // doubles each cell along the axis without bias toward one side.
+    for (int64_t nz = 0; nz < new_sz; ++nz) {
+        const int64_t sz = (nz * old_sz + old_sz / 2) / new_sz;
+        for (int64_t ny = 0; ny < new_sy; ++ny) {
+            const int64_t sy = (ny * old_sy + old_sy / 2) / new_sy;
+            for (int64_t nx = 0; nx < new_sx; ++nx) {
+                const int64_t sx = (nx * old_sx + old_sx / 2) / new_sx;
+                const uint8_t pal = src.Get(
+                    src_bounds.min_x + static_cast<int32_t>(sx),
+                    src_bounds.min_y + static_cast<int32_t>(sy),
+                    src_bounds.min_z + static_cast<int32_t>(sz));
+                if (pal == 0) continue;
+                fb.grid.Set(new_bounds.min_x + static_cast<int32_t>(nx),
+                            new_bounds.min_y + static_cast<int32_t>(ny),
+                            new_bounds.min_z + static_cast<int32_t>(nz), pal);
+            }
+        }
+    }
+}
+
 void DiscardFloatingBuffer() {
     FloatingBuffer& fb = CurrentFloatingBuffer();
     if (!fb.active) return;

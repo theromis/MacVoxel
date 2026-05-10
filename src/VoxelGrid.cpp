@@ -1,6 +1,7 @@
 #include "VoxelGrid.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace macvoxel {
 
@@ -82,6 +83,24 @@ void VoxelGrid::Clear() {
     dirty_chunks_.clear();
     total_filled_ = 0;
     bounds_ = Bounds3{};
+}
+
+VoxelGrid VoxelGrid::Clone() const {
+    VoxelGrid out;
+    out.bounds_ = bounds_;
+    out.total_filled_ = total_filled_;
+    out.chunks_.reserve(chunks_.size());
+    for (const auto& [coord, chunk] : chunks_) {
+        auto copy = std::make_unique<Chunk>();
+        copy->coord = chunk->coord;
+        std::memcpy(copy->cells, chunk->cells, sizeof(copy->cells));
+        copy->filled_count = chunk->filled_count;
+        copy->version = chunk->version;
+        out.chunks_.emplace(coord, std::move(copy));
+    }
+    // Don't copy the dirty queue — clones are read-only snapshots and
+    // the renderer never asks them to flush dirty chunks.
+    return out;
 }
 
 }  // namespace macvoxel

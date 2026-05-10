@@ -6,6 +6,8 @@ namespace macvoxel {
 
 struct Document;
 struct Clipboard;
+struct Bounds3;
+class VoxelGrid;
 
 // Move the active selection's voxels off the document into the floating
 // buffer. After lift: doc cells at the selection coords are 0;
@@ -45,6 +47,20 @@ void CancelFloatingLift(Document& doc);
 // list is cleared too since those positions no longer reference real
 // cells.
 void DiscardFloatingBuffer();
+
+// Replace the floating buffer's grid with a nearest-neighbor stretch
+// of `src` (originally bounded by `src_bounds`) into `new_bounds`.
+// Used by the transform gizmo's face-handle scale: caller snapshots
+// fb.grid + bounds at drag start, then this function rebuilds fb.grid
+// from that snapshot every time the dragged face crosses a voxel
+// boundary, so resampling is always lossless against the original
+// (no compounding shrink-then-grow data loss).
+//
+// `new_bounds` is in fb-local grid coords. Caller is expected to
+// bump fb.version after this returns.
+void ResampleFloatingBuffer(const VoxelGrid& src,
+                            const Bounds3& src_bounds,
+                            const Bounds3& new_bounds);
 
 // Stage clipboard contents into the floating buffer at the given
 // world-coord origin (the clipboard's bottom corner of its AABB).

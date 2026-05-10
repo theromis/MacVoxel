@@ -81,6 +81,12 @@ public:
 
     void Clear();
 
+    // Deep copy. The default copy ctor is deleted because the chunk
+    // map holds unique_ptrs, but a manual clone is cheap and useful
+    // for snapshots (the floating-buffer scale gizmo captures one at
+    // drag start so each frame's resample sees the lossless original).
+    VoxelGrid Clone() const;
+
     size_t FilledCount() const { return total_filled_; }
     bool empty() const { return total_filled_ == 0; }
 

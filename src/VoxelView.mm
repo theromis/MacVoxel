@@ -42,7 +42,7 @@
 
 namespace {
 enum class DragMode { None, Orbit, Pan, Paint, Marquee, BoxSelect,
-                      MoveSelect, Shape, GenHandle };
+                      MoveSelect, XformHandle, Shape, GenHandle };
 
 using Vec3i = macvoxel::shapes::Vec3i;
 struct LineHit { int32_t x, y, z; int face_axis; };
@@ -82,6 +82,51 @@ inline void GenFaceAxisSign(int face, int* axis, int* sign) {
 // R = (gx, gz, -gy) transform) and the face's outward normal in world
 // space. The "outer surface" of a face on the +axis side is at coord+1
 // (voxels span [c, c+1]); on the -axis side it's at coord.
+// Same axis/sign decoding the generator gizmo uses, but for the
+// floating-buffer's xform gizmo. Faces are numbered: 0=-X, 1=+X,
+// 2=-Y, 3=+Y, 4=-Z, 5=+Z. axis = face/2; sign = (face&1) ? +1 : -1.
+inline void XformFaceAxisSign(int face, int* axis, int* sign) {
+    *axis = face / 2;
+    *sign = (face & 1) ? +1 : -1;
+}
+
+// World-space face center + outward normal for a Bounds3 (the
+// floating buffer's bounds + offset). Mirrors GizmoFaceWorldGeom for
+// generators::Bounds3i. Voxels span [c, c+1] so the +face surface
+// sits at coord+1 and the -face at coord.
+void XformFaceWorldGeom(const macvoxel::Bounds3& b, int face,
+                        simd::float3* out_center, simd::float3* out_normal) {
+    int axis, sign;
+    XformFaceAxisSign(face, &axis, &sign);
+    auto mid = [](int32_t lo, int32_t hi) {
+        return (static_cast<float>(lo) + static_cast<float>(hi) + 1.0f) * 0.5f;
+    };
+    const int32_t face_coord = (sign < 0)
+        ? (axis == 0 ? b.min_x : axis == 1 ? b.min_y : b.min_z)
+        : ((axis == 0 ? b.max_x : axis == 1 ? b.max_y : b.max_z) + 1);
+    float gx, gy, gz;
+    if (axis == 0) {
+        gx = static_cast<float>(face_coord);
+        gy = mid(b.min_y, b.max_y);
+        gz = mid(b.min_z, b.max_z);
+    } else if (axis == 1) {
+        gx = mid(b.min_x, b.max_x);
+        gy = static_cast<float>(face_coord);
+        gz = mid(b.min_z, b.max_z);
+    } else {
+        gx = mid(b.min_x, b.max_x);
+        gy = mid(b.min_y, b.max_y);
+        gz = static_cast<float>(face_coord);
+    }
+    // Same R = (gx, gz, -gy) the renderer applies.
+    *out_center = simd::float3{gx, gz, -gy};
+    simd::float3 n_grid{0.0f, 0.0f, 0.0f};
+    if (axis == 0) n_grid.x = static_cast<float>(sign);
+    else if (axis == 1) n_grid.y = static_cast<float>(sign);
+    else                n_grid.z = static_cast<float>(sign);
+    *out_normal = simd::float3{n_grid.x, n_grid.z, -n_grid.y};
+}
+
 void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                         simd::float3* out_center, simd::float3* out_normal) {
     int axis, sign;
@@ -142,6 +187,16 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     int _moveAxis;
     simd::float3 _moveAnchorGrid;
     Vec3i _moveStartOffset;
+    // Floating-buffer transform gizmo. While a buffer is alive we draw
+    // 6 face-arrow handles around its world AABB; clicking a handle
+    // enters DragMode::XformHandle, which scales fb.grid along that
+    // face's axis. The orig-grid snapshot is captured at drag start so
+    // every frame's resample sees the lossless original (shrink-then-
+    // grow round-trips cleanly within one drag).
+    int _xformDragFace;          // 0..5 while dragging, -1 otherwise
+    NSPoint _xformDragStartCursor;
+    macvoxel::Bounds3 _xformDragStartBounds;
+    macvoxel::VoxelGrid _xformOrigGrid;
     Vec3i _lastDragEditCell;
     NSPoint _lastDragLocation;
     NSPoint _hoverWindowPoint;
@@ -601,6 +656,7 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             }
         }
         [self drawSelectionOverlay];
+        [self drawSelectionGizmo];
         [self drawMarqueeOverlay];
         [self drawHoverOverlay];
         [self drawGenGizmo];
@@ -806,6 +862,10 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
             [self commitGenGizmo];
             _dragMode = DragMode::None;
         }
+    } else if ([self tryBeginXformHandleAtPoint:event.locationInWindow]) {
+        // Click on a transform-gizmo face arrow → scale the selection
+        // (lifting it into a floating buffer first if it wasn't
+        // already). tryBeginXformHandleAtPoint: set _dragMode.
     } else if (hasCommand &&
                (macvoxel::CurrentTool().tool == macvoxel::ToolKind::Marquee ||
                 macvoxel::CurrentTool().tool == macvoxel::ToolKind::BoxSelect ||
@@ -961,6 +1021,12 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         case DragMode::MoveSelect:
             [self updateMoveSelectAtPoint:p];
             break;
+        case DragMode::XformHandle: {
+            const int dv = [self xformHandleDragVoxelsForFace:_xformDragFace
+                                                       cursor:p];
+            [self applyXformHandleDelta:_xformDragFace deltaVoxels:dv];
+            break;
+        }
         case DragMode::BoxSelect: {
             Vec3i pick;
             if ([self pickGridCellAtPoint:p into:&pick]) {
@@ -1010,6 +1076,14 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         return;
     } else if (_dragMode == DragMode::MoveSelect) {
         [self commitMoveSelect];
+        _dragMode = DragMode::None;
+        return;
+    } else if (_dragMode == DragMode::XformHandle) {
+        // Buffer is at its final scaled state already (we resampled
+        // each frame). The unified lift+commit op picks up the
+        // current fb.grid when commit fires later.
+        _xformDragFace = -1;
+        _xformOrigGrid.Clear();
         _dragMode = DragMode::None;
         return;
     } else if (_dragMode == DragMode::GenHandle) {
@@ -1864,6 +1938,270 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                          voxel_color, 1.0f);
         }
     }
+}
+
+// Selection transform gizmo: 6 face-arrow handles around the active
+// selection's world AABB (or the floating buffer's, if one is alive).
+// Clicking a handle enters scale-drag; if no buffer exists yet the
+// click also lifts the on-grid selection into one so the resample
+// has somewhere to write. Visual is just the arrows — the existing
+// selection overlay already draws the AABB outline.
+- (void)drawSelectionGizmo {
+    macvoxel::Bounds3 wb;
+    if (![self xformGizmoBounds:&wb]) return;
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0.0f || h <= 0.0f) return;
+    const float aspect = w / h;
+    const simd::float4x4 vp =
+        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
+
+    auto project = [&](simd::float3 wpos, ImVec2* screen, bool* valid) {
+        const simd::float4 clip =
+            simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
+        *valid = clip.w > 0.001f;
+        if (!*valid) return;
+        const float ndc_x = clip.x / clip.w;
+        const float ndc_y = clip.y / clip.w;
+        screen->x = (ndc_x * 0.5f + 0.5f) * w;
+        screen->y = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;
+    };
+
+    int hover_face = -1;
+    if (_dragMode == DragMode::XformHandle) {
+        hover_face = _xformDragFace;
+    } else if (_hoverHasPoint && !ImGui::GetIO().WantCaptureMouse) {
+        hover_face = [self pickSelectionHandleAtPoint:_hoverWindowPoint];
+    }
+
+    constexpr float kTipLengthVoxels = 4.0f;
+    constexpr float kArrowheadLenPx = 14.0f;
+    constexpr float kArrowheadHalfWidthPx = 7.0f;
+    // Same X/Y/Z = red/green/blue palette as the generator gizmo so
+    // axis colour reads consistently across the editor.
+    const ImU32 kAxisBase[3] = {
+        IM_COL32(230,  80,  80, 255),
+        IM_COL32( 90, 200, 100, 255),
+        IM_COL32( 90, 140, 240, 255),
+    };
+    const ImU32 kAxisHover[3] = {
+        IM_COL32(255, 160, 160, 255),
+        IM_COL32(170, 250, 180, 255),
+        IM_COL32(160, 200, 255, 255),
+    };
+    const ImU32 kAxisActive[3] = {
+        IM_COL32(255, 220, 220, 255),
+        IM_COL32(220, 255, 230, 255),
+        IM_COL32(220, 240, 255, 255),
+    };
+
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    for (int f = 0; f < 6; ++f) {
+        simd::float3 cw, nw;
+        XformFaceWorldGeom(wb, f, &cw, &nw);
+        ImVec2 base, tip;
+        bool base_v, tip_v;
+        project(cw, &base, &base_v);
+        project(cw + nw * kTipLengthVoxels, &tip, &tip_v);
+        if (!base_v || !tip_v) continue;
+
+        const int axis = f / 2;
+        const ImU32 color =
+            (_dragMode == DragMode::XformHandle && f == _xformDragFace)
+                ? kAxisActive[axis]
+            : (f == hover_face) ? kAxisHover[axis]
+                                : kAxisBase[axis];
+        const float thickness =
+            (f == hover_face ||
+             (_dragMode == DragMode::XformHandle && f == _xformDragFace))
+                ? 2.8f : 2.0f;
+        dl->AddLine(base, tip, color, thickness);
+
+        const float stem_dx = tip.x - base.x;
+        const float stem_dy = tip.y - base.y;
+        const float stem_len = std::sqrt(stem_dx * stem_dx +
+                                         stem_dy * stem_dy);
+        if (stem_len > 1e-3f) {
+            const float ux = stem_dx / stem_len;
+            const float uy = stem_dy / stem_len;
+            const float pxn = -uy;
+            const float pyn =  ux;
+            const ImVec2 back{
+                tip.x - ux * kArrowheadLenPx,
+                tip.y - uy * kArrowheadLenPx};
+            const ImVec2 leg1{
+                back.x + pxn * kArrowheadHalfWidthPx,
+                back.y + pyn * kArrowheadHalfWidthPx};
+            const ImVec2 leg2{
+                back.x - pxn * kArrowheadHalfWidthPx,
+                back.y - pyn * kArrowheadHalfWidthPx};
+            dl->AddTriangleFilled(tip, leg1, leg2, color);
+        }
+    }
+}
+
+// World-space AABB the gizmo handles sit on. Floating buffer wins when
+// alive (its bounds may differ from sel.box mid-drag); otherwise we
+// fall back to the on-grid selection's box. Returns NO when there's
+// nothing selected to scale.
+- (BOOL)xformGizmoBounds:(macvoxel::Bounds3*)out {
+    const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    if (fb.active && !fb.grid.empty()) {
+        macvoxel::Bounds3 wb = fb.grid.Bounds();
+        wb.min_x += fb.offset_x; wb.max_x += fb.offset_x;
+        wb.min_y += fb.offset_y; wb.max_y += fb.offset_y;
+        wb.min_z += fb.offset_z; wb.max_z += fb.offset_z;
+        *out = wb;
+        return YES;
+    }
+    const macvoxel::Selection& sel = macvoxel::CurrentSelection();
+    if (sel.active && !sel.voxels.empty()) {
+        *out = sel.box;
+        return YES;
+    }
+    return NO;
+}
+
+// Returns 0..5 if the cursor is over a transform handle, -1 otherwise.
+// Mirrors pickGenHandleAtPoint:.
+- (int)pickSelectionHandleAtPoint:(NSPoint)windowPoint {
+    macvoxel::Bounds3 wb;
+    if (![self xformGizmoBounds:&wb]) return -1;
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0.0f || h <= 0.0f) return -1;
+    const float aspect = w / h;
+    const simd::float4x4 vp =
+        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
+
+    const NSPoint local = [self convertPoint:windowPoint fromView:nil];
+    const float cur_x = static_cast<float>(local.x);
+    const float cur_y = static_cast<float>(h - local.y);
+
+    constexpr float kTipLengthVoxels = 4.0f;
+    constexpr float kHitRadiusPx = 16.0f;
+    int best = -1;
+    float best_d2 = kHitRadiusPx * kHitRadiusPx;
+    for (int f = 0; f < 6; ++f) {
+        simd::float3 cw, nw;
+        XformFaceWorldGeom(wb, f, &cw, &nw);
+        const simd::float3 tip = cw + nw * kTipLengthVoxels;
+        const simd::float4 clip = simd_mul(
+            vp, simd::float4{tip.x, tip.y, tip.z, 1.0f});
+        if (clip.w <= 0.001f) continue;
+        const float ndc_x = clip.x / clip.w;
+        const float ndc_y = clip.y / clip.w;
+        const float sx = (ndc_x * 0.5f + 0.5f) * w;
+        const float sy = (1.0f - (ndc_y * 0.5f + 0.5f)) * h;
+        const float dx = sx - cur_x;
+        const float dy = sy - cur_y;
+        const float d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best = f;
+        }
+    }
+    return best;
+}
+
+// Cursor → voxel delta along the dragged face's outward normal,
+// projected against the face's normal direction in NDC. Same shape
+// as genHandleDragVoxelsForFace: but anchored on _xformDragStartBounds
+// in world coords.
+- (int)xformHandleDragVoxelsForFace:(int)face cursor:(NSPoint)cursor {
+    const float w = static_cast<float>(self.bounds.size.width);
+    const float h = static_cast<float>(self.bounds.size.height);
+    if (w <= 0.0f || h <= 0.0f) return 0;
+    const float aspect = w / h;
+    const simd::float4x4 vp =
+        _camera.ProjectionMatrix(aspect) * _camera.ViewMatrix();
+
+    // World-space face geometry of the *original* (drag-start) bounds
+    // — anchoring against a moving face would make 1 voxel of cursor
+    // travel ≠ 1 voxel of growth, so the drag mapping would drift.
+    macvoxel::Bounds3 wb = _xformDragStartBounds;
+    const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    wb.min_x += fb.offset_x; wb.max_x += fb.offset_x;
+    wb.min_y += fb.offset_y; wb.max_y += fb.offset_y;
+    wb.min_z += fb.offset_z; wb.max_z += fb.offset_z;
+
+    simd::float3 cw, nw;
+    XformFaceWorldGeom(wb, face, &cw, &nw);
+    auto to_ndc = [&](simd::float3 wp, simd::float2* ndc) -> bool {
+        const simd::float4 clip = simd_mul(
+            vp, simd::float4{wp.x, wp.y, wp.z, 1.0f});
+        if (clip.w <= 1e-6f) return false;
+        ndc->x = clip.x / clip.w;
+        ndc->y = clip.y / clip.w;
+        return true;
+    };
+    simd::float2 ndc0{}, ndc1{};
+    if (!to_ndc(cw, &ndc0)) return 0;
+    if (!to_ndc(cw + nw, &ndc1)) return 0;
+    const simd::float2 dir{ndc1.x - ndc0.x, ndc1.y - ndc0.y};
+    const float dir_len2 = dir.x * dir.x + dir.y * dir.y;
+    if (dir_len2 < 1e-8f) return 0;
+
+    const NSPoint anchor_local =
+        [self convertPoint:_xformDragStartCursor fromView:nil];
+    const NSPoint cursor_local = [self convertPoint:cursor fromView:nil];
+    const simd::float2 drag{
+        static_cast<float>((cursor_local.x - anchor_local.x) / w * 2.0f),
+        static_cast<float>((cursor_local.y - anchor_local.y) / h * 2.0f)};
+    const float t = (drag.x * dir.x + drag.y * dir.y) / dir_len2;
+    return static_cast<int>(std::round(t));
+}
+
+// Hit-test the cursor against the transform gizmo's face arrows;
+// if one is hit, snapshot the floating-buffer state for resampling
+// and enter DragMode::XformHandle. If the on-grid selection isn't
+// floating yet, lift it first — same lazy-lift the move-drag uses,
+// so handles can show on a fresh selection without forcing the user
+// to Cmd-drag first. Returns YES iff the gesture took ownership of
+// the drag.
+- (BOOL)tryBeginXformHandleAtPoint:(NSPoint)windowPoint {
+    const int face = [self pickSelectionHandleAtPoint:windowPoint];
+    if (face < 0) return NO;
+
+    macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    if (!fb.active) {
+        AppDelegate* delegate = (AppDelegate*)NSApp.delegate;
+        macvoxel::Document* doc = [delegate document];
+        if (doc == nullptr) return NO;
+        macvoxel::LiftSelectionToFloating(*doc);
+        if (!fb.active || fb.grid.empty()) return NO;
+    }
+
+    _xformDragFace = face;
+    _xformDragStartCursor = windowPoint;
+    _xformDragStartBounds = fb.grid.Bounds();
+    _xformOrigGrid = fb.grid.Clone();
+    _dragMode = DragMode::XformHandle;
+    return YES;
+}
+
+// Apply a face-scale delta against the start-of-drag bounds. The
+// dragged face moves by `delta` voxels in its outward direction (so
+// positive delta grows the buffer, negative shrinks it). Bounds clamp
+// at 1 voxel thick on the dragged axis; the floating buffer is
+// resampled from the original snapshot to fit the new bounds.
+- (void)applyXformHandleDelta:(int)face deltaVoxels:(int)delta {
+    int axis, sign;
+    XformFaceAxisSign(face, &axis, &sign);
+    macvoxel::Bounds3 nb = _xformDragStartBounds;
+    if (axis == 0) {
+        if (sign < 0) nb.min_x = std::min(nb.max_x, nb.min_x - delta);
+        else          nb.max_x = std::max(nb.min_x, nb.max_x + delta);
+    } else if (axis == 1) {
+        if (sign < 0) nb.min_y = std::min(nb.max_y, nb.min_y - delta);
+        else          nb.max_y = std::max(nb.min_y, nb.max_y + delta);
+    } else {
+        if (sign < 0) nb.min_z = std::min(nb.max_z, nb.min_z - delta);
+        else          nb.max_z = std::max(nb.min_z, nb.max_z + delta);
+    }
+    macvoxel::ResampleFloatingBuffer(_xformOrigGrid, _xformDragStartBounds, nb);
+    macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    ++fb.version;
 }
 
 // Generator gizmo overlay: 12-edge AABB outline around _genBounds plus
