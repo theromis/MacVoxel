@@ -27,6 +27,7 @@
 #include "BoxSelectController.h"
 #include "BrushController.h"
 #include "BrushOps.h"
+#include "FaceController.h"
 #include "PreviewOps.h"
 #include "ShapeController.h"
 #include "EditorContext.h"
@@ -883,49 +884,15 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         }
     } else if (_ctx->tool.tool == macvoxel::ToolKind::Face) {
         [self autoCommitFloatingBuffer];
-        // Face tool: pick the clicked face, run a flood fill on the seed
-        // plane, then enter Shape drag for live extrude / inset preview.
-        Vec3i seed;
-        int axis = 2, sign = 1;
-        uint8_t color = 0;
-        const simd::float2 lp = [self localFromWindow:event.locationInWindow];
-        if (![self viewContext].PickFace(lp.x, lp.y, &seed, &axis, &sign, &color)) {
+        if (macvoxel::face_controller::OnMouseDown(
+                *_ctx, _interaction, [self viewContext],
+                [self mouseEventFromNSEvent:event])) {
+            _interaction.hover.window_point = event.locationInWindow;
+            _interaction.hover.has_point = YES;
+        } else {
             _interaction.drag_mode = DragMode::None;
             return;
         }
-        _interaction.anchor.has_anchor = YES;
-        _interaction.anchor.cell = seed;
-        _interaction.anchor.face_axis = axis;
-        _interaction.anchor.mode = _ctx->tool.mode;  // unused, kept for symmetry
-        _interaction.anchor.screen_local = lp;
-        _interaction.anchor.tool = macvoxel::ToolKind::Face;
-        _interaction.face.sign = sign;
-        _interaction.face.seed_color = color;
-        _interaction.face.observed_drag = NO;
-        _interaction.face.applied_d = 0;
-        _interaction.face.applied_with = _ctx->tool.face_with;
-        const macvoxel::ToolSettings& t = _ctx->tool;
-        // FaceExtrudeKind::Geometry passes color=0 to the flood — that's
-        // the "any non-empty cell" sentinel inside floodFaceFromCell:.
-        const uint8_t flood_color =
-            (t.face_extrude == macvoxel::FaceExtrudeKind::Color) ? color : 0;
-        [self floodFaceFromCell:seed axis:axis sign:sign color:flood_color
-              eightConnectivity:t.face_eight_connected
-                         output:_interaction.face.seed_cells];
-        _interaction.drag_mode = DragMode::Shape;
-        _interaction.hover.window_point = event.locationInWindow;
-        _interaction.hover.has_point = YES;
-        // Face uses an incremental preview (transitionFaceTo only flips
-        // the layers that changed), so the overlay is activated once at
-        // mouseDown and only modified — never wholesale cleared — until
-        // commit/cancel. _interaction.face.applied_d = 0 above already pairs with an
-        // empty overlay.
-        _ctx->preview.Clear();
-        _ctx->preview.active = true;
-        // Render the click-as-1-layer preview immediately. As soon as the
-        // user actually drags, refreshShapePreview will switch to using
-        // the live drag distance.
-        [self refreshShapePreview];
     } else {
         [self autoCommitFloatingBuffer];
         macvoxel::brush_controller::OnMouseDown(
@@ -987,9 +954,13 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                 macvoxel::shape_controller::OnMouseDragged(
                     *_ctx, _interaction, [self viewContext],
                     [self mouseEventFromNSEvent:event]);
+            } else if (_interaction.anchor.tool == macvoxel::ToolKind::Face) {
+                macvoxel::face_controller::OnMouseDragged(
+                    *_ctx, _interaction, [self viewContext],
+                    [self mouseEventFromNSEvent:event]);
             } else {
-                // Face / Generator drag-out — still on view until those
-                // controllers extract.
+                // Generator drag-out — still on view until that
+                // controller extracts.
                 [self refreshShapePreview];
             }
             break;
@@ -1054,7 +1025,9 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
                 macvoxel::shape_controller::OnMouseUp(*_ctx, _interaction);
                 break;
             case macvoxel::ToolKind::Face:
-                [self commitFaceAtPoint:event.locationInWindow];
+                macvoxel::face_controller::OnMouseUp(
+                    *_ctx, _interaction, [self viewContext],
+                    [self mouseEventFromNSEvent:event]);
                 break;
             case macvoxel::ToolKind::Generator:
                 // Gizmo went live on mouseDown; refreshShapePreview kept
@@ -1798,74 +1771,45 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
     ++overlay.version;
 }
 
-// Per-frame preview refresh for the Face tool and the Generator
-// drag-out, both of which still live on the view. ShapeController
-// owns the Line/Circle/Square/Box paths.
+// Per-frame Generator drag-out preview. Stays on the view until
+// GeneratorController extracts; ShapeController owns Line/Circle/
+// Square/Box; FaceController owns Face.
 - (void)refreshShapePreview {
-    if (!_interaction.anchor.has_anchor || _interaction.drag_mode != DragMode::Shape) return;
+    if (!_interaction.anchor.has_anchor ||
+        _interaction.drag_mode != DragMode::Shape) return;
+    if (_interaction.anchor.tool != macvoxel::ToolKind::Generator) return;
 
-    // Face tool: drive the preview incrementally. Only the layers that
-    // actually differ between the previous d and the new d get touched,
-    // so dragging through layer boundaries costs O(seed_cells × Δd)
-    // per frame rather than O(seed_cells × |d|).
-    if (_interaction.anchor.tool == macvoxel::ToolKind::Face) {
-        const simd::float2 hp = [self localFromWindow:_interaction.hover.window_point];
-        int d = [self viewContext].FaceDragVoxels(
-            hp.x, hp.y, _interaction.anchor.cell,
-            _interaction.anchor.face_axis, _interaction.face.sign,
-            _interaction.anchor.screen_local.x,
-            _interaction.anchor.screen_local.y);
-        if (d != 0) _interaction.face.observed_drag = YES;
-        if (d == 0 && !_interaction.face.observed_drag) d = 1;
-        // Remove/Paint don't care about drag sign — normalize to magnitude
-        // so the short-circuit and the diff driver see equivalent gestures
-        // as equivalent state.
-        if (_interaction.anchor.mode == macvoxel::ToolMode::Remove ||
-            _interaction.anchor.mode == macvoxel::ToolMode::Paint) {
-            d = std::abs(d);
-        }
-        const macvoxel::ToolSettings& t = _ctx->tool;
-        if (d == _interaction.face.applied_d && t.face_with == _interaction.face.applied_with) return;
-        [self transitionFaceTo:d];
-        return;
-    }
+    macvoxel::PreviewOverlay& overlay = _ctx->preview;
+    overlay.Clear();
+    overlay.active = true;
 
-    // Generator drag-out: rebuild bounds from anchor + cursor, run the
-    // engine, stamp the result. Stays on view until GeneratorController
-    // extracts.
-    if (_interaction.anchor.tool == macvoxel::ToolKind::Generator) {
-        macvoxel::PreviewOverlay& overlay = _ctx->preview;
-        overlay.Clear();
-        overlay.active = true;
-
-        Vec3i endpoint = _interaction.anchor.cell;
-        int end_face = _interaction.anchor.face_axis;
-        const simd::float2 hp = [self localFromWindow:_interaction.hover.window_point];
-        [self viewContext].ComputeLineEndpoint(
-            hp.x, hp.y, _interaction.anchor.mode, &endpoint, &end_face);
-        macvoxel::generators::Bounds3i b{
-            std::min(_interaction.anchor.cell.x, endpoint.x),
-            std::min(_interaction.anchor.cell.y, endpoint.y),
-            std::min(_interaction.anchor.cell.z, endpoint.z),
-            std::max(_interaction.anchor.cell.x, endpoint.x),
-            std::max(_interaction.anchor.cell.y, endpoint.y),
-            std::max(_interaction.anchor.cell.z, endpoint.z),
-        };
-        macvoxel::generators::Params p = _ctx->generator.params;
-        p.palette_idx = _ctx->tool.palette_idx;
-        std::vector<macvoxel::shapes::Vec3i> cells;
-        [_generatorEngine generateInto:cells
-                                  kind:_ctx->generator.active_kind
-                                bounds:b
-                                params:p];
-        [self stampGeneratorCellsToOverlay:cells mode:_interaction.anchor.mode];
-        // Keep gizmo state synced so drawGenGizmo sees the live bounds
-        // and the per-frame change-detector doesn't redundantly re-fire.
-        _interaction.gen_gizmo.bounds = b;
-        _interaction.gen_gizmo.last_kind = _ctx->generator.active_kind;
-        _interaction.gen_gizmo.last_bounds = b;
-        _interaction.gen_gizmo.last_params = p;
-    }
+    Vec3i endpoint = _interaction.anchor.cell;
+    int end_face = _interaction.anchor.face_axis;
+    const simd::float2 hp = [self localFromWindow:_interaction.hover.window_point];
+    [self viewContext].ComputeLineEndpoint(
+        hp.x, hp.y, _interaction.anchor.mode, &endpoint, &end_face);
+    macvoxel::generators::Bounds3i b{
+        std::min(_interaction.anchor.cell.x, endpoint.x),
+        std::min(_interaction.anchor.cell.y, endpoint.y),
+        std::min(_interaction.anchor.cell.z, endpoint.z),
+        std::max(_interaction.anchor.cell.x, endpoint.x),
+        std::max(_interaction.anchor.cell.y, endpoint.y),
+        std::max(_interaction.anchor.cell.z, endpoint.z),
+    };
+    macvoxel::generators::Params p = _ctx->generator.params;
+    p.palette_idx = _ctx->tool.palette_idx;
+    std::vector<macvoxel::shapes::Vec3i> cells;
+    [_generatorEngine generateInto:cells
+                              kind:_ctx->generator.active_kind
+                            bounds:b
+                            params:p];
+    [self stampGeneratorCellsToOverlay:cells mode:_interaction.anchor.mode];
+    // Keep gizmo state synced so drawGenGizmo sees the live bounds
+    // and the per-frame change-detector doesn't redundantly re-fire.
+    _interaction.gen_gizmo.bounds = b;
+    _interaction.gen_gizmo.last_kind = _ctx->generator.active_kind;
+    _interaction.gen_gizmo.last_bounds = b;
+    _interaction.gen_gizmo.last_params = p;
 }
 
 // ---------------------------------------------------------------------------
@@ -1938,253 +1882,6 @@ void GizmoFaceWorldGeom(const macvoxel::generators::Bounds3i& b, int face,
         else          b.z1 = std::max(b.z0, b.z1 + delta);
     }
     _interaction.gen_gizmo.bounds = b;
-}
-
-// ---------------------------------------------------------------------------
-// Face tool — click selects a coplanar same-color flood region whose face
-// on the clicked side is exposed; drag extrudes (positive, away from the
-// surface) or insets (negative, into the surface) by an integer number
-// of voxel layers along the face normal.
-// ---------------------------------------------------------------------------
-
-- (void)floodFaceFromCell:(Vec3i)seed
-                     axis:(int)axis sign:(int)sign
-                    color:(uint8_t)color
-        eightConnectivity:(BOOL)eightConn
-                   output:(std::vector<Vec3i>&)out {
-    out.clear();
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr) return;
-    macvoxel::shapes::FloodCoplanarFace(doc->grid, seed, axis, sign, color,
-                                        eightConn ? true : false, out);
-}
-
-// Apply the extrusion / inset / paint to the document. Routes writes
-// through the preview snapshot during DragMode::Shape (so each frame's
-// preview can be rolled back) and directly through EditHistory otherwise.
-//
-// Mode dispatch (mode is frozen at click in `_interaction.anchor.mode`):
-//   Add    — signed d. Positive extrudes; negative insets (erases).
-//            Extrude color comes from `face_with` (read live so the user
-//            can flip Geometry/Palette mid-drag and see the change).
-//   Remove — |d| layers, always inset (drag direction ignored).
-//   Paint  — |d| inward layers, repaint existing voxels with the palette
-//            color. Empty cells are skipped (Paint never fills).
-- (void)applyFaceExtrusion:(int)d {
-    if (d == 0 || _interaction.face.seed_cells.empty()) return;
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr) return;
-
-    int da[3] = {0, 0, 0};
-    da[_interaction.anchor.face_axis] = _interaction.face.sign;
-    macvoxel::PreviewOverlay& overlay = _ctx->preview;
-    auto write = [&](int x, int y, int z, uint8_t new_val) {
-        overlay.Stamp(x, y, z, new_val, doc->grid.Get(x, y, z));
-    };
-
-    const macvoxel::ToolSettings& tool = _ctx->tool;
-    const macvoxel::ToolMode mode = _interaction.anchor.mode;
-    const int n = std::abs(d);
-
-    if (mode == macvoxel::ToolMode::Add && d > 0) {
-        // Extrude outward: fill empty cells at offsets 1..d. Existing
-        // geometry isn't overwritten (avoids surprising data loss).
-        const BOOL with_geometry =
-            (tool.face_with == macvoxel::FaceWithColor::Geometry);
-        for (int k = 1; k <= d; ++k) {
-            for (const Vec3i& v : _interaction.face.seed_cells) {
-                const int x = v.x + k * da[0];
-                const int y = v.y + k * da[1];
-                const int z = v.z + k * da[2];
-                if (doc->grid.Get(x, y, z) != 0) continue;
-                const uint8_t color = with_geometry
-                    ? doc->grid.Get(v.x, v.y, v.z)  // source cell color
-                    : tool.palette_idx;
-                write(x, y, z, color);
-            }
-        }
-    } else if (mode == macvoxel::ToolMode::Add && d < 0) {
-        // Inset (Add with negative drag): erase the seed plane and walk
-        // |d| steps inward.
-        for (int k = 0; k < n; ++k) {
-            for (const Vec3i& v : _interaction.face.seed_cells) {
-                const int x = v.x - k * da[0];
-                const int y = v.y - k * da[1];
-                const int z = v.z - k * da[2];
-                write(x, y, z, 0);
-            }
-        }
-    } else if (mode == macvoxel::ToolMode::Remove) {
-        // Always inset, magnitude only — drag direction is ignored.
-        for (int k = 0; k < n; ++k) {
-            for (const Vec3i& v : _interaction.face.seed_cells) {
-                const int x = v.x - k * da[0];
-                const int y = v.y - k * da[1];
-                const int z = v.z - k * da[2];
-                write(x, y, z, 0);
-            }
-        }
-    } else if (mode == macvoxel::ToolMode::Paint) {
-        // Repaint existing voxels at the seed plane and |d|-1 layers in.
-        // Skips empty cells (Paint mode never fills).
-        for (int k = 0; k < n; ++k) {
-            for (const Vec3i& v : _interaction.face.seed_cells) {
-                const int x = v.x - k * da[0];
-                const int y = v.y - k * da[1];
-                const int z = v.z - k * da[2];
-                if (doc->grid.Get(x, y, z) != 0) {
-                    write(x, y, z, tool.palette_idx);
-                }
-            }
-        }
-    }
-    ++overlay.version;
-}
-
-// Apply or rollback a single Face-tool layer at `offset` along the face
-// normal. These are the incremental hot-path helpers used during the
-// live preview — they only touch one layer's worth of cells (seed_cells
-// many) instead of the full O(seed × |d|) the bulk applyFaceExtrusion:
-// would do. Both write to the PreviewOverlay; the doc grid is not
-// modified until commit.
-- (void)applyFaceLayerAtOffset:(int)offset {
-    macvoxel::Document* doc = &_ctx->document;
-    if (doc == nullptr) return;
-
-    int da[3] = {0, 0, 0};
-    da[_interaction.anchor.face_axis] = _interaction.face.sign;
-    const macvoxel::ToolSettings& tool = _ctx->tool;
-    const macvoxel::ToolMode mode = _interaction.anchor.mode;
-    macvoxel::PreviewOverlay& overlay = _ctx->preview;
-
-    for (const Vec3i& v : _interaction.face.seed_cells) {
-        const int x = v.x + offset * da[0];
-        const int y = v.y + offset * da[1];
-        const int z = v.z + offset * da[2];
-        const uint8_t old_val = doc->grid.Get(x, y, z);
-        if (mode == macvoxel::ToolMode::Add && offset > 0) {
-            if (old_val != 0) continue;
-            const uint8_t color =
-                (tool.face_with == macvoxel::FaceWithColor::Geometry)
-                    ? doc->grid.Get(v.x, v.y, v.z)
-                    : tool.palette_idx;
-            overlay.Stamp(x, y, z, color, old_val);
-        } else if (mode == macvoxel::ToolMode::Add && offset <= 0) {
-            overlay.Stamp(x, y, z, 0, old_val);
-        } else if (mode == macvoxel::ToolMode::Remove) {
-            overlay.Stamp(x, y, z, 0, old_val);
-        } else if (mode == macvoxel::ToolMode::Paint) {
-            if (old_val != 0) {
-                overlay.Stamp(x, y, z, tool.palette_idx, old_val);
-            }
-        }
-    }
-    ++overlay.version;
-}
-
-- (void)rollbackFaceLayerAtOffset:(int)offset {
-    int da[3] = {0, 0, 0};
-    da[_interaction.anchor.face_axis] = _interaction.face.sign;
-    macvoxel::PreviewOverlay& overlay = _ctx->preview;
-    for (const Vec3i& v : _interaction.face.seed_cells) {
-        const int x = v.x + offset * da[0];
-        const int y = v.y + offset * da[1];
-        const int z = v.z + offset * da[2];
-        overlay.ClearAt(x, y, z);
-    }
-    ++overlay.version;
-}
-
-// Move the Face preview from `_interaction.face.applied_d` to `new_d` by adding /
-// removing only the layers that differ. Falls back to a full rebuild
-// when the preview's "direction" flips (Add positive ↔ negative drag)
-// or `face_with` changes — those rarely happen during a drag, so the
-// full-rebuild fallback's O(seed × |d|) cost is acceptable there.
-//
-// For Remove/Paint, `new_d` is expected pre-normalized to a non-negative
-// magnitude (always inward), so a sign flip is impossible.
-- (void)transitionFaceTo:(int)new_d {
-    const macvoxel::ToolSettings& tool = _ctx->tool;
-    const macvoxel::ToolMode mode = _interaction.anchor.mode;
-
-    bool full_rebuild = false;
-    if (mode == macvoxel::ToolMode::Add) {
-        if (tool.face_with != _interaction.face.applied_with) full_rebuild = true;
-        if (_interaction.face.applied_d != 0 && new_d != 0 &&
-            ((_interaction.face.applied_d > 0) != (new_d > 0))) {
-            full_rebuild = true;
-        }
-    }
-    if (full_rebuild) {
-        // Drop the per-layer state so applyFaceExtrusion sees an empty
-        // canvas. Active is held — Face's overlay was activated once at
-        // mouseDown and stays live until commit/cancel.
-        macvoxel::PreviewOverlay& overlay = _ctx->preview;
-        overlay.additions.Clear();
-        overlay.removals.Clear();
-        ++overlay.version;
-        _interaction.face.applied_d = 0;
-        [self applyFaceExtrusion:new_d];
-        _interaction.face.applied_d = new_d;
-        _interaction.face.applied_with = tool.face_with;
-        return;
-    }
-
-    const int abs_old = std::abs(_interaction.face.applied_d);
-    const int abs_new = std::abs(new_d);
-    int dir_sign;  // +1 = outward (Add d>0), -1 = inward (Add d<0, Remove, Paint)
-    if (mode == macvoxel::ToolMode::Add) {
-        if (_interaction.face.applied_d == 0 && new_d == 0) return;
-        dir_sign = (_interaction.face.applied_d != 0 ? _interaction.face.applied_d : new_d) > 0 ? +1 : -1;
-    } else {
-        dir_sign = -1;
-    }
-    // Map a 0-based layer index to the offset along the face normal:
-    //   outward  (idx 0,1,2,...)  → offsets +1, +2, +3, ...
-    //   inward   (idx 0,1,2,...)  → offsets  0, -1, -2, ...
-    auto offset_for_idx = [dir_sign](int idx) {
-        return dir_sign > 0 ? idx + 1 : -idx;
-    };
-
-    if (abs_new > abs_old) {
-        for (int idx = abs_old; idx < abs_new; ++idx) {
-            [self applyFaceLayerAtOffset:offset_for_idx(idx)];
-        }
-    } else if (abs_new < abs_old) {
-        for (int idx = abs_old - 1; idx >= abs_new; --idx) {
-            [self rollbackFaceLayerAtOffset:offset_for_idx(idx)];
-        }
-    }
-    _interaction.face.applied_d = new_d;
-    _interaction.face.applied_with = tool.face_with;
-}
-
-- (void)commitFaceAtPoint:(NSPoint)windowPoint {
-    if (!_interaction.anchor.has_anchor) { _interaction.face.seed_cells.clear(); return; }
-    // Re-run the incremental preview to the cursor's release location
-    // so the overlay reflects the exact final state before commit. The
-    // last mouseDragged event isn't guaranteed to fire at the same point
-    // mouseUp arrives at — better to converge here than to ship one
-    // layer off.
-    const simd::float2 lp = [self localFromWindow:windowPoint];
-    int d = [self viewContext].FaceDragVoxels(
-        lp.x, lp.y, _interaction.anchor.cell,
-        _interaction.anchor.face_axis, _interaction.face.sign,
-        _interaction.anchor.screen_local.x,
-        _interaction.anchor.screen_local.y);
-    if (d != 0) _interaction.face.observed_drag = YES;
-    if (d == 0 && !_interaction.face.observed_drag) d = 1;
-    if (_interaction.anchor.mode == macvoxel::ToolMode::Remove ||
-        _interaction.anchor.mode == macvoxel::ToolMode::Paint) {
-        d = std::abs(d);
-    }
-    if (d != _interaction.face.applied_d ||
-        _ctx->tool.face_with != _interaction.face.applied_with) {
-        [self transitionFaceTo:d];
-    }
-    macvoxel::CommitPreviewOverlayThroughHistory(*_ctx);
-    _interaction.anchor.has_anchor = NO;
-    _interaction.face.seed_cells.clear();
 }
 
 @end

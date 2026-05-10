@@ -71,6 +71,7 @@ set(APP_SOURCES
     src/BoxSelectController.cpp
     src/BrushController.cpp
     src/BrushOps.cpp
+    src/FaceController.cpp
     src/FloodSelectController.cpp
     src/MarqueeController.cpp
     src/MoveSelectController.cpp
