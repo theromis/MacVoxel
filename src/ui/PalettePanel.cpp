@@ -1,5 +1,6 @@
 #include "PalettePanel.h"
 
+#include "../EditorContext.h"
 #include "Document.h"
 #include "EditHistory.h"
 #include "Palette.h"
@@ -50,9 +51,10 @@ int Clamp(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 
 }  // namespace
 
-void DrawPalettePanel(Document& doc) {
-    ToolSettings& tool = CurrentTool();
-    PanelState& panel = CurrentPanelState();
+void DrawPalettePanel(EditorContext& ctx) {
+    Document& doc = ctx.document;
+    ToolSettings& tool = ctx.tool;
+    PanelState& panel = ctx.panel;
 
     ImGui::SetNextWindowSize(ImVec2(220, 660), ImGuiCond_FirstUseEver);
     ImGui::Begin("Palette");
@@ -204,19 +206,19 @@ void DrawPalettePanel(Document& doc) {
         }
 
         if (ImGui::BeginPopup("palette_ctx")) {
-            const uint8_t ctx = panel.palette_context_slot;
+            const uint8_t ctx_slot = panel.palette_context_slot;
             const size_t n_sel = tool.selected_slots.count();
-            ImGui::TextDisabled("idx %u  (%zu selected)", ctx, n_sel);
+            ImGui::TextDisabled("idx %u  (%zu selected)", ctx_slot, n_sel);
             ImGui::Separator();
             if (ImGui::MenuItem("Copy color")) {
-                panel.color_clipboard.color = doc.palette.Get(ctx);
+                panel.color_clipboard.color = doc.palette.Get(ctx_slot);
                 panel.color_clipboard.has_value = true;
             }
             if (ImGui::MenuItem("Paste color", nullptr, false,
                                 panel.color_clipboard.has_value)) {
                 const Color c = panel.color_clipboard.color;
                 bool any = false;
-                EditHistory& hist = CurrentHistory();
+                EditHistory& hist = ctx.history;
                 hist.BeginOp();
                 for (int i = 1; i < 256; ++i) {
                     if (!tool.selected_slots.test(i)) continue;
@@ -256,12 +258,12 @@ void DrawPalettePanel(Document& doc) {
                         }
                     }
                 }
-                CurrentSelection().SetVoxels(std::move(matched));
+                ctx.selection.SetVoxels(std::move(matched));
             }
             // Paint operations need (a) a voxel selection to act on and
             // (b) the right number of palette slots selected — single
             // slot for the solid paint, multiple for the random pick.
-            const Selection& sel_view = CurrentSelection();
+            const Selection& sel_view = ctx.selection;
             const bool has_voxel_sel = sel_view.active() && !sel_view.empty();
             // Collect selected slot indices once; reused by both paint
             // variants below.
@@ -273,8 +275,8 @@ void DrawPalettePanel(Document& doc) {
             }
 
             auto paint_each = [&](auto&& choose) {
-                const Selection& sel = CurrentSelection();
-                EditHistory& hist = CurrentHistory();
+                const Selection& sel = ctx.selection;
+                EditHistory& hist = ctx.history;
                 hist.BeginOp();
                 bool any = false;
                 for (const auto& v : sel.voxels()) {
@@ -327,7 +329,7 @@ void DrawPalettePanel(Document& doc) {
                 const Color c1 = doc.palette.Get(static_cast<uint8_t>(g_hi));
                 const float span = static_cast<float>(g_hi - g_lo);
                 bool any = false;
-                EditHistory& hist = CurrentHistory();
+                EditHistory& hist = ctx.history;
                 hist.BeginOp();
                 for (int i = g_lo + 1; i < g_hi; ++i) {
                     if (!tool.selected_slots.test(i)) continue;
@@ -379,7 +381,7 @@ void DrawPalettePanel(Document& doc) {
             nc.b = static_cast<uint8_t>(rgba[2] * 255.0f + 0.5f);
             nc.a = static_cast<uint8_t>(rgba[3] * 255.0f + 0.5f);
             if (!(nc == c)) {
-                EditHistory& hist = CurrentHistory();
+                EditHistory& hist = ctx.history;
                 if (!ce.drag || ce.pre_idx != idx) {
                     // Either a fresh drag, or the user switched the
                     // active palette index mid-gesture (rare, but the
@@ -396,7 +398,7 @@ void DrawPalettePanel(Document& doc) {
             }
         }
         if (ce.drag && !changed && !ImGui::IsAnyItemActive()) {
-            CurrentHistory().CommitOp();
+            ctx.history.CommitOp();
             ce.drag = false;
         }
     }

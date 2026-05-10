@@ -4,7 +4,7 @@
 
 #include <simd/simd.h>
 
-namespace macvoxel { struct Document; }
+namespace macvoxel { struct EditorContext; }
 
 // GPU ray-cast renderer. For each pixel of a fullscreen triangle, the
 // fragment shader marches a ray (3D DDA) through a sparse representation
@@ -31,7 +31,7 @@ namespace macvoxel { struct Document; }
                      view:(simd::float4x4)view
                projection:(simd::float4x4)projection
               cameraWorld:(simd::float3)cameraWorld
-                 document:(macvoxel::Document*)doc;
+                  context:(macvoxel::EditorContext*)ctx;
 
 - (uint32_t)lastChunkCount;
 

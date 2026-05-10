@@ -109,7 +109,4 @@ struct RenderProgress {
     uint32_t sample_count = 0;  // current accumulated samples
 };
 
-RenderSettings& CurrentRenderSettings();
-RenderProgress& CurrentRenderProgress();
-
 }  // namespace macvoxel

@@ -55,8 +55,7 @@ struct EditOp {
     std::optional<Selection> post_select;
 };
 
-// Singleton history; edits and the Edit > Undo/Redo menu both reach for
-// CurrentHistory(). Bounded to ~100 operations so a long session doesn't
+// Edit history. Bounded to ~100 operations so a long session doesn't
 // accumulate unbounded RAM.
 class EditHistory {
 public:
@@ -110,7 +109,5 @@ private:
     std::array<int16_t, 256> material_slot_index_{};  // -1 = absent
     bool in_op_ = false;
 };
-
-EditHistory& CurrentHistory();
 
 }  // namespace macvoxel

@@ -78,6 +78,4 @@ private:
     void RecomputeBounds();
 };
 
-Selection& CurrentSelection();
-
 }  // namespace macvoxel

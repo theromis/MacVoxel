@@ -117,9 +117,4 @@ void Selection::RecomputeBounds() {
     bounds_.min_z = bzmin; bounds_.max_z = bzmax;
 }
 
-Selection& CurrentSelection() {
-    static Selection s;
-    return s;
-}
-
 }  // namespace macvoxel

@@ -2,7 +2,7 @@
 
 namespace macvoxel {
 
-struct Document;
+struct EditorContext;
 
 enum class Axis { X, Y, Z };
 
@@ -13,10 +13,10 @@ enum class Axis { X, Y, Z };
 // dimensions on the in-plane axes the result can shift by half a
 // voxel because that's what the integer lattice forces. Single
 // EditHistory op so undo restores both the grid and the marquee.
-void RotateSelection(Document& doc, Axis axis, bool cw);
+void RotateSelection(EditorContext& ctx, Axis axis, bool cw);
 
 // Mirror the active selection across the plane perpendicular to the
 // named axis through the selection AABB center. Single EditHistory op.
-void FlipSelection(Document& doc, Axis axis);
+void FlipSelection(EditorContext& ctx, Axis axis);
 
 }  // namespace macvoxel

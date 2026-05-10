@@ -66,6 +66,4 @@ struct FloatingBuffer {
     bool empty() const { return !active || grid.empty(); }
 };
 
-FloatingBuffer& CurrentFloatingBuffer();
-
 }  // namespace macvoxel

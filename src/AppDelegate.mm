@@ -8,18 +8,20 @@
 #include "Clipboard.h"
 #include "Document.h"
 #include "EditHistory.h"
+#include "EditorContext.h"
 #include "FloatingBuffer.h"
 #include "FloatingBufferOps.h"
+#include "PanelState.h"
 #include "Selection.h"
 #include "VoxFile.h"
 #include "ui/ModelPanel.h"
 
 @implementation AppDelegate {
-    std::unique_ptr<macvoxel::Document> _doc;
+    std::unique_ptr<macvoxel::EditorContext> _ctx;
 }
 
-- (macvoxel::Document*)document {
-    return _doc.get();
+- (macvoxel::EditorContext*)context {
+    return _ctx.get();
 }
 
 // ---------------------------------------------------------------------------
@@ -29,12 +31,12 @@
 // Document setup runs in willFinishLaunching: so it's complete before
 // AppKit dispatches application:openURLs: for files passed at cold-
 // launch (Finder Open With, drag-onto-icon). Without this split, the
-// open-URL fired before _doc existed, openDocumentAtURL: bailed, and
+// open-URL fired before _ctx existed, openDocumentAtURL: bailed, and
 // the user got default.vox instead of the file they asked for.
 - (void)applicationWillFinishLaunching:(NSNotification*)__unused notification {
-    _doc = std::make_unique<macvoxel::Document>();
+    _ctx = std::make_unique<macvoxel::EditorContext>();
     [self seedDocumentFromDefault];
-    _doc->BumpAll();
+    _ctx->document.BumpAll();
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)__unused notification {
@@ -51,21 +53,22 @@
 // single seed voxel if the bundle is missing the resource (development
 // builds, or a corrupted .app).
 - (void)seedDocumentFromDefault {
+    macvoxel::Document& doc = _ctx->document;
     NSString* path = [[NSBundle mainBundle] pathForResource:@"default"
                                                      ofType:@"vox"];
     if (path != nil) {
         const std::string p = [path UTF8String];
         std::string err;
-        if (macvoxel::LoadVox(p, &_doc->grid, &_doc->palette, &err)) {
+        if (macvoxel::LoadVox(p, &doc.grid, &doc.palette, &err)) {
             return;
         }
         fprintf(stderr,
                 "MacVoxel: failed to load bundled default.vox (%s); "
                 "falling back to single-voxel seed\n", err.c_str());
     }
-    _doc->grid.Clear();
-    _doc->grid.Set(0, 0, 0, 1);
-    _doc->palette.ResetToDefault();
+    doc.grid.Clear();
+    doc.grid.Set(0, 0, 0, 1);
+    doc.palette.ResetToDefault();
 }
 
 - (void)frameCameraIfPossible {
@@ -274,7 +277,8 @@
 }
 
 - (IBAction)toggleImGuiDemo:(id)__unused sender {
-    macvoxel::ToggleImGuiDemoWindow();
+    bool& flag = _ctx->panel.show_imgui_demo;
+    flag = !flag;
 }
 
 - (NSMenuItem*)buildWindowMenuItem {
@@ -300,11 +304,12 @@
 // ---------------------------------------------------------------------------
 
 - (void)updateWindowTitle {
-    if (_doc->path.empty()) {
+    macvoxel::Document& doc = _ctx->document;
+    if (doc.path.empty()) {
         [self.window setTitle:@"MacVoxel — Untitled"];
         [self.window setRepresentedFilename:@""];
     } else {
-        NSString* p = [NSString stringWithUTF8String:_doc->path.c_str()];
+        NSString* p = [NSString stringWithUTF8String:doc.path.c_str()];
         [self.window setTitleWithRepresentedFilename:p];
     }
 }
@@ -324,15 +329,16 @@
 }
 
 - (IBAction)newDocument:(id)__unused sender {
-    // The floating buffer references _doc via its grid storage; tearing
-    // _doc out from under it would leave a stale singleton. Discard
+    macvoxel::Document& doc = _ctx->document;
+    // The floating buffer references the doc via its grid storage; tearing
+    // doc out from under it would leave a stale buffer. Discard
     // unconditionally: the about-to-be-replaced document doesn't
     // benefit from a commit either.
-    macvoxel::DiscardFloatingBuffer();
+    macvoxel::DiscardFloatingBuffer(*_ctx);
     [self seedDocumentFromDefault];
-    _doc->path.clear();
-    _doc->BumpAll();
-    macvoxel::CurrentHistory().Clear();
+    doc.path.clear();
+    doc.BumpAll();
+    _ctx->history.Clear();
     [self invalidateRenderersIfPossible];
     [self updateWindowTitle];
     [self frameCameraIfPossible];
@@ -354,8 +360,8 @@
 // time around — the framework persists the URL list across launches
 // for free.
 - (BOOL)openDocumentAtURL:(NSURL*)url {
-    if (url == nil || _doc == nullptr) return NO;
-    macvoxel::DiscardFloatingBuffer();
+    if (url == nil || _ctx == nullptr) return NO;
+    macvoxel::DiscardFloatingBuffer(*_ctx);
     const std::string path = [[url path] UTF8String];
     macvoxel::Document fresh;
     std::string err;
@@ -365,13 +371,14 @@
         return NO;
     }
     fresh.path = path;
-    *_doc = std::move(fresh);
+    macvoxel::Document& doc = _ctx->document;
+    doc = std::move(fresh);
     // BumpAll after the move so the renderers' typed-version caches all
     // disagree with the new doc and re-upload their respective buffers.
     // The path tracer's `invalidate` only restarts accumulation; the
     // version bump is what forces a fresh resource rebuild there.
-    _doc->BumpAll();
-    macvoxel::CurrentHistory().Clear();
+    doc.BumpAll();
+    _ctx->history.Clear();
     [self invalidateRenderersIfPossible];
     [self updateWindowTitle];
     [self frameCameraIfPossible];
@@ -390,18 +397,19 @@
 }
 
 - (IBAction)saveDocument:(id)sender {
-    if (_doc->path.empty()) {
+    macvoxel::Document& doc = _ctx->document;
+    if (doc.path.empty()) {
         [self saveDocumentAs:sender];
         return;
     }
     // Drop the floating buffer onto the doc before serialising — the
     // user expects "save" to capture what's on screen, including any
     // mid-drag paste or move that hasn't been explicitly committed.
-    if (macvoxel::CurrentFloatingBuffer().active) {
-        macvoxel::CommitFloatingBuffer(*_doc);
+    if (_ctx->floating_buffer.active) {
+        macvoxel::CommitFloatingBuffer(*_ctx);
     }
     std::string err;
-    if (!macvoxel::SaveVox(_doc->path, _doc->grid, _doc->palette, &err)) {
+    if (!macvoxel::SaveVox(doc.path, doc.grid, doc.palette, &err)) {
         [self showAlertTitle:@"Save Failed"
                      message:[NSString stringWithUTF8String:err.c_str()]];
     }
@@ -415,25 +423,27 @@
     NSURL* url = panel.URL;
     if (url == nil) return;
 
-    if (macvoxel::CurrentFloatingBuffer().active) {
-        macvoxel::CommitFloatingBuffer(*_doc);
+    macvoxel::Document& doc = _ctx->document;
+    if (_ctx->floating_buffer.active) {
+        macvoxel::CommitFloatingBuffer(*_ctx);
     }
     const std::string path = [[url path] UTF8String];
     std::string err;
-    if (!macvoxel::SaveVox(path, _doc->grid, _doc->palette, &err)) {
+    if (!macvoxel::SaveVox(path, doc.grid, doc.palette, &err)) {
         [self showAlertTitle:@"Save Failed"
                      message:[NSString stringWithUTF8String:err.c_str()]];
         return;
     }
-    _doc->path = path;
+    doc.path = path;
     [self updateWindowTitle];
     [[NSDocumentController sharedDocumentController]
         noteNewRecentDocumentURL:url];
 }
 
 - (IBAction)undo:(id)__unused sender {
-    if (_doc == nullptr) return;
-    macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    if (_ctx == nullptr) return;
+    macvoxel::Document& doc = _ctx->document;
+    macvoxel::FloatingBuffer& fb = _ctx->floating_buffer;
     if (fb.active) {
         // Undo while floating cancels the whole move-in-progress: the
         // lift didn't push an EditOp (we fold lift+drag+commit into a
@@ -441,47 +451,47 @@
         // buffer's stored source snapshot and pop nothing from history.
         // Paste-style buffers have no source cells to restore — the
         // discard is the entire revert.
-        macvoxel::CancelFloatingLift(*_doc);
-        _doc->BumpGeometry();
+        macvoxel::CancelFloatingLift(*_ctx);
+        doc.BumpGeometry();
         return;
     }
     // Undo/Redo bump the matching typed counters internally — caller
     // doesn't need to know which categories the op touched.
-    macvoxel::CurrentHistory().Undo(*_doc, &macvoxel::CurrentSelection());
+    _ctx->history.Undo(doc, &_ctx->selection);
 }
 
 - (IBAction)redo:(id)__unused sender {
-    if (_doc == nullptr) return;
-    macvoxel::CurrentHistory().Redo(*_doc, &macvoxel::CurrentSelection());
+    if (_ctx == nullptr) return;
+    _ctx->history.Redo(_ctx->document, &_ctx->selection);
 }
 
 // Grey items when their preconditions aren't met — standard Mac UX.
 - (BOOL)validateMenuItem:(NSMenuItem*)item {
     const SEL action = item.action;
     if (action == @selector(undo:)) {
-        return macvoxel::CurrentHistory().CanUndo();
+        return _ctx->history.CanUndo();
     }
     if (action == @selector(redo:)) {
-        return macvoxel::CurrentHistory().CanRedo();
+        return _ctx->history.CanRedo();
     }
     if (action == @selector(cut:) || action == @selector(copy:) ||
         action == @selector(deleteSelection:)) {
         // Enabled if there's anything selected — either a doc-side
         // sparse selection or a floating buffer (the floating buffer
         // is the active selection while it's alive).
-        const macvoxel::Selection& sel = macvoxel::CurrentSelection();
-        const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+        const macvoxel::Selection& sel = _ctx->selection;
+        const macvoxel::FloatingBuffer& fb = _ctx->floating_buffer;
         if (fb.active && !fb.grid.empty()) return YES;
         return sel.active() && !sel.empty();
     }
     if (action == @selector(deselect:)) {
         // Deselect just commits the floating buffer (if any) and
         // clears the marquee — fine whenever there's anything to drop.
-        return macvoxel::CurrentSelection().active() ||
-               macvoxel::CurrentFloatingBuffer().active;
+        return _ctx->selection.active() ||
+               _ctx->floating_buffer.active;
     }
     if (action == @selector(paste:)) {
-        return !macvoxel::CurrentClipboard().empty();
+        return !_ctx->clipboard.empty();
     }
     return YES;
 }
@@ -490,13 +500,14 @@
 // Selection-aware Edit menu actions. Selection bounds drive what gets
 // copied/cut/deleted; paste lands at the current selection's min corner
 // (or origin if there's no selection). All cell-modifying paths go
-// through CurrentHistory so they're undoable.
+// through ctx->history so they're undoable.
 // ---------------------------------------------------------------------------
 
 - (IBAction)copy:(id)__unused sender {
-    if (_doc == nullptr) return;
-    macvoxel::Clipboard& cb = macvoxel::CurrentClipboard();
-    macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    if (_ctx == nullptr) return;
+    macvoxel::Document& doc = _ctx->document;
+    macvoxel::Clipboard& cb = _ctx->clipboard;
+    macvoxel::FloatingBuffer& fb = _ctx->floating_buffer;
 
     if (fb.active && !fb.grid.empty()) {
         // Floating selection: serialize the buffer's cells (with offset
@@ -534,7 +545,7 @@
         return;
     }
 
-    const macvoxel::Selection& sel = macvoxel::CurrentSelection();
+    const macvoxel::Selection& sel = _ctx->selection;
     if (!sel.active() || sel.empty()) return;
     const macvoxel::Bounds3& sb = sel.bounds();
     cb.origin_x = sb.min_x;
@@ -548,7 +559,7 @@
         const uint32_t lx = static_cast<uint32_t>(v[0] - sb.min_x);
         const uint32_t ly = static_cast<uint32_t>(v[1] - sb.min_y);
         const uint32_t lz = static_cast<uint32_t>(v[2] - sb.min_z);
-        cb.cells[cb.LinearIndex(lx, ly, lz)] = _doc->grid.Get(v[0], v[1], v[2]);
+        cb.cells[cb.LinearIndex(lx, ly, lz)] = doc.grid.Get(v[0], v[1], v[2]);
     }
 }
 
@@ -558,41 +569,43 @@
 }
 
 - (IBAction)deleteSelection:(id)__unused sender {
-    if (_doc == nullptr) return;
-    macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
+    if (_ctx == nullptr) return;
+    macvoxel::Document& doc = _ctx->document;
+    macvoxel::FloatingBuffer& fb = _ctx->floating_buffer;
     if (fb.active) {
         // Floating cells aren't on the document yet — discarding the
         // buffer IS the delete. (The lift that produced this buffer
         // remains on the undo stack; one more Cmd-Z restores the
         // pre-lift state.)
-        macvoxel::DiscardFloatingBuffer();
-        _doc->BumpGeometry();
+        macvoxel::DiscardFloatingBuffer(*_ctx);
+        doc.BumpGeometry();
         return;
     }
-    const macvoxel::Selection& sel = macvoxel::CurrentSelection();
+    const macvoxel::Selection& sel = _ctx->selection;
     if (!sel.active() || sel.empty()) return;
-    macvoxel::EditHistory& history = macvoxel::CurrentHistory();
+    macvoxel::EditHistory& history = _ctx->history;
     history.BeginOp();
     for (const auto& v : sel.voxels()) {
-        const uint8_t old = _doc->grid.Get(v[0], v[1], v[2]);
+        const uint8_t old = doc.grid.Get(v[0], v[1], v[2]);
         if (old != 0) {
-            _doc->grid.Set(v[0], v[1], v[2], 0);
+            doc.grid.Set(v[0], v[1], v[2], 0);
             history.Record(v[0], v[1], v[2], old, 0);
         }
     }
     history.CommitOp();
-    _doc->BumpGeometry();
+    doc.BumpGeometry();
 }
 
 - (IBAction)paste:(id)__unused sender {
-    if (_doc == nullptr) return;
-    const macvoxel::Clipboard& cb = macvoxel::CurrentClipboard();
+    if (_ctx == nullptr) return;
+    macvoxel::Document& doc = _ctx->document;
+    const macvoxel::Clipboard& cb = _ctx->clipboard;
     if (cb.empty()) return;
 
     // Whatever's already floating gets dropped first — the new paste
     // stages a fresh buffer.
-    if (macvoxel::CurrentFloatingBuffer().active) {
-        macvoxel::CommitFloatingBuffer(*_doc);
+    if (_ctx->floating_buffer.active) {
+        macvoxel::CommitFloatingBuffer(*_ctx);
     }
 
     // Paste in place: land at the clipboard's recorded source origin.
@@ -600,19 +613,19 @@
     // the paste stages into the floating buffer rather than writing
     // to doc.grid; user can drag the buffer to a new position before
     // committing.
-    macvoxel::LiftClipboardToFloating(*_doc, cb,
+    macvoxel::LiftClipboardToFloating(*_ctx, cb,
                                       cb.origin_x, cb.origin_y, cb.origin_z);
-    _doc->BumpGeometry();
+    doc.BumpGeometry();
 }
 
 - (IBAction)deselect:(id)__unused sender {
     // "Done with this selection" — drop any floating buffer onto the
     // document (the user expects the dragged paste / move to be a
     // permanent edit) and only then clear the selection.
-    if (_doc != nullptr && macvoxel::CurrentFloatingBuffer().active) {
-        macvoxel::CommitFloatingBuffer(*_doc);
+    if (_ctx != nullptr && _ctx->floating_buffer.active) {
+        macvoxel::CommitFloatingBuffer(*_ctx);
     }
-    macvoxel::CurrentSelection().Clear();
+    _ctx->selection.Clear();
 }
 
 @end

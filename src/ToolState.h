@@ -112,9 +112,4 @@ struct ToolSettings {
     std::bitset<256> selected_slots{};
 };
 
-// Single global tool state — single-document app, single shared tool config.
-// If we ever grow into multi-document or multi-view, this becomes a member
-// of whichever object owns "current tool".
-ToolSettings& CurrentTool();
-
 }  // namespace macvoxel

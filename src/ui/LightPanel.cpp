@@ -1,5 +1,6 @@
 #include "LightPanel.h"
 
+#include "../EditorContext.h"
 #include "Fonts.h"
 #include "RenderState.h"
 
@@ -7,11 +8,11 @@
 
 namespace macvoxel {
 
-void DrawLightPanel() {
+void DrawLightPanel(EditorContext& ctx) {
     ImGui::SetNextWindowSize(ImVec2(280, 200), ImGuiCond_FirstUseEver);
     ImGui::Begin("Light");
 
-    RenderSettings& rs = CurrentRenderSettings();
+    RenderSettings& rs = ctx.render_settings;
 
     ImGui::PushFont(Fonts().header);
     ImGui::TextUnformatted("Path tracing");

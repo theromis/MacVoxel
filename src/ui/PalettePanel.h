@@ -2,7 +2,7 @@
 
 namespace macvoxel {
 
-struct Document;
+struct EditorContext;
 
 // Combined palette selector + active-entry editor.
 //
@@ -10,8 +10,8 @@ struct Document;
 // index (read by every editing tool via ToolSettings).
 // Bottom half: color and material attributes for the active entry.
 //
-// All edits write through to doc.palette and bump doc.version so the
-// renderer's palette-signature check uploads the new colors.
-void DrawPalettePanel(Document& doc);
+// All edits write through to ctx.document.palette and bump version so
+// the renderer's palette-signature check uploads the new colors.
+void DrawPalettePanel(EditorContext& ctx);
 
 }  // namespace macvoxel

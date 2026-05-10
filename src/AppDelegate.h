@@ -2,14 +2,14 @@
 
 #import <Cocoa/Cocoa.h>
 
-namespace macvoxel { struct Document; }
+namespace macvoxel { struct EditorContext; }
 
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property(nonatomic, strong) NSWindow* window;
 
-// Opaque pointer for views/panels that need to read or display the
-// current document. Lifetime is the AppDelegate's; never null after
-// applicationDidFinishLaunching: returns.
-- (macvoxel::Document*)document;
+// Owned editor context — single-document app, single instance for the
+// app's lifetime. Views, panels, and edit ops receive it by pointer
+// from here. Never null after applicationWillFinishLaunching: returns.
+- (macvoxel::EditorContext*)context;
 
 @end

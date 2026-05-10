@@ -2,6 +2,8 @@
 
 namespace macvoxel {
 
-void DrawGeneratorPanel();
+struct EditorContext;
+
+void DrawGeneratorPanel(EditorContext& ctx);
 
 }  // namespace macvoxel

@@ -74,6 +74,4 @@ struct PreviewOverlay {
     }
 };
 
-PreviewOverlay& CurrentPreview();
-
 }  // namespace macvoxel

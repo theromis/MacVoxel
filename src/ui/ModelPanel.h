@@ -5,16 +5,13 @@
 
 namespace macvoxel {
 
-struct Document;
+struct EditorContext;
 
 struct RenderStats {
     uint32_t chunk_count = 0;
     size_t gpu_bytes = 0;
 };
 
-void DrawModelPanel(const Document& doc, const RenderStats& stats);
-
-// Toggles the ImGui demo window. Wired to View > Show ImGui Demo (Cmd+D).
-void ToggleImGuiDemoWindow();
+void DrawModelPanel(EditorContext& ctx, const RenderStats& stats);
 
 }  // namespace macvoxel

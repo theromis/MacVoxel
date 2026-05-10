@@ -1,5 +1,6 @@
 #include "ToolPanel.h"
 
+#include "../EditorContext.h"
 #include "Icons.h"
 #include "ToolState.h"
 
@@ -25,8 +26,8 @@ void AccentButtonColors(bool active) {
 
 }  // namespace
 
-void DrawToolPanel() {
-    ToolSettings& t = CurrentTool();
+void DrawToolPanel(EditorContext& ctx) {
+    ToolSettings& t = ctx.tool;
 
     ImGui::SetNextWindowSize(ImVec2(260, 260), ImGuiCond_FirstUseEver);
     ImGui::Begin("Tool");

@@ -164,9 +164,4 @@ void EditHistory::Clear() {
     in_op_ = false;
 }
 
-EditHistory& CurrentHistory() {
-    static EditHistory s;
-    return s;
-}
-
 }  // namespace macvoxel

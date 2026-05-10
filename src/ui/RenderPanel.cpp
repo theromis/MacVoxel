@@ -1,5 +1,6 @@
 #include "RenderPanel.h"
 
+#include "../EditorContext.h"
 #include "Document.h"
 #include "EditHistory.h"
 #include "Fonts.h"
@@ -28,19 +29,20 @@ const char* TypeName(MaterialType t) {
 }
 }  // namespace
 
-bool ConsumeSaveRenderClick() {
-    bool& flag = CurrentPanelState().save_render_clicked;
+bool ConsumeSaveRenderClick(EditorContext& ctx) {
+    bool& flag = ctx.panel.save_render_clicked;
     const bool was = flag;
     flag = false;
     return was;
 }
 
-void DrawRenderPanel(Document& doc, const RenderStats& stats) {
+void DrawRenderPanel(EditorContext& ctx, const RenderStats& stats) {
+    Document& doc = ctx.document;
     ImGui::SetNextWindowSize(ImVec2(280, 240), ImGuiCond_FirstUseEver);
     ImGui::Begin("Render");
 
-    RenderSettings& rs = CurrentRenderSettings();
-    const RenderProgress& rp = CurrentRenderProgress();
+    RenderSettings& rs = ctx.render_settings;
+    const RenderProgress& rp = ctx.render_progress;
 
     ImGui::PushFont(Fonts().header);
     ImGui::TextUnformatted("Mode");
@@ -96,7 +98,7 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
         const bool can_save = rp.sample_count > 0;
         ImGui::BeginDisabled(!can_save);
         if (ImGui::Button("Save render…")) {
-            CurrentPanelState().save_render_clicked = true;
+            ctx.panel.save_render_clicked = true;
         }
         ImGui::EndDisabled();
     }
@@ -115,7 +117,7 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
     ImGui::PopFont();
     ImGui::Indent();
     {
-        ToolSettings& tool = CurrentTool();
+        ToolSettings& tool = ctx.tool;
         const uint8_t idx = tool.palette_idx;
         const size_t sel_count = tool.selected_slots.count();
         if (sel_count > 1) {
@@ -165,10 +167,10 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
         // which point we commit. State lives on PanelState so a future
         // SwiftUI port has a real owner; doc reload calls
         // History.Clear() which is harmless here.
-        auto& me = CurrentPanelState().material_edit;
+        auto& me = ctx.panel.material_edit;
 
         if (dirty) {
-            EditHistory& hist = CurrentHistory();
+            EditHistory& hist = ctx.history;
             if (!me.drag) {
                 me.drag = true;
                 for (auto& v : me.pre) v.reset();
@@ -202,7 +204,7 @@ void DrawRenderPanel(Document& doc, const RenderStats& stats) {
         // there was no value change this frame. Close the op so the
         // next gesture starts a fresh undo step.
         if (me.drag && !dirty && !ImGui::IsAnyItemActive()) {
-            CurrentHistory().CommitOp();
+            ctx.history.CommitOp();
             me.drag = false;
         }
     }

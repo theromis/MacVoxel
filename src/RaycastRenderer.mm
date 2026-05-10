@@ -1,5 +1,7 @@
 #import "RaycastRenderer.h"
 
+#include "EditorContext.h"
+
 #import <cstdio>
 #include <array>
 #include <cstdint>
@@ -800,8 +802,9 @@ fragment float4 raycast_fragment(
                      view:(simd::float4x4)view
                projection:(simd::float4x4)projection
               cameraWorld:(simd::float3)cameraWorld
-                 document:(macvoxel::Document*)doc {
-    if (doc == nullptr) return;
+                  context:(macvoxel::EditorContext*)ctx {
+    if (ctx == nullptr) return;
+    macvoxel::Document* doc = &ctx->document;
     if (!_cacheValid || _cachedGeometryVersion != doc->geometry_version) {
         [self updateGeometryFromDocument:doc];
     }
@@ -821,8 +824,8 @@ fragment float4 raycast_fragment(
     // (shape/face/generator preview) are mutually exclusive at the gesture
     // level, so they share one slot — the source tag tracks which one
     // last filled it so a switch invalidates the cache cleanly.
-    const macvoxel::FloatingBuffer& fb = macvoxel::CurrentFloatingBuffer();
-    const macvoxel::PreviewOverlay& prev = macvoxel::CurrentPreview();
+    const macvoxel::FloatingBuffer& fb = ctx->floating_buffer;
+    const macvoxel::PreviewOverlay& prev = ctx->preview;
     const OverlaySource active_source =
         fb.active ? OverlaySource::FloatingBuffer
         : (prev.active ? OverlaySource::Preview : OverlaySource::None);

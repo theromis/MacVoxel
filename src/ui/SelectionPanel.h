@@ -2,8 +2,8 @@
 
 namespace macvoxel {
 
-struct Document;
+struct EditorContext;
 
-void DrawSelectionPanel(Document& doc);
+void DrawSelectionPanel(EditorContext& ctx);
 
 }  // namespace macvoxel

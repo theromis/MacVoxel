@@ -31,6 +31,4 @@ struct Clipboard {
     }
 };
 
-Clipboard& CurrentClipboard();
-
 }  // namespace macvoxel

@@ -4,19 +4,20 @@
 #include "Clipboard.h"
 #include "Document.h"
 #include "EditHistory.h"
+#include "EditorContext.h"
 #include "FloatingBuffer.h"
 #include "Selection.h"
 
-#include <algorithm>
 #include <unordered_map>
 #include <vector>
 
 namespace macvoxel {
 
-void LiftSelectionToFloating(Document& doc) {
-    Selection& sel = CurrentSelection();
+void LiftSelectionToFloating(EditorContext& ctx) {
+    Document& doc = ctx.document;
+    Selection& sel = ctx.selection;
     if (!sel.active() || sel.empty()) return;
-    FloatingBuffer& fb = CurrentFloatingBuffer();
+    FloatingBuffer& fb = ctx.floating_buffer;
     if (fb.active) return;  // caller must commit / discard first
 
     // Snapshot palettes BEFORE touching the doc grid (a stale selection
@@ -51,8 +52,9 @@ void LiftSelectionToFloating(Document& doc) {
     doc.BumpGeometry();
 }
 
-void CommitFloatingBuffer(Document& doc) {
-    FloatingBuffer& fb = CurrentFloatingBuffer();
+void CommitFloatingBuffer(EditorContext& ctx) {
+    Document& doc = ctx.document;
+    FloatingBuffer& fb = ctx.floating_buffer;
     if (!fb.active) return;
 
     // Build the pre-lift → post-commit delta as a single EditOp.
@@ -106,8 +108,8 @@ void CommitFloatingBuffer(Document& doc) {
     }
 
     // Apply to doc and emit one EditOp.
-    EditHistory& hist = CurrentHistory();
-    Selection& sel = CurrentSelection();
+    EditHistory& hist = ctx.history;
+    Selection& sel = ctx.selection;
     hist.BeginOp();
     if (fb.originated_from_lift) {
         hist.RecordSelectionPre(fb.pre_lift_sel);
@@ -142,8 +144,9 @@ void CommitFloatingBuffer(Document& doc) {
     doc.BumpGeometry();
 }
 
-void CancelFloatingLift(Document& doc) {
-    FloatingBuffer& fb = CurrentFloatingBuffer();
+void CancelFloatingLift(EditorContext& ctx) {
+    Document& doc = ctx.document;
+    FloatingBuffer& fb = ctx.floating_buffer;
     if (!fb.active) return;
     if (fb.originated_from_lift) {
         // Put the cleared source cells back exactly as they were and
@@ -152,21 +155,22 @@ void CancelFloatingLift(Document& doc) {
         for (const auto& [c, pal] : fb.source_originals) {
             doc.grid.Set(c[0], c[1], c[2], pal);
         }
-        CurrentSelection() = fb.pre_lift_sel;
+        ctx.selection = fb.pre_lift_sel;
     } else {
         // Paste-style: just discard, leaving doc untouched. Selection
         // gets cleared too since the pasted cells were the only thing
         // it referenced.
-        CurrentSelection().Clear();
+        ctx.selection.Clear();
     }
     fb.Clear();
     doc.BumpGeometry();
 }
 
-void ResampleFloatingBuffer(const VoxelGrid& src,
+void ResampleFloatingBuffer(EditorContext& ctx,
+                            const VoxelGrid& src,
                             const Bounds3& src_bounds,
                             const Bounds3& new_bounds) {
-    FloatingBuffer& fb = CurrentFloatingBuffer();
+    FloatingBuffer& fb = ctx.floating_buffer;
     fb.grid.Clear();
     if (src_bounds.empty() || new_bounds.empty()) return;
 
@@ -201,20 +205,20 @@ void ResampleFloatingBuffer(const VoxelGrid& src,
     }
 }
 
-void DiscardFloatingBuffer() {
-    FloatingBuffer& fb = CurrentFloatingBuffer();
+void DiscardFloatingBuffer(EditorContext& ctx) {
+    FloatingBuffer& fb = ctx.floating_buffer;
     if (!fb.active) return;
-    CurrentSelection().Clear();
+    ctx.selection.Clear();
     fb.Clear();
 }
 
-void LiftClipboardToFloating(Document& /*doc*/,
+void LiftClipboardToFloating(EditorContext& ctx,
                              const Clipboard& cb,
                              int32_t origin_x,
                              int32_t origin_y,
                              int32_t origin_z) {
     if (cb.empty()) return;
-    FloatingBuffer& fb = CurrentFloatingBuffer();
+    FloatingBuffer& fb = ctx.floating_buffer;
     if (fb.active) return;  // caller must commit / discard first
 
     fb.grid.Clear();
@@ -241,7 +245,7 @@ void LiftClipboardToFloating(Document& /*doc*/,
     fb.active = true;
     fb.originated_from_lift = false;
     ++fb.version;
-    CurrentSelection().SetVoxels(std::move(sel_voxels));
+    ctx.selection.SetVoxels(std::move(sel_voxels));
 }
 
 }  // namespace macvoxel

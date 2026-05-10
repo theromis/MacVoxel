@@ -1,6 +1,7 @@
 #include "ModelPanel.h"
 
 #include "Document.h"
+#include "EditorContext.h"
 #include "Fonts.h"
 #include "PanelState.h"
 
@@ -8,7 +9,8 @@
 
 namespace macvoxel {
 
-void DrawModelPanel(const Document& doc, const RenderStats&) {
+void DrawModelPanel(EditorContext& ctx, const RenderStats&) {
+    const Document& doc = ctx.document;
     ImGui::SetNextWindowSize(ImVec2(320, 200), ImGuiCond_FirstUseEver);
     ImGui::Begin("Model");
 
@@ -48,15 +50,10 @@ void DrawModelPanel(const Document& doc, const RenderStats&) {
 
     ImGui::End();
 
-    bool& show_demo = CurrentPanelState().show_imgui_demo;
+    bool& show_demo = ctx.panel.show_imgui_demo;
     if (show_demo) {
         ImGui::ShowDemoWindow(&show_demo);
     }
-}
-
-void ToggleImGuiDemoWindow() {
-    bool& show_demo = CurrentPanelState().show_imgui_demo;
-    show_demo = !show_demo;
 }
 
 }  // namespace macvoxel

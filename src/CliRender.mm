@@ -5,6 +5,7 @@
 
 #include "Camera.h"
 #include "Document.h"
+#include "EditorContext.h"
 #include "PathTraceRenderer.h"
 #include "RenderState.h"
 #include "VoxFile.h"
@@ -130,7 +131,8 @@ int RunCliRender(int argc, const char* argv[]) {
     Args args;
     if (!ParseArgs(argc, argv, &args)) return 2;
 
-    Document doc;
+    EditorContext ctx;
+    Document& doc = ctx.document;
     std::string err;
     if (!LoadVox(args.input, &doc.grid, &doc.palette, &err)) {
         std::fprintf(stderr, "load failed: %s\n", err.c_str());
@@ -159,10 +161,10 @@ int RunCliRender(int argc, const char* argv[]) {
             return 1;
         }
 
-        // exportPNGToURL: reads aces_tonemap from CurrentRenderSettings;
-        // the path-trace pass reads glass_mode from it as well.
-        CurrentRenderSettings().aces_tonemap = args.aces;
-        CurrentRenderSettings().glass_mode = args.glass_mode;
+        // The path-trace pass reads glass_mode from ctx.render_settings;
+        // the export pass takes aces_tonemap as an explicit parameter.
+        ctx.render_settings.aces_tonemap = args.aces;
+        ctx.render_settings.glass_mode = args.glass_mode;
 
         PathTraceRenderer* renderer =
             [[PathTraceRenderer alloc] initWithDevice:device
@@ -183,7 +185,7 @@ int RunCliRender(int argc, const char* argv[]) {
         NSError* nerr = nil;
         if (![renderer
                  renderHeadlessSamples:static_cast<uint32_t>(args.samples)
-                              document:&doc
+                               context:&ctx
                                 camera:camera
                                   size:size
                             maxBounces:static_cast<uint32_t>(args.bounces)
@@ -197,6 +199,7 @@ int RunCliRender(int argc, const char* argv[]) {
 
         NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:args.output]];
         if (![renderer exportPNGToURL:url
+                          acesTonemap:args.aces ? YES : NO
                          commandQueue:queue
                                 error:&nerr]) {
             std::fprintf(stderr, "export failed: %s\n",

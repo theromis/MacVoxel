@@ -75,11 +75,9 @@ struct PanelState {
     // panel function signatures.
     bool save_render_clicked = false;
 
-    // Model panel — ImGui demo window visibility, toggled from the
-    // app menu via ToggleImGuiDemoWindow().
+    // Model panel — ImGui demo window visibility, toggled directly
+    // from the app menu (View > Show ImGui Demo).
     bool show_imgui_demo = false;
 };
-
-PanelState& CurrentPanelState();
 
 }  // namespace macvoxel

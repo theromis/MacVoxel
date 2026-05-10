@@ -56,23 +56,17 @@ set(APP_SOURCES
     src/CliRender.mm
     src/RaycastRenderer.mm
     src/PathTraceRenderer.mm
-    src/RenderState.cpp
     src/VoxelGrid.cpp
     src/Palette.cpp
     src/VoxFile.cpp
     src/Raycast.cpp
     src/Shapes.cpp
     src/GeneratorEngine.mm
-    src/GeneratorState.cpp
-    src/ToolState.cpp
     src/EditHistory.cpp
     src/Selection.cpp
     src/SelectionOps.cpp
-    src/FloatingBuffer.cpp
     src/FloatingBufferOps.cpp
-    src/PreviewOverlay.cpp
-    src/Clipboard.cpp
-    src/PanelState.cpp
+    src/EditorContext.cpp
     src/ui/GeneratorPanel.cpp
     src/ui/LightPanel.cpp
     src/ui/ModelPanel.cpp

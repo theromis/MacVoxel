@@ -12,6 +12,7 @@
 #include "Camera.h"
 #include "Document.h"
 #include "Material.h"
+#include "EditorContext.h"
 #include "RenderState.h"
 
 #include <cmath>
@@ -506,13 +507,14 @@ struct DisplayUniforms {
 
 - (void)renderInView:(MTKView*)view
                  cmd:(id<MTLCommandBuffer>)cmd
-            document:(macvoxel::Document*)doc
+             context:(macvoxel::EditorContext*)ctx
               camera:(const macvoxel::Camera&)camera {
-    if (doc == nullptr) return;
+    if (ctx == nullptr) return;
+    macvoxel::Document* doc = &ctx->document;
     const CGSize drawable = view.drawableSize;
     if (drawable.width <= 0.0 || drawable.height <= 0.0) return;
 
-    const macvoxel::RenderSettings& rs = macvoxel::CurrentRenderSettings();
+    const macvoxel::RenderSettings& rs = ctx->render_settings;
     CGSize size = drawable;
     if (!rs.resolution_match_window) {
         size.width  = std::max(1, std::min(rs.render_width,  16384));
@@ -528,39 +530,38 @@ struct DisplayUniforms {
         _lastCameraHash = cam_hash;
         _wantsClear = YES;
     }
-    const macvoxel::GlassMode mode = macvoxel::CurrentRenderSettings().glass_mode;
+    const macvoxel::GlassMode mode = rs.glass_mode;
     if (mode != _lastGlassMode) {
         _lastGlassMode = mode;
         _wantsClear = YES;
     }
-    const bool pw_nee = macvoxel::CurrentRenderSettings().power_weighted_nee;
+    const bool pw_nee = rs.power_weighted_nee;
     if (pw_nee != _lastPowerWeightedNee) {
         _lastPowerWeightedNee = pw_nee;
         _wantsClear = YES;
     }
-    const float sky_k = macvoxel::CurrentRenderSettings().sky_intensity;
+    const float sky_k = rs.sky_intensity;
     if (sky_k != _lastSkyIntensity) {
         _lastSkyIntensity = sky_k;
         _wantsClear = YES;
     }
-    const int ris_m = macvoxel::CurrentRenderSettings().nee_ris_count;
+    const int ris_m = rs.nee_ris_count;
     if (ris_m != _lastNeeRisCount) {
         _lastNeeRisCount = ris_m;
         _wantsClear = YES;
     }
-    const bool atmo = macvoxel::CurrentRenderSettings().atmospheric_sky;
+    const bool atmo = rs.atmospheric_sky;
     if (atmo != _lastAtmosphericSky) {
         _lastAtmosphericSky = atmo;
         _wantsClear = YES;
     }
     const float horizon_deg =
-        macvoxel::CurrentRenderSettings().horizon_softness_deg;
+        rs.horizon_softness_deg;
     if (horizon_deg != _lastHorizonSoftnessDeg) {
         _lastHorizonSoftnessDeg = horizon_deg;
         _wantsClear = YES;
     }
     {
-        const auto& rs = macvoxel::CurrentRenderSettings();
         uint64_t h = 0xcbf29ce484222325ull;  // FNV-1a 64
         auto mix = [&h](float v) {
             uint32_t bits = 0;
@@ -598,7 +599,7 @@ struct DisplayUniforms {
     // below still runs so the image keeps showing the moment focus
     // returns.
     const int max_samples_cfg = std::max(
-        1, macvoxel::CurrentRenderSettings().max_samples);
+        1, rs.max_samples);
     const bool accumulate_more =
         _sampleCount < static_cast<uint32_t>(max_samples_cfg) &&
         [NSApp isActive];
@@ -609,8 +610,9 @@ struct DisplayUniforms {
                                                  camera:camera
                                                    size:size
                                              maxBounces:static_cast<uint32_t>(
-                                                 macvoxel::CurrentRenderSettings().max_bounces)
-                                              frameSeed:_sampleCount + 1u];
+                                                 rs.max_bounces)
+                                              frameSeed:_sampleCount + 1u
+                                               settings:rs];
     }
 
     // ---------- Pass 2: divide accum by sample count, write to drawable ----
@@ -624,7 +626,7 @@ struct DisplayUniforms {
         DisplayUniforms du;
         du.sample_count = _sampleCount;
         du.aces_tonemap =
-            macvoxel::CurrentRenderSettings().aces_tonemap ? 1u : 0u;
+            rs.aces_tonemap ? 1u : 0u;
         // Aspect-preserving fit-to-window: render-aspect vs drawable-
         // aspect tells us which dimension is the limiter. Whichever
         // axis is over-large gets squeezed to a fraction of its NDC
@@ -644,7 +646,7 @@ struct DisplayUniforms {
         [enc endEncoding];
     }
 
-    macvoxel::CurrentRenderProgress().sample_count = _sampleCount;
+    ctx->render_progress.sample_count = _sampleCount;
 }
 
 // Encodes one accumulation pass into `cmd`, drawing into _accumTexture.
@@ -655,7 +657,8 @@ struct DisplayUniforms {
                                             camera:(const macvoxel::Camera&)camera
                                               size:(CGSize)size
                                         maxBounces:(uint32_t)maxBounces
-                                         frameSeed:(uint32_t)frameSeed {
+                                         frameSeed:(uint32_t)frameSeed
+                                          settings:(const macvoxel::RenderSettings&)rs {
     MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
     rpd.colorAttachments[0].texture = _accumTexture;
     rpd.colorAttachments[0].loadAction =
@@ -682,7 +685,7 @@ struct DisplayUniforms {
     u._pad2 = 0;
     {
         const float k = std::max(0.0f,
-            macvoxel::CurrentRenderSettings().sky_intensity);
+            rs.sky_intensity);
         u.sky_color = simd::float3{0.65f * k, 0.75f * k, 0.95f * k};
     }
     u._pad3 = 0.0f;
@@ -690,15 +693,14 @@ struct DisplayUniforms {
     u.max_bounces = maxBounces;
     u.light_count = _lightCount;
     u.glass_mode = static_cast<uint32_t>(
-        macvoxel::CurrentRenderSettings().glass_mode);
+        rs.glass_mode);
     u.power_weighted_nee =
-        macvoxel::CurrentRenderSettings().power_weighted_nee ? 1u : 0u;
+        rs.power_weighted_nee ? 1u : 0u;
     u.nee_ris_count = static_cast<uint32_t>(std::max(
-        1, macvoxel::CurrentRenderSettings().nee_ris_count));
+        1, rs.nee_ris_count));
     u.atmospheric_sky =
-        macvoxel::CurrentRenderSettings().atmospheric_sky ? 1u : 0u;
+        rs.atmospheric_sky ? 1u : 0u;
     {
-        const auto& rs = macvoxel::CurrentRenderSettings();
         // Convert UI elevation/azimuth (degrees) to a unit-length
         // grid-space direction. Grid Z is up — elevation tilts off the
         // horizon plane, azimuth rotates around grid Z. (0°, 0°) points
@@ -764,14 +766,14 @@ struct DisplayUniforms {
 }
 
 - (BOOL)renderHeadlessSamples:(uint32_t)samples
-                     document:(macvoxel::Document*)doc
+                      context:(macvoxel::EditorContext*)ctx
                        camera:(const macvoxel::Camera&)camera
                          size:(CGSize)size
                    maxBounces:(uint32_t)maxBounces
                      baseSeed:(uint32_t)baseSeed
                  commandQueue:(id<MTLCommandQueue>)queue
                         error:(NSError**)outError {
-    if (doc == nullptr || queue == nil ||
+    if (ctx == nullptr || queue == nil ||
         size.width <= 0.0 || size.height <= 0.0) {
         if (outError) {
             *outError = [NSError
@@ -782,6 +784,7 @@ struct DisplayUniforms {
         return NO;
     }
 
+    macvoxel::Document* doc = &ctx->document;
     [self ensureAccumTextureForSize:size];
     [self syncResourcesToDocument:doc];
     _sampleCount = 0;
@@ -798,6 +801,7 @@ struct DisplayUniforms {
         return NO;
     }
 
+    const macvoxel::RenderSettings& rs = ctx->render_settings;
     id<MTLCommandBuffer> last = nil;
     for (uint32_t i = 0; i < samples; ++i) {
         @autoreleasepool {
@@ -807,7 +811,8 @@ struct DisplayUniforms {
                                                      camera:camera
                                                        size:size
                                                  maxBounces:maxBounces
-                                                  frameSeed:baseSeed + i + 1u];
+                                                  frameSeed:baseSeed + i + 1u
+                                                   settings:rs];
             [cmd commit];
             last = cmd;
         }
@@ -817,6 +822,7 @@ struct DisplayUniforms {
 }
 
 - (BOOL)exportPNGToURL:(NSURL*)url
+          acesTonemap:(BOOL)acesTonemap
           commandQueue:(id<MTLCommandQueue>)queue
                  error:(NSError**)outError {
     if (_accumTexture == nil || _displayPipeline == nil) {
@@ -866,8 +872,7 @@ struct DisplayUniforms {
         [cmd renderCommandEncoderWithDescriptor:rpd];
     DisplayUniforms du;
     du.sample_count = _sampleCount;
-    du.aces_tonemap =
-        macvoxel::CurrentRenderSettings().aces_tonemap ? 1u : 0u;
+    du.aces_tonemap = acesTonemap ? 1u : 0u;
     // Export target matches the accum exactly — no letterbox.
     du.region_w = 1.0f;
     du.region_h = 1.0f;

@@ -1,5 +1,6 @@
 #include "GeneratorPanel.h"
 
+#include "../EditorContext.h"
 #include "GeneratorState.h"
 #include "Generators.h"
 
@@ -36,11 +37,11 @@ void AccentButtonColors(bool active) {
 
 }  // namespace
 
-void DrawGeneratorPanel() {
+void DrawGeneratorPanel(EditorContext& ctx) {
     ImGui::SetNextWindowSize(ImVec2(260, 220), ImGuiCond_FirstUseEver);
     ImGui::Begin("Generators");
 
-    GeneratorState& g = CurrentGeneratorState();
+    GeneratorState& g = ctx.generator;
 
     auto kind_button = [&](generators::Kind k) {
         const bool active = g.active_kind == k;

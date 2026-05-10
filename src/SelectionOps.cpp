@@ -3,10 +3,10 @@
 #include "CellKey.h"
 #include "Document.h"
 #include "EditHistory.h"
+#include "EditorContext.h"
 #include "FloatingBuffer.h"
 #include "Selection.h"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -26,10 +26,11 @@ namespace {
 // the overlap cells: try_emplace traps the *original* pre-op value as
 // each cell's rollback target, regardless of how many writes happen.
 void ApplyMappingToSelection(
-    Document& doc,
+    EditorContext& ctx,
     const std::function<std::array<int32_t, 3>(int32_t, int32_t, int32_t)>& map)
 {
-    Selection& sel = CurrentSelection();
+    Document& doc = ctx.document;
+    Selection& sel = ctx.selection;
     if (!sel.active() || sel.empty()) return;
 
     struct Source {
@@ -60,7 +61,7 @@ void ApplyMappingToSelection(
         touch(t[0], t[1], t[2], s.pal);
     }
 
-    EditHistory& hist = CurrentHistory();
+    EditHistory& hist = ctx.history;
     hist.BeginOp();
     hist.RecordSelectionPre(sel);
     for (const auto& [key, orig] : changes) {
@@ -126,11 +127,11 @@ void ApplyMappingToFloatingBuffer(
 
 }  // namespace
 
-void RotateSelection(Document& doc, Axis axis, bool cw) {
-    FloatingBuffer& fb = CurrentFloatingBuffer();
+void RotateSelection(EditorContext& ctx, Axis axis, bool cw) {
+    FloatingBuffer& fb = ctx.floating_buffer;
     const bool floating = fb.active && !fb.grid.empty();
     if (!floating) {
-        const Selection& sel = CurrentSelection();
+        const Selection& sel = ctx.selection;
         if (!sel.active() || sel.empty()) return;
     }
 
@@ -139,7 +140,7 @@ void RotateSelection(Document& doc, Axis axis, bool cw) {
     // (xmin + xmax + 1) / 2 — possibly half-integer, which is fine: cell
     // centers (c + 0.5) sit on the same half-step lattice and 90° rotation
     // round-trips them to integer cell coords (modulo lattice parity).
-    const Bounds3 b = floating ? fb.grid.Bounds() : CurrentSelection().bounds();
+    const Bounds3 b = floating ? fb.grid.Bounds() : ctx.selection.bounds();
     const float px = (b.min_x + b.max_x + 1) * 0.5f;
     const float py = (b.min_y + b.max_y + 1) * 0.5f;
     const float pz = (b.min_z + b.max_z + 1) * 0.5f;
@@ -175,21 +176,21 @@ void RotateSelection(Document& doc, Axis axis, bool cw) {
         };
     };
     if (floating) ApplyMappingToFloatingBuffer(fb, map);
-    else ApplyMappingToSelection(doc, map);
+    else ApplyMappingToSelection(ctx, map);
 }
 
-void FlipSelection(Document& doc, Axis axis) {
-    FloatingBuffer& fb = CurrentFloatingBuffer();
+void FlipSelection(EditorContext& ctx, Axis axis) {
+    FloatingBuffer& fb = ctx.floating_buffer;
     const bool floating = fb.active && !fb.grid.empty();
     if (!floating) {
-        const Selection& sel = CurrentSelection();
+        const Selection& sel = ctx.selection;
         if (!sel.active() || sel.empty()) return;
     }
 
     // Cell-coord mirror through the AABB center. For x, the mirror plane
     // sits at x = (xmin + xmax + 1) / 2, which sends a cell at cx to
     // (xmin + xmax) - cx — an exact integer regardless of dimension parity.
-    const Bounds3 b = floating ? fb.grid.Bounds() : CurrentSelection().bounds();
+    const Bounds3 b = floating ? fb.grid.Bounds() : ctx.selection.bounds();
     const int32_t sx = b.min_x + b.max_x;
     const int32_t sy = b.min_y + b.max_y;
     const int32_t sz = b.min_z + b.max_z;
@@ -205,7 +206,7 @@ void FlipSelection(Document& doc, Axis axis) {
         return {cx, cy, cz};
     };
     if (floating) ApplyMappingToFloatingBuffer(fb, map);
-    else ApplyMappingToSelection(doc, map);
+    else ApplyMappingToSelection(ctx, map);
 }
 
 }  // namespace macvoxel
