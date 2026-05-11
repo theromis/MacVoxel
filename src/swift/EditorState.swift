@@ -32,11 +32,20 @@ final class EditorState {
     // every access; the version counter is what wakes the observer.
     private(set) var documentVersion: UInt64 = 0
 
-    // Low-rate observation tick. Bumped at 10 Hz by a run-loop Timer
-    // so panels that proxy bridge state (gridFilledCount,
-    // selection.empty, ...) re-render in response to controller-driven
-    // mutations (brush strokes, selection ops) without each callsite
-    // wiring its own version counter.
+    // Observation tick. The single @Observable-tracked storage every
+    // bridge-proxy property funnels through: getters do `_ = tick` to
+    // register a dependency, and writes invalidate observers by bumping
+    // it. Two sources mutate it:
+    //
+    // 1. Every panel-facing setter bumps it synchronously after writing
+    //    the bridge so user input reflects on screen the same frame
+    //    rather than waiting up to a full timer period. Skipping the
+    //    bump here causes visible UI lag on conditionals like
+    //    `if state.pathTraced` — Observation has no way to see the
+    //    bridge mutation otherwise.
+    // 2. A 10 Hz Timer below catches controller-driven mutations
+    //    (brush strokes, selection ops) that bypass the Swift bridge
+    //    entirely, so panels watching counts / sizes still refresh.
     private(set) var tick: UInt64 = 0
     private var tickTimer: Timer?
 
@@ -201,17 +210,17 @@ final class EditorState {
 
     var generatorKind: BridgeGeneratorKind {
         get { bridge.generatorKind }
-        set { bridge.generatorKind = newValue }
+        set { bridge.generatorKind = newValue; tick &+= 1 }
     }
 
     var generatorAxis: BridgeAxis {
         get { bridge.generatorAxis }
-        set { bridge.generatorAxis = newValue }
+        set { bridge.generatorAxis = newValue; tick &+= 1 }
     }
 
     var generatorApexAtMax: Bool {
         get { bridge.generatorApexAtMax }
-        set { bridge.generatorApexAtMax = newValue }
+        set { bridge.generatorApexAtMax = newValue; tick &+= 1 }
     }
 
     // ---- Render settings (panel-facing) ----
@@ -222,55 +231,55 @@ final class EditorState {
 
     var maxBounces: Int {
         get { _ = tick; return bridge.maxBounces }
-        set { bridge.maxBounces = newValue }
+        set { bridge.maxBounces = newValue; tick &+= 1 }
     }
     var maxSamples: Int {
         get { _ = tick; return bridge.maxSamples }
-        set { bridge.maxSamples = newValue }
+        set { bridge.maxSamples = newValue; tick &+= 1 }
     }
     var pathTraced: Bool {
         get { _ = tick; return bridge.pathTraced }
-        set { bridge.pathTraced = newValue }
+        set { bridge.pathTraced = newValue; tick &+= 1 }
     }
     var acesTonemap: Bool {
         get { _ = tick; return bridge.acesTonemap }
-        set { bridge.acesTonemap = newValue }
+        set { bridge.acesTonemap = newValue; tick &+= 1 }
     }
     var powerWeightedNEE: Bool {
         get { _ = tick; return bridge.powerWeightedNEE }
-        set { bridge.powerWeightedNEE = newValue }
+        set { bridge.powerWeightedNEE = newValue; tick &+= 1 }
     }
     var neeRisCount: Int {
         get { _ = tick; return bridge.neeRisCount }
-        set { bridge.neeRisCount = newValue }
+        set { bridge.neeRisCount = newValue; tick &+= 1 }
     }
     var atmosphericSky: Bool {
         get { _ = tick; return bridge.atmosphericSky }
-        set { bridge.atmosphericSky = newValue }
+        set { bridge.atmosphericSky = newValue; tick &+= 1 }
     }
     var skyIntensity: Float {
         get { _ = tick; return bridge.skyIntensity }
-        set { bridge.skyIntensity = newValue }
+        set { bridge.skyIntensity = newValue; tick &+= 1 }
     }
     var horizonSoftnessDeg: Float {
         get { _ = tick; return bridge.horizonSoftnessDeg }
-        set { bridge.horizonSoftnessDeg = newValue }
+        set { bridge.horizonSoftnessDeg = newValue; tick &+= 1 }
     }
     var sunElevationDeg: Float {
         get { _ = tick; return bridge.sunElevationDeg }
-        set { bridge.sunElevationDeg = newValue }
+        set { bridge.sunElevationDeg = newValue; tick &+= 1 }
     }
     var sunAzimuthDeg: Float {
         get { _ = tick; return bridge.sunAzimuthDeg }
-        set { bridge.sunAzimuthDeg = newValue }
+        set { bridge.sunAzimuthDeg = newValue; tick &+= 1 }
     }
     var sunAngularDiameterDeg: Float {
         get { _ = tick; return bridge.sunAngularDiameterDeg }
-        set { bridge.sunAngularDiameterDeg = newValue }
+        set { bridge.sunAngularDiameterDeg = newValue; tick &+= 1 }
     }
     var sunIntensity: Float {
         get { _ = tick; return bridge.sunIntensity }
-        set { bridge.sunIntensity = newValue }
+        set { bridge.sunIntensity = newValue; tick &+= 1 }
     }
     var sunColor: (r: Float, g: Float, b: Float) {
         get { _ = tick; return (bridge.sunColorR, bridge.sunColorG, bridge.sunColorB) }
@@ -278,6 +287,7 @@ final class EditorState {
             bridge.sunColorR = newValue.r
             bridge.sunColorG = newValue.g
             bridge.sunColorB = newValue.b
+            tick &+= 1
         }
     }
 
@@ -285,78 +295,78 @@ final class EditorState {
 
     var toolKind: BridgeToolKind {
         get { _ = tick; return bridge.toolKind }
-        set { bridge.toolKind = newValue }
+        set { bridge.toolKind = newValue; tick &+= 1 }
     }
     var toolMode: BridgeToolMode {
         get { _ = tick; return bridge.toolMode }
-        set { bridge.toolMode = newValue }
+        set { bridge.toolMode = newValue; tick &+= 1 }
     }
     var brushSize: Int {
         get { _ = tick; return bridge.brushSize }
-        set { bridge.brushSize = newValue }
+        set { bridge.brushSize = newValue; tick &+= 1 }
     }
     var brushShape: BridgeBrushShape {
         get { _ = tick; return bridge.brushShape }
-        set { bridge.brushShape = newValue }
+        set { bridge.brushShape = newValue; tick &+= 1 }
     }
     var brush3D: Bool {
         get { _ = tick; return bridge.brush3D }
-        set { bridge.brush3D = newValue }
+        set { bridge.brush3D = newValue; tick &+= 1 }
     }
     var lineMode: BridgeLineMode {
         get { _ = tick; return bridge.lineMode }
-        set { bridge.lineMode = newValue }
+        set { bridge.lineMode = newValue; tick &+= 1 }
     }
     var circleFill: Bool {
         get { _ = tick; return bridge.circleFill }
-        set { bridge.circleFill = newValue }
+        set { bridge.circleFill = newValue; tick &+= 1 }
     }
     var circleEven: Bool {
         get { _ = tick; return bridge.circleEven }
-        set { bridge.circleEven = newValue }
+        set { bridge.circleEven = newValue; tick &+= 1 }
     }
     var squareFill: Bool {
         get { _ = tick; return bridge.squareFill }
-        set { bridge.squareFill = newValue }
+        set { bridge.squareFill = newValue; tick &+= 1 }
     }
     var squareEven: Bool {
         get { _ = tick; return bridge.squareEven }
-        set { bridge.squareEven = newValue }
+        set { bridge.squareEven = newValue; tick &+= 1 }
     }
     var boxFill: Bool {
         get { _ = tick; return bridge.boxFill }
-        set { bridge.boxFill = newValue }
+        set { bridge.boxFill = newValue; tick &+= 1 }
     }
     var faceExtrude: BridgeFaceExtrudeKind {
         get { _ = tick; return bridge.faceExtrude }
-        set { bridge.faceExtrude = newValue }
+        set { bridge.faceExtrude = newValue; tick &+= 1 }
     }
     var faceWith: BridgeFaceWithColor {
         get { _ = tick; return bridge.faceWith }
-        set { bridge.faceWith = newValue }
+        set { bridge.faceWith = newValue; tick &+= 1 }
     }
     var faceEightConnected: Bool {
         get { _ = tick; return bridge.faceEightConnected }
-        set { bridge.faceEightConnected = newValue }
+        set { bridge.faceEightConnected = newValue; tick &+= 1 }
     }
 
     // ---- Render panel ----
 
     var glassMode: BridgeGlassMode {
         get { _ = tick; return bridge.glassMode }
-        set { bridge.glassMode = newValue }
+        set { bridge.glassMode = newValue; tick &+= 1 }
     }
     var resolutionMatchWindow: Bool {
         get { _ = tick; return bridge.resolutionMatchWindow }
-        set { bridge.resolutionMatchWindow = newValue }
+        set { bridge.resolutionMatchWindow = newValue; tick &+= 1 }
     }
     var renderWidth: Int {
         get { _ = tick; return bridge.renderWidth }
-        set { bridge.renderWidth = newValue }
+        set { bridge.renderWidth = newValue; tick &+= 1 }
     }
     var renderHeight: Int {
         get { _ = tick; return bridge.renderHeight }
-        set { bridge.renderHeight = newValue }
+        set { bridge.renderHeight = newValue; tick &+= 1 }
     }
     var sampleCount: Int {
         _ = tick
@@ -369,7 +379,7 @@ final class EditorState {
 
     var activePaletteSlot: Int {
         get { _ = tick; return bridge.activePaletteSlot }
-        set { bridge.activePaletteSlot = newValue }
+        set { bridge.activePaletteSlot = newValue; tick &+= 1 }
     }
 
     func paletteColor(at index: Int) -> UInt32 {
