@@ -1,5 +1,16 @@
 # Do Before Swift
 
+**Status:** ✅ Done. All six prerequisites shipped through 2026-05;
+the SwiftUI port itself shipped on the `swiftui-port` branch in
+2026-05-10. Kept around as historical context for the reasoning — the
+"why we did the controller extraction" answer lives here in more
+detail than the commit messages.
+
+The viewport (`MTKView` → now `MetalScene`) bridges into SwiftUI via
+`NSViewRepresentable` (`MetalSceneView.swift`) exactly as predicted.
+
+---
+
 The structural prep that has to land *before* a SwiftUI port is a
 reasonable undertaking. Each item is also a defensible refactor on its
 own — none of them require committing to SwiftUI to be worth doing —

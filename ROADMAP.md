@@ -72,6 +72,20 @@ Effort labels are rough: **S** ≈ a few hours, **M** ≈ a day, **L** ≈ multi
   sun (color, size, intensity) + sky (zenith / horizon colors). Path tracer
   samples it directly; ray-cast just shows it as background. Atmospheric
   scattering per Nishita.
+- **SwiftUI port (`swiftui-port` branch, 2026-05).** Replaced the AppKit
+  shell + Dear ImGui UI with a native SwiftUI app. `EditorContextBridge`
+  (Obj-C++) wraps `std::unique_ptr<EditorContext>`; `EditorState`
+  (`@Observable`) is the Swift façade with a 10 Hz tick driving
+  observation for controller-driven mutations. `MetalScene` (MTKView
+  subclass) takes over `VoxelView`'s job; `SceneOverlayRenderer` +
+  `Overlay.metal` + `OverlayDraw` replace ImGui's draw-list calls so
+  the per-tool controllers' `DrawOverlay` paths are fully decoupled
+  from ImGui. All seven panels rewritten in SwiftUI. `third_party/imgui`
+  submodule + `src/ui/*` + `AppDelegate.{h,mm}` + `VoxelView.{h,mm}`
+  deleted. Binary shrank 4.6 MB → 2.6 MB. Deferred to follow-up:
+  palette drag-rect multi-select + context menu, Material editor's
+  drag-select coverage, tool quick-keys, drag-drop onto window,
+  theme parity vs the old `ui/Theme.cpp`.
 
 ## Phase 12.5+ — RNG-driven generator kinds + user shader path
 
@@ -167,44 +181,47 @@ phase boundary, not a side change.
 
 ## Known issues
 
-- **File > Open Recent submenu stays empty.** The framework wiring
-  is in place: `CFBundleDocumentTypes` declares `.vox`, the menu has
-  the standard "Clear Menu" item with `clearRecentDocuments:` action,
-  and `noteNewRecentDocumentURL:` fires on every successful
-  `openDocumentAtURL:` and `saveDocumentAs:`. Despite all that,
-  nothing shows up in the submenu and nothing persists to
-  `defaults read dev.paulstarr.MacVoxel`. Likely culprit: the
-  recents auto-populate path in AppKit specifically expects
-  `NSDocument` architecture, and `NSDocumentController` only acts
-  as the recents store when it's been activated by a real document
-  open. Possible fixes when revisited: (a) adopt a minimal
-  `NSDocument` subclass for `.vox`, (b) maintain the recents list
-  ourselves in `NSUserDefaults` and rebuild the submenu via an
-  `NSMenuDelegate menuNeedsUpdate:` callback. The Finder-side
-  `application:openURLs:` callback works, so the file-open half is
-  fine — only the menu surface is broken.
+- **File > Open Recent missing.** Used to be present but empty; now
+  the SwiftUI `CommandGroup(replacing: .newItem)` doesn't preserve
+  the standard Open Recent submenu at all. `EditorContextBridge` still
+  calls `noteNewRecentDocumentURL:` on every successful open/save, and
+  `CFBundleDocumentTypes` is still declared, so the data is being
+  recorded — the menu surface just needs to be re-introduced. Likely
+  fixes: (a) use `CommandGroup(after: .newItem)` so the standard
+  group stays, (b) build an explicit "Open Recent" `Menu` ourselves
+  from a `@AppStorage` URL list, (c) adopt a minimal `NSDocument`
+  subclass for `.vox` so SwiftUI's document-aware machinery kicks in.
+  `.onOpenURL` (Finder Open With) works fine.
 
 - **Tool performance.** The Generator tool is notably more performant
   than the brushes and selection tools. It achieves MagicaVoxel-level
   responsiveness, while the Brush and Selection tools stutter at high
-  cursor speeds or while affecting larger volumes. This is undoubtedly 
+  cursor speeds or while affecting larger volumes. This is undoubtedly
   because we're either doing more work on the CPU than we should for
   those tools or because we're moving data back and forth in memory
   more often than we need to. We need to identify the bottleneck and
   fix it. **Any** operation that can be handled on the GPU should be.
 
+- **Post-port polish backlog.** Carried over from the SwiftUI port:
+  palette drag-rectangle multi-select; palette context menu
+  (Copy/Paste color, Make gradient, Select voxels by color, Paint
+  voxels); tool quick-keys (1–0 + `[` / `]`); drag-drop `.vox` onto
+  the running window; theme parity vs the old `ui/Theme.cpp`'s
+  pro-app dark.
+
 ---
 
 ## Suggested next-up
 
-Pure-math primitives are done; the natural next forks are:
+Immediate focus is **bug-squishing the SwiftUI port** — Paul flagged
+this as the priority after taking the port for a spin. Once those are
+cleared, the natural next forks are:
 
-- **Phase 13.5 (edit-volume foundation)** — small, high-leverage. The
-  faint floor grid + bounded volume pair lifts the editor out of
-  "infinite empty space" and makes anchoring empty-space clicks
-  predictable, which the Generator gizmo will benefit from too.
-- **Phase 13 (selection upgrades)** — also small per item; marquee
-  selection + 90° rotations are quick wins.
+- **Post-port polish** under Known Issues above (palette drag-rect +
+  context menu, tool quick-keys, Open Recent fix).
+- **Phase 13.5 (edit-volume foundation)** — faint floor grid + bounded
+  volume; lifts the editor out of "infinite empty space" and makes
+  empty-space clicks predictable.
 - **Phase 12.5+ Maze / Perlin / Fractal** — fun, but each needs an MSL
   RNG primitive and a richer Params shape, so M-sized rather than S.
 - **Phase 14.5 ReSTIR DI** — the next step now that power-weighted

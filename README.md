@@ -1,25 +1,20 @@
 # MacVoxel
 
-A native macOS voxel editor in the spirit of MagicaVoxel. AppKit shell, Metal-backed
-content view, Dear ImGui for all in-window UI, GPU ray-cast renderer for editing,
-GPU path tracer for render mode.
+A native macOS voxel editor in the spirit of MagicaVoxel. SwiftUI shell over an
+Obj-C++ bridge over a C++20 core, Metal for the scene view + overlay pass, GPU
+ray-cast renderer for editing, GPU path tracer for render mode.
 
 ## Build
 
-Requires macOS 13 (Ventura) or later, Xcode command line tools, and CMake 3.24+.
+Requires macOS 14 (Sonoma) or later (SwiftUI's `@Observable` floor), Xcode
+command line tools, and CMake 3.24+.
 
 ```sh
-git clone --recurse-submodules <repo-url> macvoxel
+git clone <repo-url> macvoxel
 cd macvoxel
 cmake -B build -G Ninja
 cmake --build build
 open build/MacVoxel.app
-```
-
-If you cloned without `--recurse-submodules`:
-
-```sh
-git submodule update --init --recursive
 ```
 
 The `-G Ninja` flag is optional but produces faster, cleaner builds.
@@ -52,26 +47,28 @@ The `-G Ninja` flag is optional but produces faster, cleaner builds.
 ## Controls
 
 ### Camera
-- **Option + drag** — orbit (drag-the-world).
-- **Option + Shift + drag** — pan.
+- **Right-drag** — orbit.
+- **Middle-drag** or **Space + drag** — pan.
 - **Two-finger scroll** or **pinch** — zoom.
 
 ### Editing
-- **Left-click** — apply the current tool (place / erase / paint / pick).
-- **Drag** — drag-paint with the current tool, accumulated as one undo step.
-- **B** — box selection. Click-drag to mark a region; copy / cut / paste / delete
-  apply to it.
+- **Left-click / drag** — apply the current tool. Drag-paint accumulates as
+  one undoable stroke.
+- **⌥ + left-click** — eyedropper: pick the clicked voxel's palette slot.
+- **⌘ + left-click / drag** — Cmd-drag a selected voxel slides the selection
+  in the plane of the clicked face (lifts to a floating buffer on first drag).
+- **Esc** — cancel any pending two-click shape / Generator gizmo.
 - **⌘Z / ⇧⌘Z** — undo / redo, per stroke.
-- **⌘X / ⌘C / ⌘V** — cut / copy / paste the current selection.
-- Brush size, palette index, tool, and material type are all in the side panels.
+- **⌘X / ⌘C / ⌘V / ⌫** — cut / copy / paste / delete the current selection.
+- **⇧⌘D** — deselect (commits any floating buffer to the document, clears
+  marquee).
+- Tool, brush, palette, materials, render and light settings all live in
+  the side panels.
 
 ### File
-- **⌘O / ⌘S / ⇧⌘S** — open / save / save-as `.vox`.
-- **⌘D** — toggle the ImGui demo window (debug aid).
+- **⌘N / ⌘O / ⌘S / ⇧⌘S** — new / open / save / save-as `.vox`.
+- **⌘W** — close window.
 - **⌘Q** — quit.
-
-Dragging inside an ImGui window never moves the camera or edits voxels — the
-`ImGui::GetIO().WantCaptureMouse` gate suppresses scene input.
 
 ## A few implementation notes
 
@@ -79,18 +76,21 @@ Dragging inside an ImGui window never moves the camera or edits voxels — the
   hash map. Cells default to 0 (empty); world coords are signed so MagicaVoxel
   scene-graph translations work directly. The grid tracks dirty chunks so the
   GPU only re-uploads what changed.
-- **Single render pass per frame.** Scene → ImGui both encode into one
-  `MTLRenderCommandEncoder` with a shared depth buffer. The path-traced mode
-  uses a two-pass setup (accumulate into RGBA32F float texture, then divide by
-  sample count for display) but still composites ImGui in a single pass on top.
+- **Two-pass overlay composition.** The interactive ray-cast renderer + a
+  tiny native Metal overlay pipeline (`SceneOverlayRenderer` + `Overlay.metal`)
+  share one render encoder: scene fragments, then 2D screen-space gizmos /
+  marquee / hover / selection wireframes drawn as triangle lists with
+  premultiplied-alpha blend. The path-traced mode renders the scene to its own
+  accumulation buffer first, then runs the overlay pass on top of the drawable
+  in a follow-up encoder.
 - **No greedy mesher.** An earlier phase had one; it was retired when the GPU
   ray-cast renderer outpaced it. The grid is uploaded directly to a
   coarse-grid-of-chunk-indices + chunk pool layout that the shader DDAs through.
 - **Color space.** Palette is sRGB on disk, converted to linear on GPU upload;
   the path tracer works in linear and the display fragment re-encodes to sRGB.
-- **UI.** Dear ImGui (docking branch). San Francisco at runtime from
-  `/System/Library/Fonts/SFNS.ttf` — Apple's license forbids bundling it. A
-  custom theme is in `src/ui/Theme.cpp`.
+- **UI.** SwiftUI panels backed by an Obj-C++ `EditorContextBridge` around the
+  C++ `EditorContext`. `MetalScene` (MTKView subclass) hosts the renderers
+  inside an `NSViewRepresentable`; SwiftUI never sees C++ directly.
 
 ## License
 

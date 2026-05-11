@@ -4,159 +4,229 @@ A note for the next Claude session that lands here. Read this first.
 
 ## What this is
 
-MacVoxel — a native macOS voxel editor + path tracer. C++20 + Objective-C++,
-AppKit shell, Metal, Dear ImGui. The README has the user-facing summary; this
-file is for orienting on the code.
+MacVoxel — a native macOS voxel editor + path tracer. SwiftUI shell
+over an Obj-C++ bridge over a C++20 core, with Metal for the renderer
+and overlays. The README has the user-facing summary; this file is
+for orienting on the code.
+
+## Where the SwiftUI port stands
+
+The branch `swiftui-port` is four commits ahead of `main` and is the
+current head of development. All seven panels are ported, the AppKit
+shell (`AppDelegate`, `VoxelView`) is gone, `third_party/imgui` is
+gone — see `git log main..swiftui-port` for the migration. `main` is
+the pre-port reference; don't restart work there unless you mean to.
+
+Deferred polish, not yet implemented:
+
+- Palette drag-rectangle multi-select. Single-click + shift-toggle work.
+- Palette context menu (Copy/Paste color, Make gradient, Select voxels
+  by color, Paint voxels).
+- Tool quick-keys (1-9/0, `[`/`]`).
+- Drag-drop a `.vox` onto the running window (cold-launch via Finder
+  Open With works through `.onOpenURL`).
+- Theme parity vs the old `ui/Theme.cpp` pro-app dark — SwiftUI defaults
+  look fine, but the colors aren't exact.
 
 ## Where things live
 
 ```
 src/
-├── main.mm                AppKit entry; bare-minimum NSApplication boot.
-├── AppDelegate.mm         Menu bar, file dialogs, app lifecycle. Owns the
-│                          single EditorContext as a unique_ptr.
+├── main.mm                Slim entry: argv `render` → CliRender;
+│                          otherwise → MacVoxelRunApp (Swift @_cdecl)
+│                          → SwiftUI App.main().
+├── CliRender.mm           Headless `MacVoxel render` subcommand.
+│                          Bypasses SwiftUI; drives PathTraceRenderer
+│                          directly. Deterministic per `--seed`.
 │
-│   Document & geometry
-├── Document.h             { VoxelGrid, Palette, path, version }. The single
-│                          open document; renderers cache against `version`.
-├── VoxelGrid.{h,cpp}      Sparse 16³-chunk hash-map grid. Tracks dirty chunks
-│                          so the GPU only re-uploads what changed.
+│   Document & geometry (unchanged through the port)
+├── Document.h             { VoxelGrid, Palette, path, version }.
+├── VoxelGrid.{h,cpp}      Sparse 16³-chunk hash-map grid. Tracks
+│                          dirty chunks for incremental GPU upload.
 ├── Palette.{h,cpp}        256-entry color + Material array.
-├── Material.h             Per-palette-entry { type, roughness, metallic,
-│                          emission, transparency, ior }.
+├── Material.h             { type, roughness, metallic, emission,
+│                          emissionPower, transparency, ior }.
 ├── VoxFile.{h,cpp}        MagicaVoxel .vox load/save. Scene graph + MATL.
-├── CellKey.h              21-bit-per-axis pack/unpack for the int64 cell
-│                          keys used by Raycast, EditHistory, the shape
-│                          preview map, and the selection overlay.
+├── CellKey.h              21-bit-per-axis pack/unpack int64 cell keys.
 ├── Camera.{h,cpp}         Orbit camera, pure C++.
-├── Raycast.{h,cpp}        CPU DDA for picking (mouse-to-voxel).
-├── Shapes.{h,cpp}         Pure C++ cell enumerators: Bresenham3D,
-│                          ProjectInPlane / OffsetInPlane, planar disc /
-│                          square / box / coplanar-face flood. The Line /
-│                          Circle / Square / Box / Face tools' geometry
-│                          all lives here.
+├── Raycast.{h,cpp}        CPU DDA for picking.
+├── Shapes.{h,cpp}         Pure-C++ cell enumerators (Bresenham3D,
+│                          planar disc / square / box, coplanar flood).
 │
-│   Editing model — the EditorContext bundle
+│   Editor state — the EditorContext bundle
 ├── EditorContext.{h,cpp}  Single-document editor context: Document,
 │                          ToolSettings, Selection, RenderSettings,
 │                          RenderProgress, GeneratorState, FloatingBuffer,
 │                          PreviewOverlay, EditHistory, Clipboard,
-│                          PanelState. Replaces the old `Current*()`
-│                          singletons; AppDelegate owns one, every panel /
-│                          renderer / controller takes it by reference.
-├── ToolState.h            `ToolSettings`: active tool, brush size, mode,
-│                          per-tool params (line_mode, circle_fill,
-│                          face_with, etc.). (File still named ToolState
-│                          for git-history reasons; the type is
-│                          ToolSettings.)
-├── GeneratorState.h       Active generator kind + Params (mirrors
-│                          ToolSettings, used only by the Generator tool).
-├── PanelState.h            ImGui panel layout / open-state.
-├── RenderState.h          `RenderSettings` (path-traced toggle, bounces,
-│                          samples, sky, tonemap…) + `RenderProgress`
-│                          (sample counter, time elapsed).
-├── EditHistory.{h,cpp}    Stroke-grained undo/redo, single-op transactions.
+│                          PanelState. EditorContextBridge owns one as
+│                          a std::unique_ptr; every panel / controller
+│                          reaches it through the bridge or the
+│                          EditorContext& reference path.
+├── ToolState.h            `ToolSettings`. (File still named ToolState
+│                          for git-history reasons.)
+├── GeneratorState.h       Active generator kind + Params.
+├── PanelState.h           Drag-coalescing state still used by the
+│                          SwiftUI panels — `palette_color_edit`
+│                          (ColorPicker coalesce), `material_edit`
+│                          (per-slot Material pre snapshot). The old
+│                          ImGui-only fields (palette_drag, color
+│                          clipboard, save_render_clicked) are dormant.
+├── RenderState.h          `RenderSettings` + `RenderProgress`.
+├── EditHistory.{h,cpp}    Stroke-grained undo/redo, single-op
+│                          transactions, per-cell / per-palette-slot
+│                          dedup within an op.
 ├── Selection.{h,cpp}      Box / per-voxel selection set.
-├── SelectionOps.{h,cpp}   Free-function selection mutations:
-│                          LiftSelectionToFloating, ResampleFloatingBuffer,
-│                          RotateSelection, FlipSelection, SelectCellsWhere,
-│                          FloodSelectFromSeed.
-├── FloatingBuffer.h       Lifted-selection grid + integer offset.
+├── SelectionOps.{h,cpp}   RotateSelection, FlipSelection,
+│                          LiftSelectionToFloating, etc.
+├── FloatingBuffer.h       Lifted-selection grid + offset.
 ├── FloatingBufferOps.{h,cpp}  Lift / commit / paste / resample.
 ├── Clipboard.h            Cut / copy / paste of selected regions.
-├── PreviewOverlay.h       Live tool-stamp staging buffer (additions +
-│                          removals) the renderers composite over the doc.
-├── PreviewOps.{h,cpp}     `CommitPreviewOverlayThroughHistory(ctx)` — flush
-│                          the overlay to the doc as one undo op.
+├── PreviewOverlay.h       Live tool-stamp staging buffer.
+├── PreviewOps.{h,cpp}     `CommitPreviewOverlayThroughHistory(ctx)`.
 │
-│   Per-tool gesture controllers — see "Controllers" section below
-├── InteractionState.h     Owned struct of every gesture's per-tool slice
-│                          (BrushStream, MarqueeDrag, BoxSelectDrag,
-│                          MoveSelect, XformHandle, TwoClickAnchor,
-│                          FaceTool, GenGizmo, Hover) + the top-level
-│                          DragMode tag.
-├── Input.h                MouseEvent + ModifierFlags POD types — AppKit-
-│                          free input packaging.
-├── ViewContext.{h,cpp}    Stateless picking / drag-projection context
-│                          built per call from VoxelView. Camera by value,
-│                          EditorContext* non-owning. Owns RayAt, PickCell,
-│                          PickFace, PickXformHandle, PickGenHandle,
-│                          ComputeTargetCell, ComputeLineEndpoint,
-│                          GridPlaneIntersect, *DragVoxels, etc.
-├── BrushOps.{h,cpp}       `StampBrushFootprint` (Square/Circle × 2D/3D ×
-│                          Add/Remove/Paint, optional preview-overlay
-│                          mode) + `ComputeNewCellValue`. Shared by Brush,
-│                          Shape, Generator.
-├── BrushController.{h,cpp}        Bare-click stroke painter (default tool).
-├── ShapeController.{h,cpp}        Line / Circle / Square / Box (two-click,
-│                                  brush-thickened, overlay-staged).
-├── FaceController.{h,cpp}         Coplanar flood + extrude / inset / paint
-│                                  with incremental layer-diff preview.
-├── MarqueeController.{h,cpp}      Screen-space rectangle selection.
-├── BoxSelectController.{h,cpp}    Two-click 3-D AABB selection.
-├── FloodSelectController.{h,cpp}  Single-click 6-connected flood select.
-├── MoveSelectController.{h,cpp}   Cmd-drag a selected voxel; lifts to
-│                                  FloatingBuffer and slides in-plane.
-├── XformHandleController.{h,cpp}  Selection / floating-buffer scale gizmo
-│                                  (six face arrows, ResampleFloatingBuffer).
-├── GeneratorController.{h,cpp}    Generator tool: drag-out anchor, leave-
-│                                  visible gizmo, face-handle scale, per-
-│                                  frame Tick (param-change re-runs +
-│                                  Esc/tool-switch cancel). Engine reaches
-│                                  it via std::function so the .cpp stays
-│                                  AppKit-free.
+│   Per-tool gesture controllers — see "Controllers" below
+├── InteractionState.h     One struct of every gesture's per-tool slice.
+├── Input.h                MouseEvent + ModifierFlags — AppKit-free.
+├── ViewContext.{h,cpp}    Stateless picking + drag-projection. Camera
+│                          by value, EditorContext* non-owning.
+├── BrushOps.{h,cpp}       `StampBrushFootprint` + `ComputeNewCellValue`.
+├── BrushController.{h,cpp}
+├── ShapeController.{h,cpp}        Line / Circle / Square / Box bundled.
+├── FaceController.{h,cpp}
+├── MarqueeController.{h,cpp}
+├── BoxSelectController.{h,cpp}
+├── FloodSelectController.{h,cpp}
+├── MoveSelectController.{h,cpp}
+├── XformHandleController.{h,cpp}
+├── GeneratorController.{h,cpp}
 │
 │   Generators (compute backend)
 ├── Generators.h           Pure-C++ types (`Bounds3i`, `Kind`, `Params`).
-├── GeneratorEngine.{h,mm} GPU compute runner — one MTLComputePipelineState
-│                          per Kind, atomic-append output buffer, sync
-│                          dispatch + readback. Each kernel is a thread-per-
-│                          cell scan over the AABB.
-├── Generators.metal       MSL source for every generator kernel. Same
-│                          bundle-resource + newLibraryWithSource: pattern
-│                          as PathTrace.metal; new kinds add a kernel here
-│                          plus an entry in GeneratorEngine.mm's name table.
+├── GeneratorEngine.{h,mm} GPU compute runner — one
+│                          MTLComputePipelineState per Kind, atomic-
+│                          append output buffer.
+├── Generators.metal       MSL source for every generator kernel.
 │
 │   View shell + renderers
-├── VoxelView.{h,mm}       MTKView subclass — *thin shell + dispatcher*.
-│                          Owns: Metal queue, renderers, camera, ImGui
-│                          lifecycle, NSEvent → MouseEvent translation,
-│                          the mouseDown/Dragged/Up tool-routing switches,
-│                          per-frame draw orchestration (panels, controller
-│                          DrawOverlays in z-order, renderer dispatch),
-│                          right/middle/scroll/magnify camera input, hover
-│                          bookkeeping, drawSelectionOverlay /
-│                          drawHoverOverlay. Everything else delegates to
-│                          a controller.
-├── RaycastRenderer.mm     Interactive GPU ray-cast renderer used during
-│                          editing. Coarse-grid + chunk-pool, hierarchical
-│                          empty-space skipping in the shader.
-├── PathTraceRenderer.mm   Path tracer (render mode). Same GPU layout as the
-│                          ray-cast renderer; trades responsiveness for
-│                          progressive accumulation, GGX, Beer-Lambert, etc.
-├── PathTrace.metal        MSL source for pt_fragment + display_fragment.
-│                          Shipped in the bundle's Resources/, loaded as a
-│                          string at init via newLibraryWithSource:.
-├── CliRender.mm           Headless `MacVoxel render` subcommand. Bypasses
-│                          NSApplicationMain and drives PathTraceRenderer
-│                          directly for deterministic CLI/CI renders.
-└── ui/
-    ├── ModelPanel.cpp     Stats + render-mode toggle.
-    ├── ToolPanel.cpp      Tool / brush UI.
-    ├── PalettePanel.cpp   Color picker.
-    ├── RenderPanel.cpp    Render-mode controls + Material editor for the
-    │                      currently-selected palette slots.
-    ├── LightPanel.cpp     Sky + sun controls.
-    ├── SelectionPanel.cpp Selection actions (rotate, flip, lift, …).
-    ├── GeneratorPanel.cpp Generator kind picker + per-kind parameter UI.
-    ├── Fonts.cpp          Loads SF from /System at 2× for Retina.
-    └── Theme.cpp          Apple-pro-app-inspired ImGui theme.
+├── MetalScene.{h,mm}      MTKView subclass — *thin shell + dispatcher*.
+│                          Owns: Metal queue, RaycastRenderer,
+│                          PathTraceRenderer, SceneOverlayRenderer,
+│                          GeneratorEngine, Camera, NSTrackingArea,
+│                          InteractionState. NSEvent → MouseEvent
+│                          translation, mouseDown/Dragged/Up tool-
+│                          routing switches, right/middle/scroll/
+│                          magnify camera input, hover bookkeeping,
+│                          per-frame draw orchestration (renderer
+│                          dispatch + native overlay pass). Init takes
+│                          an EditorContextBridge — Swift's
+│                          MetalSceneView (NSViewRepresentable)
+│                          instantiates it. Never reaches NSApp.delegate.
+├── RaycastRenderer.mm     Interactive GPU ray-cast renderer.
+├── PathTraceRenderer.mm   Path tracer (render mode).
+├── PathTrace.metal        MSL: pt_fragment + display_fragment.
+├── SceneOverlayRenderer.{h,mm}  Tiny Metal pipeline that drains an
+│                          OverlayDraw's vertex list as a triangle
+│                          list. Premultiplied-alpha blend. Replaces
+│                          ImGui's GetBackgroundDrawList / Foreground
+│                          calls the controllers used to make.
+├── Overlay.metal          MSL vertex/fragment for the overlay pass.
+├── OverlayDraw.{h,cpp}    Immediate-mode 2D primitives (AddLine /
+│                          AddRect / AddRectFilled / AddTriangleFilled,
+│                          packed RGBA via `Rgba8`). Filled per frame
+│                          by controllers (DrawOverlay) + the
+│                          SelectionOverlay free functions; drained by
+│                          SceneOverlayRenderer.
+├── SelectionOverlay.{h,cpp}    `DrawSelection` + `DrawHover` free
+│                          functions extracted out of the old
+│                          VoxelView. Take an OverlayDraw &.
+│
+│   SwiftUI shell — see "SwiftUI shell" section below
+└── swift/
+    ├── MacVoxel-Bridging-Header.h   Imports the Obj-C side for Swift.
+    ├── MainEntry.swift              @_cdecl entry from main.mm.
+    ├── MacVoxelApp.swift            App + WindowGroup + .commands +
+    │                                .onOpenURL.
+    ├── MacVoxelCommands.swift       File / Edit / Undo+Redo command
+    │                                groups; replaces buildMainMenu.
+    ├── ContentView.swift            Three-column HSplitView.
+    ├── MetalSceneView.swift         NSViewRepresentable around
+    │                                MetalScene. Sets state.scene back-
+    │                                ref so menu actions can call
+    │                                invalidateRenderers /
+    │                                frameCameraToDocument.
+    ├── EditorState.swift            @Observable façade over the
+    │                                bridge. 10 Hz tick Timer.
+    ├── EditorContextBridge.h        Pure Obj-C interface — what Swift
+    │                                sees.
+    ├── EditorContextBridge_Internal.h  C++ accessor for Obj-C++ only.
+    ├── EditorContextBridge.mm       Obj-C++ wrapper around
+    │                                std::unique_ptr<EditorContext>;
+    │                                all action methods live here.
+    └── panels/
+        ├── ModelPanel.swift         Stats display.
+        ├── ToolPanel.swift          Tool grid + brush + per-tool params.
+        ├── PalettePanel.swift       16×16 swatch grid + ColorPicker.
+        ├── RenderPanel.swift        Path-trace settings + Save render
+        │                            + Material editor.
+        ├── LightPanel.swift         Sky + sun sliders.
+        ├── SelectionPanel.swift     Rotate / flip buttons.
+        └── GeneratorPanel.swift     Kind picker + per-kind params.
 ```
 
-PLAN.md is the *original* Phase 0 handoff. It's archival — most of what's in
-the "out of scope" list is now built. Don't take it as a current spec.
+## SwiftUI shell
+
+The shell is three layers thick: Swift `@Observable` → Obj-C bridge →
+C++ `EditorContext`. Pure C++ types never cross into Swift; everything
+Swift sees has an Obj-C interface in `EditorContextBridge.h`.
+
+- **`EditorContextBridge`** (NSObject) owns `std::unique_ptr<EditorContext>`.
+  Public Obj-C properties + action methods are the only API Swift uses;
+  `EditorContextBridge_Internal.h` declares a `- (EditorContext *)context;`
+  category that only Obj-C++ files include (used by `MetalScene`).
+- **`EditorState`** (@Observable Swift class) wraps the bridge plus a
+  weak `MetalScene?` back-reference. The bridge isn't @Observable, so
+  EditorState republishes everything panels need via computed properties
+  that read a stored `tick: UInt64` first — see "Observation cadence"
+  below.
+- **`MetalScene`** (Obj-C++ MTKView) does all of `VoxelView`'s old work
+  except ImGui — see the file tree. Owns the renderers; takes the
+  EditorContext through the bridge at init.
+- **`MacVoxelCommands`** (`Commands` struct) maps SwiftUI menu items to
+  bridge actions. `CommandGroup(replacing: .newItem)` provides
+  New / Open / Close; `.saveItem` for Save / Save As; `.undoRedo` for
+  Undo / Redo; `.pasteboard` for Cut / Copy / Paste / Delete / Deselect.
+- **Panels** are pure layout. Every panel takes `state: EditorState`
+  (most are `@Bindable`) and binds controls directly to state properties.
+  Material editor and ColorPicker use `begin* / apply* / commit*`
+  patterns with a Timer-based "no change for 400 ms → CommitOp"
+  coalesce.
+
+### Observation cadence
+
+Controllers (brush stroke, marquee drag, etc.) mutate the EditorContext
+directly — they don't go through the bridge. SwiftUI views that depend
+on those mutations need a way to re-render at gesture cadence without
+the controllers explicitly poking SwiftUI.
+
+`EditorState.tick: UInt64` is bumped by a 10 Hz `Timer`. Computed
+properties on `EditorState` that proxy bridge state read `_ = tick`
+first so the Observation framework records the dependency. A brush
+stroke that flips voxel counts shows up in `ModelPanel` within ~100 ms
+without each callsite wiring its own version counter.
+
+Properties that *don't* need tick observation (Settings the user sets
+themselves — `state.maxBounces`, `state.toolKind`, etc.) still go
+through `tick` for simplicity. The cost is negligible (a re-evaluation
+costs nothing if nothing changed; SwiftUI diffs the result).
+
+Action methods (`newDocument`, `openDocument`, `undo`, etc.) bump
+`documentVersion` and `documentTitle` directly so menu enable-state +
+window title update synchronously.
 
 ## Controllers
+
+(Largely unchanged from the pre-port architecture. Re-read this anyway
+if it's been a while — these are the modeling-side state machines.)
 
 Every per-tool gesture is a pure-C++ namespace of free functions in the
 FloatingBufferOps / SelectionOps style — no AppKit, no Obj-C, no view
@@ -170,11 +240,12 @@ references. Ten of them: `marquee_controller`, `box_select_controller`,
  const ViewContext& vc, const MouseEvent& e)
 ```
 
-VoxelView's `mouseDown:`/`mouseDragged:`/`mouseUp:` translate `NSEvent →
-MouseEvent` via `mouseEventFromNSEvent:` and route by `ToolKind` (mouseDown)
-or `DragMode` (mouseDragged / mouseUp). Each controller owns its slice of
-`InteractionState` (the slices were carved out specifically to align with
-this dispatch — `BrushStream`, `MarqueeDrag`, `XformHandle`, etc.).
+`MetalScene`'s `mouseDown:`/`mouseDragged:`/`mouseUp:` translate
+`NSEvent → MouseEvent` via `mouseEventFromNSEvent:` and route by
+`ToolKind` (mouseDown) or `DragMode` (mouseDragged / mouseUp). Each
+controller owns its slice of `InteractionState` (the slices were
+carved out specifically to align with this dispatch — `BrushStream`,
+`MarqueeDrag`, `XformHandle`, etc.).
 
 `ViewContext` is the picking + drag-projection substrate. Stateless,
 built fresh per call: holds Camera by value, viewport size as floats,
@@ -183,24 +254,38 @@ EditorContext* non-owning. Methods like `PickCell`, `PickFace`,
 pure functions of `(camera, viewport, doc, cursor, …)`.
 
 All cursor pixel coordinates inside controllers are *view-local* —
-origin at the view's bottom-left. VoxelView converts NSWindow → local
+origin at the view's bottom-left. `MetalScene` converts NSWindow → local
 once at the NSEvent boundary in `localFromWindow:` and again in
 `mouseEventFromNSEvent:`. Controllers never see `NSPoint` or
 `convertPoint:fromView:`. The `*_local` field naming on InteractionState
-slices (`hover.local`, `anchor.screen_local`, `xform.drag_start_local`,
-`gen_gizmo.handle_start_local`, `marquee.anchor_local/current_local`)
-is the convention.
+slices is the convention.
 
-GeneratorController is the one that needs the Obj-C++ GeneratorEngine.
+GeneratorController is the one that needs the Obj-C++ `GeneratorEngine`.
 It takes a `std::function` closure (`generator_controller::GenerateFn`)
 that the dispatcher builds via `[self generateFn]`; the controller calls
 it like a black-box `(kind, bounds, params, &out_cells) → void`. Keeps
 the .cpp platform-portable.
 
-This shape is what makes the SwiftUI port feasible — the dispatcher is
-the only AppKit-bound code; replace VoxelView with a SwiftUI shell that
-translates gestures into the same `MouseEvent` and the controllers come
-along unchanged.
+### Controllers and ImGui — fully decoupled
+
+Before the port, the controllers' `DrawOverlay` functions called
+`ImGui::GetBackgroundDrawList()` directly and read
+`ImGui::GetIO().WantCaptureMouse` for hover gating. Now:
+
+- `DrawOverlay` takes `OverlayDraw& od` and (where it matters) a
+  `bool mouse_captured_by_ui`. Controllers emit lines / triangles /
+  rects into `od`; `MetalScene`'s draw loop drains it into Metal via
+  `SceneOverlayRenderer`.
+- `generator_controller::Tick`'s Escape-handling param `escape_pressed`
+  is set from `MetalScene`'s key state, not ImGui.
+- Color literal helper `macvoxel::Rgba8(r,g,b,a)` replaces `IM_COL32`.
+
+The `mouse_captured_by_ui` parameter is currently hardcoded `false`
+in `MetalScene` — Phase D didn't wire a "mouse over a SwiftUI panel"
+signal because the panels live outside the MetalSceneView in the
+SplitView, so they never intercept events that would reach the scene.
+If a future overlay panel sits *on top of* the scene, that flag needs
+real plumbing.
 
 ## Build / run loop
 
@@ -210,12 +295,18 @@ pkill -f MacVoxel.app/Contents/MacOS/MacVoxel; sleep 0.5; open build/MacVoxel.ap
 ```
 
 The kill-and-relaunch is the right rhythm: AppKit treats `open` on an
-already-running bundle as a no-op, so you have to actually exit the previous
-process to see your changes. Ninja rebuilds are fast (~1–2 s for a single .mm
-file change).
+already-running bundle as a no-op, so you have to actually exit the
+previous process to see your changes. Ninja rebuilds are fast (~1–2 s
+for a single .mm / .swift file change).
 
-`-Wall -Wextra -Wpedantic -Werror` is on for project sources. ImGui is built
-with `-Wno-everything`. Don't suppress warnings to silence; fix them.
+`-Wall -Wextra -Wpedantic -Werror` is on for project sources. There is
+no longer any third-party code in the build that needs warning
+suppression.
+
+If a Swift-import method name doesn't match what Swift expects, add
+`NS_SWIFT_NAME(swift(case:names:))` to the Obj-C declaration in
+`EditorContextBridge.h` rather than rewriting the call sites. The
+existing methods have plenty of examples.
 
 ## Headless rendering (use this!)
 
@@ -237,11 +328,11 @@ Then `Read /tmp/check.png` to actually see the result.
 - `--samples` is per-pixel; 64–256 is usually enough to read shape and
   shading, 1024+ if you need to evaluate noise.
 - `--seed` makes the output byte-deterministic for fixed inputs — diff
-  two renders with `md5` to confirm a change is/isn't a no-op.
+  two renders with `md5` to confirm a change is/isn't a no-op. Baseline
+  digest for sanity checks: teapot.vox @ 256×256, 32 spp, seed=1 →
+  `2bfedbc31a14e01a3744de2549c594fe`.
 - `--no-aces` swaps the ACES tonemap for a plain gamma-2.2 curve.
-- The camera is fit-to-bounds (matching the GUI's load-time framing);
-  there are no yaw/pitch/distance flags. If a scene has interior
-  detail (sealed boxes, etc.) the headless view won't see it.
+- The camera is fit-to-bounds; there are no yaw/pitch/distance flags.
 
 Sample `.vox` files live in `test/vox/`. Useful ones:
 `teapot.vox` (clean diffuse), `_metal mat test.vox` (metal + emissive),
@@ -249,41 +340,50 @@ Sample `.vox` files live in `test/vox/`. Useful ones:
 emitters — good for spotting NEE / MIS issues).
 
 Headless can't exercise gesture state machines — for tool / controller
-work, eyeball in the running app.
+work, eyeball in the running app. Screenshot the window with
+`screencapture -R x,y,w,h /tmp/foo.png` and `Read` it; the window
+position + size come from `CGWindowListCopyWindowInfo`.
 
 ## Conventions Paul has set
 
-These came up repeatedly during development and are worth not relitigating:
+These came up repeatedly during development and are worth not
+relitigating:
 
-- **Commits are per-step.** A logical fix or feature is one commit; don't
-  bundle unrelated changes. Recent commit style is `refactor: short title`
-  / `fix: …` / `feat: …`; older phase-work commits look like
-  `P8.3.x: short title` and that style is still fine for new phase work.
-  Coauthor trailer is `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>`.
-- **No unsolicited refactors.** If you're fixing a bug, fix the bug. Don't
-  reformat surrounding code, rename variables, or tidy adjacent functions
-  unless the user asked.
-- **Comments explain *why*, never *what*.** The code says what. A comment
-  exists when there's a hidden constraint, a workaround for a specific bug, or
-  a non-obvious invariant. Single-line is the default; multi-paragraph is
-  almost always wrong. No "added in P8.3" or "fixes the X case" — those rot.
-- **Single-pass writing.** When something is right, write it cleanly the first
-  time. Don't leave half-completed alternate paths or commented-out attempts.
-- **No half-finished implementations.** Either it works or it isn't there.
-- **Test the change in the running app before reporting done.** For renderer /
-  UI work, eyeballing the result matters more than the type-check passing.
+- **Commits are per-step.** A logical fix or feature is one commit;
+  don't bundle unrelated changes. Style: `refactor: short title` /
+  `fix: …` / `feat: …` / `chore: …`. Coauthor trailer is
+  `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>`.
+- **No unsolicited refactors.** If you're fixing a bug, fix the bug.
+  Don't reformat surrounding code, rename variables, or tidy adjacent
+  functions unless the user asked.
+- **Comments explain *why*, never *what*.** The code says what. A
+  comment exists when there's a hidden constraint, a workaround for a
+  specific bug, or a non-obvious invariant. Single-line is the default;
+  multi-paragraph is almost always wrong. No "added in P8.3" or
+  "fixes the X case" — those rot.
+- **Single-pass writing.** When something is right, write it cleanly
+  the first time. No half-finished alternate paths, no commented-out
+  attempts.
+- **No half-finished implementations.** Either it works or it isn't
+  there.
+- **Test the change in the running app before reporting done.** For
+  renderer / UI work, eyeballing the result matters more than the
+  type-check passing.
 
 ## Work rhythm
 
-- The user prefers terse updates. State what you found, what you're changing,
-  and move on. Skip "Let me look at...", "I'll now...", and end-of-turn recaps.
-- For exploratory questions ("why does X happen?" / "what would Y look like?"),
-  give a 2–3 sentence answer with a recommendation and ask whether to proceed.
-  Don't dump implementation in response to a curiosity question.
-- For concrete asks, just do it. The "explain then propose" formality is
-  unwelcome when the user already knows what they want.
-- Auto mode is often on. Don't stop for permission on local, reversible work.
-  Still ask before destructive ops or anything that affects shared state.
+- The user prefers terse updates. State what you found, what you're
+  changing, and move on. Skip "Let me look at...", "I'll now...", and
+  end-of-turn recaps.
+- For exploratory questions ("why does X happen?" / "what would Y look
+  like?"), give a 2–3 sentence answer with a recommendation and ask
+  whether to proceed. Don't dump implementation in response to a
+  curiosity question.
+- For concrete asks, just do it. The "explain then propose" formality
+  is unwelcome when the user already knows what they want.
+- Auto mode is often on. Don't stop for permission on local, reversible
+  work. Still ask before destructive ops or anything that affects shared
+  state.
 
 ## Path tracer specifics
 
@@ -295,105 +395,111 @@ glass paths.
 
 Key invariants in the shader:
 
-- **Coordinate space:** the shader works in *grid space*, not world space.
-  `ray_origin_world` is rotated to `ray_origin = (x, -z, y)` to match the
-  rasterizer's convention. All distances inside the bounce loop are in voxel
-  units.
-- **`medium_mat` skips same-material cells in the DDA.** A connected run of
-  glass voxels reads as one medium — refraction fires only at true air↔glass
-  boundaries, not at every internal cell face.
-- **`medium_entry` + `medium_albedo` carry Beer-Lambert state.** Distance
-  through the medium is `length(h.point - medium_entry)`; tint is
-  `pow(albedo, distance * kAbsorptionScale)`. `kAbsorptionScale = 0.5` ties the
-  user's albedo to a 2-voxel reference depth.
+- **Coordinate space:** the shader works in *grid space*, not world
+  space. `ray_origin_world` is rotated to `ray_origin = (x, -z, y)`
+  to match the rasterizer's convention. All distances inside the
+  bounce loop are in voxel units.
+- **`medium_mat` skips same-material cells in the DDA.** A connected
+  run of glass voxels reads as one medium — refraction fires only at
+  true air↔glass boundaries, not at every internal cell face.
+- **`medium_entry` + `medium_albedo` carry Beer-Lambert state.**
+  Distance through the medium is `length(h.point - medium_entry)`;
+  tint is `pow(albedo, distance * kAbsorptionScale)`.
+  `kAbsorptionScale = 0.5` ties the user's albedo to a 2-voxel
+  reference depth.
 - **The DDA reports medium-exit boundaries.** Three transitions:
-  skip-mat→empty cell, skip-mat→empty chunk, skip-mat→AABB-out. All return
-  `h.hit = true, h.cell_val = 0` so the bounce loop's exit handler fires and
-  applies BL. Without this, paths through freestanding slabs silently die.
-- **`t_hit` is parametric distance from the *clipped* origin** (after AABB
-  intersection), not from the world ray origin. Compute `h.point` against the
-  clipped origin or you'll be off by `t_start` along the ray.
-- **Color space.** Palette is sRGB on disk; the renderer decodes to linear on
-  upload (`std::pow(c, 2.2f)` in `rebuildResourcesFromDocument:`) and the
-  display fragment re-encodes (`pow(c, 1/2.2)`). Don't multiply linear and
-  sRGB values together.
-- **VNDF GGX, not naive GGX.** The microfacet sampler in `ggx_sample_vndf` is
-  Heitz 2018 visible-normal sampling. Every sample is guaranteed to produce
-  an above-surface reflection — no fallback-to-mirror clamp, no spike artifact.
+  skip-mat→empty cell, skip-mat→empty chunk, skip-mat→AABB-out. All
+  return `h.hit = true, h.cell_val = 0` so the bounce loop's exit
+  handler fires and applies BL.
+- **`t_hit` is parametric distance from the *clipped* origin** (after
+  AABB intersection), not from the world ray origin. Compute `h.point`
+  against the clipped origin or you'll be off by `t_start` along the
+  ray.
+- **Color space.** Palette is sRGB on disk; the renderer decodes to
+  linear on upload (`std::pow(c, 2.2f)` in
+  `rebuildResourcesFromDocument:`) and the display fragment re-encodes
+  (`pow(c, 1/2.2)`). Don't multiply linear and sRGB values together.
+- **VNDF GGX, not naive GGX.** The microfacet sampler in
+  `ggx_sample_vndf` is Heitz 2018 visible-normal sampling. Every
+  sample is guaranteed to produce an above-surface reflection — no
+  fallback-to-mirror clamp, no spike artifact.
 
 ## Generators (P12.5)
 
-Parameterized shape primitives that the user lays out via a gizmoized AABB
-rather than drawing one cell at a time. The architecture is GPU-first: each
-generator is a Metal compute kernel that scans its AABB at one thread per
-cell, evaluates the primitive's inside-test, and atomically appends the
-qualifying cell coords to an output buffer. The CPU reads the count, copies
-`count × 12 bytes` directly into a `std::vector<shapes::Vec3i>` (PackedCell
-in MSL = 3×int32, identical layout), and stamps the cells through the
-PreviewOverlay so the live preview / single-undo-step commit path is shared
-with the shape tools.
+Parameterized shape primitives that the user lays out via a gizmoized
+AABB rather than drawing one cell at a time. The architecture is
+GPU-first: each generator is a Metal compute kernel that scans its
+AABB at one thread per cell, evaluates the primitive's inside-test,
+and atomically appends the qualifying cell coords to an output
+buffer. The CPU reads the count, copies `count × 12 bytes` directly
+into a `std::vector<shapes::Vec3i>` (PackedCell in MSL = 3×int32,
+identical layout), and stamps the cells through the PreviewOverlay so
+the live preview / single-undo-step commit path is shared with the
+shape tools.
 
 Four built-in kinds shipped: Ellipsoid, Cylinder, Cone, Pyramid. The
 latter three share an `AxisView` helper in `Generators.metal` that
 materialises the int3 lo / dims / cell as float[3] arrays so the
-axis-parameterized kernels can index by `int axis` cleanly (MSL's vec3
-`[]` indexing across address spaces is the wobbly form).
+axis-parameterized kernels can index by `int axis` cleanly (MSL's
+vec3 `[]` indexing across address spaces is the wobbly form).
 
 Lives in:
 - `src/Generators.h` — pure-C++ types (`Bounds3i`, `Kind`, `Params`).
 - `src/GeneratorEngine.{h,mm}` — Obj-C++ engine. Holds one
   `MTLComputePipelineState` per `Kind`, a grow-only output buffer, an
-  atomic counter buffer (zeroed via shared-storage CPU write — no blit
-  needed on Apple Silicon's unified memory). Synchronous dispatch + wait
-  for now; double-buffered async is the right move if drag rates demand
-  it.
+  atomic counter buffer.
 - `src/GeneratorState.h` — active kind + Params (lives on EditorContext).
-- `src/ui/GeneratorPanel.cpp` — kind picker + parameter UI.
-- `src/GeneratorController.{h,cpp}` — gizmo state machine: click-drag-out
-  lays the initial AABB (live preview during drag); mouseup leaves the box
-  visible with face-normal arrow handles; clicking a handle drags that face
-  along its outward normal (NDC-space projection via
-  `ViewContext::GenHandleDragVoxels`); clicking outside any handle commits
-  the preview through `EditHistory` as a single op; per-frame `Tick` handles
-  Esc / tool-switch cancellation and dirty-detection on bounds / kind /
-  params / palette. The Obj-C++ engine reaches the controller via a
-  `std::function` closure (`generator_controller::GenerateFn`) the
-  dispatcher builds in `[self generateFn]`.
+- `src/swift/panels/GeneratorPanel.swift` — kind picker + parameter UI.
+- `src/GeneratorController.{h,cpp}` — gizmo state machine.
 
 Adding a new built-in is small: write the kernel function in
-`src/Generators.metal` (output protocol = thread-per-cell, atomic append
-on match), add the `Kind` enum entry, add the kernel function name in
-`KernelNameForKind` in `GeneratorEngine.mm`, add a panel button in
-`GeneratorPanel.cpp`, and any per-kind parameters go on `Params`. The
-eventual user-authored shader path plugs into the same dispatch — that's
-a richer project (runtime MSL compile + source editor + error reporting
-+ hot reload) but the engine doesn't need restructuring for it.
+`src/Generators.metal` (output protocol = thread-per-cell, atomic
+append on match), add the `Kind` enum entry, add the kernel function
+name in `KernelNameForKind` in `GeneratorEngine.mm`, add a panel
+button in `GeneratorPanel.swift`, and any per-kind parameters go on
+`Params` (plus `BridgeGenerator*` accessors in
+`EditorContextBridge.h/.mm` and pass-throughs on `EditorState`).
 
 Invariants:
-- Generators don't touch the document, AppKit, or ImGui. They take
-  `(Bounds3i, Params)` and emit cells. Keeps the GPU-shader escape hatch
-  open and the engine unit-testable in principle.
-- The engine's output buffer grows 2× whenever a request exceeds capacity
-  (4096-cell floor on first allocation), so a drag through bigger and
-  bigger bounds doesn't realloc every frame.
-- The controller's per-frame `Tick` change detector (active kind / bounds
-  / palette index / axis / apex_at_max) is what re-runs the engine when the
-  user tweaks the panel — no ImGui callback wiring; just compare-and-refresh
-  in the per-frame draw.
+- Generators don't touch the document, AppKit, or SwiftUI. They take
+  `(Bounds3i, Params)` and emit cells.
+- The engine's output buffer grows 2× whenever a request exceeds
+  capacity (4096-cell floor on first allocation).
+- The controller's per-frame `Tick` change detector (active kind /
+  bounds / palette index / axis / apex_at_max) is what re-runs the
+  engine when the user tweaks the panel — no SwiftUI callback wiring;
+  just compare-and-refresh in the per-frame draw.
 
 ## Things that look weird but are intentional
 
-- `transparency` controls a probabilistic split between glass-refract and
-  diffuse-fallback, *not* an absorption modulator. At transparency=1 a colored
-  glass still tints (Beer-Lambert with the actual albedo); MagicaVoxel does
-  the opposite (transparency=1 = clear regardless of color). Paul prefers the
-  current behavior on aesthetic grounds.
-- `_ior` from MATL is stored as the offset above 1.0 (so `_ior=0.3` in the
-  file is IOR 1.3 to us). That's the MagicaVoxel convention.
-- The grid's "loose" bounds aren't retightened on `Set(0)`. In practice we
-  only erase via stroke-undo, which restores prior cells, so it doesn't
-  matter — but it's a correctness gotcha if you ever grow a tool that
-  permanently shrinks the model.
+- `transparency` controls a probabilistic split between glass-refract
+  and diffuse-fallback, *not* an absorption modulator. At transparency=1
+  a colored glass still tints (Beer-Lambert with the actual albedo);
+  MagicaVoxel does the opposite (transparency=1 = clear regardless of
+  color). Paul prefers the current behavior on aesthetic grounds.
+- `_ior` from MATL is stored as the offset above 1.0 (so `_ior=0.3` in
+  the file is IOR 1.3 to us). That's the MagicaVoxel convention.
+- The grid's "loose" bounds aren't retightened on `Set(0)`. In practice
+  we only erase via stroke-undo, which restores prior cells, so it
+  doesn't matter — but it's a correctness gotcha if you ever grow a
+  tool that permanently shrinks the model.
 - `ToolState.h` defines `ToolSettings` (not `ToolState`); `RenderState.h`
   defines `RenderSettings` + `RenderProgress`. The file names date from
   before a rename pass kept git history attached to the original files.
+- `PanelState.h` still defines several drag-coalescing structs even
+  though the SwiftUI panels only use two of them (`palette_color_edit`
+  and `material_edit`). The unused fields (`palette_drag`,
+  `palette_context_slot`, `color_clipboard`, `save_render_clicked`,
+  `show_imgui_demo`) are dormant — left in place because the SwiftUI
+  palette polish (drag-rect multi-select, context menu) will probably
+  reuse some of them.
+- `main.mm` is intentionally tiny — argv check + Swift entry call. The
+  Swift `App` runs `App.main()` from `MainEntry.swift`'s
+  `@_cdecl("MacVoxelRunApp")` rather than via `@main`. Keeps `main.mm`'s
+  early `render` subcommand dispatch — the headless path never touches
+  SwiftUI.
+- Bridge enums use `NS_ENUM(NSInteger, …)` with `NS_SWIFT_NAME(case)`
+  on each entry so Swift gets idiomatic `.x` / `.brush` cases. Bridge
+  methods use `NS_SWIFT_NAME` whenever the auto-import would produce a
+  collision or a clunky name. There are quite a few of these — the
+  pattern is mechanical, not magic.
