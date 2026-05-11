@@ -106,6 +106,39 @@ constant uint kChunkMask = 15u;
 constant uint kChunkSize = 16u;
 constant uint kChunkVolume = 4096u;
 
+// Floor of the edit volume — matches EditVolume's defaults. Hardcoded
+// since the volume is fixed-size for Phase 13.5; promote to uniforms
+// the moment the volume becomes per-document and editable.
+constant float kFloorXMin = -128.0;
+constant float kFloorXMax =  128.0;
+constant float kFloorYMin = -128.0;
+constant float kFloorYMax =  128.0;
+
+// Faint floor grid drawn where the ray escapes into empty space and
+// intersects z=0 inside the volume's x/y footprint. Returns the
+// background color blended with a thin line at every integer cell
+// boundary. Width grows + opacity decays with distance so the grid
+// reads at all zooms without moiré.
+float3 floor_grid_color(float3 ray_origin, float3 ray_dir, float3 bg) {
+    if (abs(ray_dir.z) < 1e-6) return bg;
+    float t = -ray_origin.z / ray_dir.z;
+    if (t <= 0.0) return bg;
+    float gx = ray_origin.x + t * ray_dir.x;
+    float gy = ray_origin.y + t * ray_dir.y;
+    if (gx < kFloorXMin || gx > kFloorXMax ||
+        gy < kFloorYMin || gy > kFloorYMax) return bg;
+    float dx = min(fract(gx), 1.0 - fract(gx));
+    float dy = min(fract(gy), 1.0 - fract(gy));
+    float d = min(dx, dy);
+    float width = mix(0.02, 0.06, smoothstep(20.0, 200.0, t));
+    float line = 1.0 - smoothstep(width * 0.5, width, d);
+    float boundary_fade =
+        1.0 - smoothstep(120.0, 128.0, max(abs(gx), abs(gy)));
+    float distance_fade = 1.0 - smoothstep(96.0, 320.0, t);
+    line *= boundary_fade * distance_fade * 0.35;
+    return mix(bg, float3(0.55, 0.6, 0.7), line);
+}
+
 fragment float4 raycast_fragment(
     VertOut in [[stage_in]],
     constant Uniforms& u [[buffer(0)]],
@@ -157,7 +190,8 @@ fragment float4 raycast_fragment(
     float t_enter = max(max(t_lo.x, t_lo.y), t_lo.z);
     float t_exit  = min(min(t_hi.x, t_hi.y), t_hi.z);
     if (t_exit < 0.0 || t_enter > t_exit) {
-        return float4(0.118, 0.118, 0.18, 1.0);
+        float3 bg = float3(0.118, 0.118, 0.18);
+        return float4(floor_grid_color(ray_origin, ray_dir, bg), 1.0);
     }
     // Advance origin to the entry point if we're outside. The small nudge
     // past the boundary avoids landing on a cell edge with floor() rounding
@@ -245,7 +279,8 @@ fragment float4 raycast_fragment(
         // guaranteed we'd enter at least one of them, so leaving both
         // means we exited the union).
         if (!doc_in && !buf_in) {
-            return float4(0.118, 0.118, 0.18, 1.0);
+            float3 bg = float3(0.118, 0.118, 0.18);
+            return float4(floor_grid_color(ray_origin, ray_dir, bg), 1.0);
         }
 
         if (pool_idx_doc == 0u && pool_idx_buf == 0u) {
@@ -391,7 +426,8 @@ fragment float4 raycast_fragment(
             last_axis = 2;
         }
     }
-    return float4(0.118, 0.118, 0.18, 1.0);
+    float3 bg = float3(0.118, 0.118, 0.18);
+    return float4(floor_grid_color(ray_origin, ray_dir, bg), 1.0);
 }
 )MSL";
 
