@@ -50,8 +50,10 @@ using DragMode = macvoxel::DragMode;
 using Vec3i = macvoxel::shapes::Vec3i;
 
 // VK_Space (HIToolbox kVK_Space). Used to enable Pan via Space-drag.
-constexpr unsigned short kKeyCodeSpace  = 49;
-constexpr unsigned short kKeyCodeEscape = 53;
+constexpr unsigned short kKeyCodeSpace       = 49;
+constexpr unsigned short kKeyCodeEscape      = 53;
+constexpr unsigned short kKeyCodeReturn      = 36;
+constexpr unsigned short kKeyCodeKeypadEnter = 76;
 }  // namespace
 
 @implementation MetalScene {
@@ -205,6 +207,19 @@ constexpr unsigned short kKeyCodeEscape = 53;
     if (kc == kKeyCodeEscape) {
         _escapePending = YES;
         return;
+    }
+    if (kc == kKeyCodeReturn || kc == kKeyCodeKeypadEnter) {
+        if (_ctx->tool.tool == macvoxel::ToolKind::Generator &&
+            _interaction.gen_gizmo.active) {
+            macvoxel::generator_controller::Commit(*_ctx, _interaction);
+            _interaction.drag_mode = macvoxel::DragMode::None;
+            return;
+        }
+        if (_ctx->floating_buffer.active) {
+            [self autoCommitFloatingBuffer];
+            return;
+        }
+        // Nothing live to commit — fall through to super.
     }
     const NSEventModifierFlags m = event.modifierFlags &
         (NSEventModifierFlagCommand |
