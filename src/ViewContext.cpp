@@ -7,11 +7,69 @@
 #include "Selection.h"
 #include "VoxelGrid.h"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace macvoxel {
 
 namespace {
+
+// Intersect the ray with the 6 axis-aligned walls of the edit volume;
+// return the closest forward hit and snap it to the cell on the inside
+// of the hit face. Used as the empty-space fallback for picking and
+// for Add-mode tools — a click into empty space anchors at whichever
+// wall the ray hits first instead of always landing on z=0.
+bool IntersectVolumeWall(const EditVolume& vol,
+                         simd::float3 ray_origin,
+                         simd::float3 ray_dir,
+                         shapes::Vec3i* out_cell,
+                         int* out_face_axis) {
+    const float walls[3][2] = {
+        {static_cast<float>(vol.x0), static_cast<float>(vol.x1 + 1)},
+        {static_cast<float>(vol.y0), static_cast<float>(vol.y1 + 1)},
+        {static_cast<float>(vol.z0), static_cast<float>(vol.z1 + 1)},
+    };
+    const float ro[3] = {ray_origin.x, ray_origin.y, ray_origin.z};
+    const float rd[3] = {ray_dir.x, ray_dir.y, ray_dir.z};
+    float best_t = std::numeric_limits<float>::infinity();
+    int best_axis = -1, best_sign = 0;
+    float best_h[3] = {0.0f, 0.0f, 0.0f};
+    for (int axis = 0; axis < 3; ++axis) {
+        if (std::abs(rd[axis]) < 1e-6f) continue;
+        for (int side = 0; side < 2; ++side) {
+            const float plane = walls[axis][side];
+            const float t = (plane - ro[axis]) / rd[axis];
+            if (t < 0.0f || t > 4096.0f) continue;
+            if (t >= best_t) continue;
+            const float h[3] = {ro[0] + t * rd[0],
+                                ro[1] + t * rd[1],
+                                ro[2] + t * rd[2]};
+            bool inside = true;
+            for (int o = 0; o < 3 && inside; ++o) {
+                if (o == axis) continue;
+                if (h[o] < walls[o][0] || h[o] > walls[o][1]) inside = false;
+            }
+            if (!inside) continue;
+            best_t = t;
+            best_axis = axis;
+            best_sign = (side == 0) ? -1 : +1;
+            best_h[0] = h[0]; best_h[1] = h[1]; best_h[2] = h[2];
+        }
+    }
+    if (best_axis < 0) return false;
+    out_cell->x = std::clamp(static_cast<int>(std::floor(best_h[0])),
+                             vol.x0, vol.x1);
+    out_cell->y = std::clamp(static_cast<int>(std::floor(best_h[1])),
+                             vol.y0, vol.y1);
+    out_cell->z = std::clamp(static_cast<int>(std::floor(best_h[2])),
+                             vol.z0, vol.z1);
+    if (best_axis == 0) out_cell->x = (best_sign < 0) ? vol.x0 : vol.x1;
+    if (best_axis == 1) out_cell->y = (best_sign < 0) ? vol.y0 : vol.y1;
+    if (best_axis == 2) out_cell->z = (best_sign < 0) ? vol.z0 : vol.z1;
+    if (out_face_axis) *out_face_axis = best_axis;
+    return true;
+}
 
 // (axis, sign) for face index 0..5. axis = face/2 (0=X, 1=Y, 2=Z);
 // sign = (face&1) ? +1 : -1. Same convention as VoxelView's gizmo
@@ -158,13 +216,10 @@ bool ViewContext::PickCell(float local_x, float local_y,
         out_cell->z = hit.z + (from_buf ? fb.offset_z : 0);
         return true;
     }
-    if (std::abs(ray_dir_grid.z) < 1e-6f) return false;
-    const float t = -ray_origin_grid.z / ray_dir_grid.z;
-    if (t < 0.0f || t > 4096.0f) return false;
-    out_cell->x = static_cast<int32_t>(std::floor(ray_origin_grid.x + t * ray_dir_grid.x));
-    out_cell->y = static_cast<int32_t>(std::floor(ray_origin_grid.y + t * ray_dir_grid.y));
-    out_cell->z = 0;
-    return true;
+    // Empty-space fallback: snap to whichever wall of the edit volume
+    // the ray hits first instead of always landing on z=0.
+    return IntersectVolumeWall(doc.volume, ray_origin_grid, ray_dir_grid,
+                               out_cell, nullptr);
 }
 
 bool ViewContext::GridPlaneIntersect(float local_x, float local_y,
@@ -222,18 +277,23 @@ bool ViewContext::ComputeTargetCell(
             else if (hit.axis == 2) target_z += hit.sign;
         }
     } else {
-        // Empty-space click. Add falls back to the implicit ground plane
-        // (grid z=0, matching MagicaVoxel). Remove/Paint need a real
-        // voxel to act on, so they no-op here.
+        // Empty-space click. Add falls back to the nearest camera-facing
+        // wall of the edit volume; Remove/Paint still no-op here for
+        // non-Line tools (a "remove empty space" brush doesn't mean
+        // anything). ComputeLineEndpoint retries with Add mode so Line
+        // endpoints can still anchor to a wall.
         if (mode != ToolMode::Add) return false;
-        if (std::abs(ray_dir_grid.z) < 1e-6f) return false;
-        const float t = -ray_origin_grid.z / ray_dir_grid.z;
-        if (t < 0.0f || t > 4096.0f) return false;
-        const float hx = ray_origin_grid.x + t * ray_dir_grid.x;
-        const float hy = ray_origin_grid.y + t * ray_dir_grid.y;
-        target_x = static_cast<int>(std::floor(hx));
-        target_y = static_cast<int>(std::floor(hy));
-        target_z = 0;
+        shapes::Vec3i wall_cell;
+        int wall_axis = 0;
+        if (!IntersectVolumeWall(ctx->document.volume,
+                                 ray_origin_grid, ray_dir_grid,
+                                 &wall_cell, &wall_axis)) {
+            return false;
+        }
+        target_x = wall_cell.x;
+        target_y = wall_cell.y;
+        target_z = wall_cell.z;
+        face_axis = wall_axis;
     }
 
     *out_cell = shapes::Vec3i{target_x, target_y, target_z};
