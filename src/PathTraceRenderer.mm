@@ -627,16 +627,20 @@ struct DisplayUniforms {
         du.sample_count = _sampleCount;
         du.aces_tonemap =
             rs.aces_tonemap ? 1u : 0u;
-        // Aspect-preserving fit-to-window: render-aspect vs drawable-
-        // aspect tells us which dimension is the limiter. Whichever
-        // axis is over-large gets squeezed to a fraction of its NDC
-        // extent; the other stays at 1.0.
+        // Always fill the viewport vertically so the path-trace display
+        // matches the raycast preview's framing (vertical FOV is fixed,
+        // so vertical extent is identical regardless of accum aspect).
+        // If the path-trace aspect is wider than the drawable, ndc.x
+        // outside [-1, 1] never fires the display fragment's discard —
+        // ndc.x / region_w stays sub-unit and we sample only the center
+        // crop of the accum. If narrower, region_w < 1 and we get
+        // pillarbox bars on the sides.
         const float ar = static_cast<float>(_accumSize.width) /
                          static_cast<float>(_accumSize.height);
         const float ad = static_cast<float>(drawable.width) /
                          static_cast<float>(drawable.height);
-        du.region_w = std::min(1.0f, ar / ad);
-        du.region_h = std::min(1.0f, ad / ar);
+        du.region_w = ar / ad;
+        du.region_h = 1.0f;
 
         [enc setRenderPipelineState:_displayPipeline];
         [enc setCullMode:MTLCullModeNone];
