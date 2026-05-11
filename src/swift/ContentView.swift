@@ -12,7 +12,7 @@ struct ContentView: View {
                     PalettePanel(state: state)
                 }
             }
-            .frame(minWidth: 200, idealWidth: 240, maxWidth: 320)
+            .frame(minWidth: 170, idealWidth: 200, maxWidth: 280)
 
             MetalSceneView(state: state)
                 .frame(minWidth: 500, idealWidth: 900)
@@ -31,7 +31,7 @@ struct ContentView: View {
                     SelectionPanel()
                 }
             }
-            .frame(minWidth: 240, idealWidth: 280, maxWidth: 400)
+            .frame(minWidth: 270, idealWidth: 280, maxWidth: 360)
         }
     }
 }

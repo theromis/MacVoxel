@@ -28,10 +28,22 @@ struct PalettePanel: View {
 
     private var swatchGrid: some View {
         let columns = Array(repeating: GridItem(.fixed(14), spacing: 2),
-                            count: 16)
+                            count: 8)
+        // Slots 1…255 laid out so slot 1 lives in the bottom-left and
+        // slot 255 in the top-row's right-most-but-one cell. Both axes
+        // ascend toward the upper-right — natural reading direction for
+        // a colour ramp. Slot 0 is the non-paintable "empty" sentinel;
+        // it isn't shown, leaving a blank in the top-right corner.
         return LazyVGrid(columns: columns, spacing: 2) {
-            ForEach(0..<state.paletteSize, id: \.self) { i in
-                Swatch(index: i, state: state)
+            ForEach(0..<state.paletteSize, id: \.self) { pos in
+                let row = pos / 8
+                let col = pos % 8
+                let slot = (31 - row) * 8 + col + 1
+                if slot <= 255 {
+                    Swatch(index: slot, state: state)
+                } else {
+                    Color.clear.frame(width: 14, height: 14)
+                }
             }
         }
     }
