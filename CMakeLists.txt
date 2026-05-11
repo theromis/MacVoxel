@@ -26,34 +26,12 @@ set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ---------------------------------------------------------------------------
-# ImGui submodule
-# ---------------------------------------------------------------------------
-set(IMGUI_DIR "${CMAKE_SOURCE_DIR}/third_party/imgui")
-if(NOT EXISTS "${IMGUI_DIR}/imgui.h")
-    message(FATAL_ERROR
-        "Dear ImGui submodule not found at ${IMGUI_DIR}. "
-        "Run: git submodule update --init --recursive")
-endif()
-
-set(IMGUI_SOURCES
-    "${IMGUI_DIR}/imgui.cpp"
-    "${IMGUI_DIR}/imgui_draw.cpp"
-    "${IMGUI_DIR}/imgui_tables.cpp"
-    "${IMGUI_DIR}/imgui_widgets.cpp"
-    "${IMGUI_DIR}/imgui_demo.cpp"
-    "${IMGUI_DIR}/backends/imgui_impl_metal.mm"
-    "${IMGUI_DIR}/backends/imgui_impl_osx.mm"
-)
-
-# ---------------------------------------------------------------------------
 # Application target
 # ---------------------------------------------------------------------------
 set(APP_NAME "MacVoxel")
 
 set(APP_SOURCES
     src/main.mm
-    src/AppDelegate.mm
-    src/VoxelView.mm
     src/Camera.cpp
     src/CliRender.mm
     src/RaycastRenderer.mm
@@ -85,15 +63,6 @@ set(APP_SOURCES
     src/PreviewOps.cpp
     src/ShapeController.cpp
     src/XformHandleController.cpp
-    src/ui/GeneratorPanel.cpp
-    src/ui/LightPanel.cpp
-    src/ui/ModelPanel.cpp
-    src/ui/SelectionPanel.cpp
-    src/ui/ToolPanel.cpp
-    src/ui/PalettePanel.cpp
-    src/ui/RenderPanel.cpp
-    src/ui/Fonts.cpp
-    src/ui/Theme.cpp
     # SwiftUI shell — Obj-C++ bridge over EditorContext. Swift code in
     # APP_SWIFT_SOURCES below.
     src/swift/EditorContextBridge.mm
@@ -131,7 +100,6 @@ set_source_files_properties(${APP_RESOURCES}
 add_executable(${APP_NAME} MACOSX_BUNDLE
     ${APP_SOURCES}
     ${APP_SWIFT_SOURCES}
-    ${IMGUI_SOURCES}
     ${APP_RESOURCES}
 )
 
@@ -149,20 +117,11 @@ set_target_properties(${APP_NAME} PROPERTIES
     MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
 )
 
-target_include_directories(${APP_NAME} PRIVATE
-    src
-    "${IMGUI_DIR}"
-    "${IMGUI_DIR}/backends"
-)
+target_include_directories(${APP_NAME} PRIVATE src)
 
-# Project sources: warnings as errors. Third-party (ImGui) compiled cleanly.
+# Warnings as errors for project sources.
 target_compile_options(${APP_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wall -Wextra -Wpedantic -Werror>
-)
-
-# Relax warnings for ImGui sources only.
-set_source_files_properties(${IMGUI_SOURCES} PROPERTIES
-    COMPILE_OPTIONS "-Wno-everything"
 )
 
 # Frameworks
@@ -182,7 +141,7 @@ target_link_libraries(${APP_NAME} PRIVATE
     ${UTI_LIBRARY}
 )
 
-# ARC for Obj-C++. ImGui's backends are written ARC-compatible upstream.
+# ARC for Obj-C++.
 target_compile_options(${APP_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
 )
