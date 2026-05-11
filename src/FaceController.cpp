@@ -38,7 +38,10 @@ void ApplyFaceExtrusion(EditorContext& ctx, InteractionState& state, int d) {
     da[state.anchor.face_axis] = state.face.sign;
     PreviewOverlay& overlay = ctx.preview;
     auto write = [&](int x, int y, int z, uint8_t new_val) {
-        overlay.Stamp(x, y, z, new_val, doc.grid.Get(x, y, z));
+        const uint8_t old_val = doc.grid.Get(x, y, z);
+        if (new_val != 0 && old_val == 0 &&
+            !doc.volume.Contains(x, y, z)) return;
+        overlay.Stamp(x, y, z, new_val, old_val);
     };
 
     const ToolSettings& tool = ctx.tool;
@@ -122,6 +125,7 @@ void ApplyFaceLayerAtOffset(EditorContext& ctx, InteractionState& state,
         const uint8_t old_val = doc.grid.Get(x, y, z);
         if (mode == ToolMode::Add && offset > 0) {
             if (old_val != 0) continue;
+            if (!doc.volume.Contains(x, y, z)) continue;
             const uint8_t color =
                 (tool.face_with == FaceWithColor::Geometry)
                     ? doc.grid.Get(v.x, v.y, v.z)

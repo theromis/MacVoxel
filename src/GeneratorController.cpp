@@ -77,6 +77,8 @@ void StampCellsToOverlay(EditorContext& ctx,
     for (const auto& c : cells) {
         const uint8_t old_val = doc.grid.Get(c.x, c.y, c.z);
         const uint8_t new_val = ComputeNewCellValue(old_val, mode, palette_idx);
+        if (new_val != 0 && old_val == 0 &&
+            !doc.volume.Contains(c.x, c.y, c.z)) continue;
         overlay.Stamp(c.x, c.y, c.z, new_val, old_val);
     }
     ++overlay.version;

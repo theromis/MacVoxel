@@ -31,6 +31,13 @@ void StampBrushFootprint(EditorContext& ctx,
         const uint8_t old_val = doc.grid.Get(x, y, z);
         const uint8_t new_val = ComputeNewCellValue(old_val, mode,
                                                     tool.palette_idx);
+        // Creating a new non-empty cell outside the edit volume is
+        // silently dropped. Modifying existing cells (Paint over a
+        // non-empty cell) and deletions are both unrestricted, so a
+        // user can still clean up loaded data that landed out of
+        // bounds.
+        if (new_val != 0 && old_val == 0 &&
+            !doc.volume.Contains(x, y, z)) return;
         if (preview) {
             overlay.Stamp(x, y, z, new_val, old_val);
             return;

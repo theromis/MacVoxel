@@ -97,12 +97,19 @@ void CommitFloatingBuffer(EditorContext& ctx) {
             const int32_t tx = base_x + static_cast<int32_t>(lx) + fb.offset_x;
             const int32_t ty = base_y + static_cast<int32_t>(ly) + fb.offset_y;
             const int32_t tz = base_z + static_cast<int32_t>(lz) + fb.offset_z;
+            // Drop cells that would create new content outside the
+            // edit volume — paste / move-to-empty-space silently clips
+            // to the canvas. Modifying or vacating an existing cell is
+            // still fine, so source_originals entries already recorded
+            // above (with new_val=0) aren't affected.
+            const uint8_t doc_at = doc.grid.Get(tx, ty, tz);
+            if (doc_at == 0 && !doc.volume.Contains(tx, ty, tz)) continue;
             const int64_t key = PackCellKey(tx, ty, tz);
             auto it = changes.find(key);
             if (it != changes.end()) {
                 it->second.new_val = pal;
             } else {
-                changes[key] = {doc.grid.Get(tx, ty, tz), pal};
+                changes[key] = {doc_at, pal};
             }
         }
     }

@@ -124,8 +124,14 @@ void ApplyMappingToSelection(
     std::unordered_map<int64_t, uint8_t> changes;
     changes.reserve(src.size() * 2);
     auto touch = [&](int32_t x, int32_t y, int32_t z, uint8_t new_val) {
+        const uint8_t cur = doc.grid.Get(x, y, z);
+        // Rotated / flipped cell would land at a new position outside
+        // the edit volume — drop it. Source-clears (new_val=0) and
+        // overwrites of existing cells aren't restricted.
+        if (new_val != 0 && cur == 0 &&
+            !doc.volume.Contains(x, y, z)) return;
         const int64_t key = PackCellKey(x, y, z);
-        changes.try_emplace(key, doc.grid.Get(x, y, z));
+        changes.try_emplace(key, cur);
         doc.grid.Set(x, y, z, new_val);
     };
     for (const auto& s : src) touch(s.x, s.y, s.z, 0);

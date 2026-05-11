@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EditVolume.h"
 #include "Palette.h"
 #include "VoxelGrid.h"
 
@@ -30,6 +31,7 @@ namespace macvoxel {
 struct Document {
     VoxelGrid grid;
     Palette palette;
+    EditVolume volume;
     std::string path;  // empty => Untitled, never saved
     uint64_t version = 0;
     uint64_t geometry_version = 0;
