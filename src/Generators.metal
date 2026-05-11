@@ -18,18 +18,20 @@ using namespace metal;
 struct Uniforms {
     int3 lo;          // bounds min (x0, y0, z0)
     int3 dims;        // bounds size (x1 - x0 + 1, ...)
-    uint palette_idx; // unused on GPU side; kept for parity with CPU Params
+    uint palette_idx; // single-color kernels emit this as the cell's palette
     uint axis;        // 0 = X, 1 = Y, 2 = Z (cylinder/cone/pyramid axis)
     uint apex_at_max; // 0 = apex at -axis face, 1 = apex at +axis face
     uint pad;
-    float noise_scale;     // Perlin: voxels per feature
-    float noise_threshold; // Perlin: fill when fBm ≥ threshold (0..1)
-    uint  noise_octaves;   // Perlin: 1..6 fBm octaves
-    uint  noise_seed;      // Perlin: lattice hash seed
-    float torus_tube;      // Torus: tube thickness (0..1 of bounds half-extent)
+    float noise_scale;        // Perlin: voxels per feature
+    float noise_threshold;    // Perlin: fill when fBm ≥ threshold (0..1)
+    uint  noise_octaves;      // Perlin: 1..6 fBm octaves
+    uint  noise_seed;         // Perlin: lattice hash seed
+    float torus_tube;         // Torus: tube thickness (0..1 of bounds half-extent)
+    uint  perlin_palette_lo;  // Perlin: gradient endpoint at fBm = threshold
+    uint  perlin_palette_hi;  // Perlin: gradient endpoint at fBm = 1
 };
 
-struct PackedCell { int x, y, z; };
+struct PackedCell { int x, y, z; uint palette; };
 
 // Common: convert thread-position-in-grid to a cell coordinate inside
 // the bounds, returning false if the thread is past the dispatch tail.
@@ -39,11 +41,11 @@ static bool resolve_cell(uint3 gid, constant Uniforms& u, thread int3& cell) {
     return true;
 }
 
-static void emit(int3 cell,
+static void emit(int3 cell, uint palette,
                  device atomic_uint* counter,
                  device PackedCell* out) {
     uint slot = atomic_fetch_add_explicit(counter, 1u, memory_order_relaxed);
-    out[slot] = PackedCell{cell.x, cell.y, cell.z};
+    out[slot] = PackedCell{cell.x, cell.y, cell.z, palette};
 }
 
 // Ellipsoid that exactly fits the bounding box: for box width W, the
@@ -64,7 +66,7 @@ kernel void generate_ellipsoid(
     float3 half_ext = float3(u.dims) * 0.5;
     float3 norm = (float3(cell) + 0.5 - center) / half_ext;
     if (dot(norm, norm) <= 1.0) {
-        emit(cell, counter, out);
+        emit(cell, u.palette_idx, counter, out);
     }
 }
 
@@ -117,7 +119,7 @@ kernel void generate_cylinder(
     float n_v = (v.pos[v_a] - center_v) / (v.dim[v_a] * 0.5);
 
     if (n_u * n_u + n_v * n_v <= 1.0) {
-        emit(cell, counter, out);
+        emit(cell, u.palette_idx, counter, out);
     }
 }
 
@@ -149,7 +151,7 @@ kernel void generate_cone(
     float n_v = (v.pos[v_a] - center_v) / (v.dim[v_a] * 0.5);
 
     if (n_u * n_u + n_v * n_v <= r * r) {
-        emit(cell, counter, out);
+        emit(cell, u.palette_idx, counter, out);
     }
 }
 
@@ -180,7 +182,7 @@ kernel void generate_pyramid(
     float n_v = (v.pos[v_a] - center_v) / (v.dim[v_a] * 0.5);
 
     if (max(abs(n_u), abs(n_v)) <= r) {
-        emit(cell, counter, out);
+        emit(cell, u.palette_idx, counter, out);
     }
 }
 
@@ -218,7 +220,7 @@ kernel void generate_torus(
     float dr = radial - (1.0 - tube);
     float er = dr / tube;
     if (er * er + n_a * n_a <= 1.0) {
-        emit(cell, counter, out);
+        emit(cell, u.palette_idx, counter, out);
     }
 }
 
@@ -307,7 +309,16 @@ kernel void generate_perlin(
     // Perlin3 output sits in roughly [-0.87, 0.87]; the fBm sum (normalized
     // by total_amp) stays in the same range. Map to [0, 1] for threshold.
     float n = clamp((total / total_amp) * 0.5 + 0.5, 0.0, 1.0);
-    if (n >= u.noise_threshold) {
-        emit(cell, counter, out);
-    }
+    if (n < u.noise_threshold) return;
+
+    // Gradient-map the palette across the *above-threshold* portion of
+    // the noise range so the full lo..hi range stays visible no matter
+    // where the threshold sits. Threshold = 1 is the kernel's quiet
+    // hint to bail (no cells will pass anyway).
+    float gradient_span = 1.0 - u.noise_threshold;
+    float t = (gradient_span > 1e-6) ? (n - u.noise_threshold) / gradient_span : 0.0;
+    float lo = float(u.perlin_palette_lo);
+    float hi = float(u.perlin_palette_hi);
+    uint  palette = uint(clamp(round(mix(lo, hi, t)), 0.0, 255.0));
+    emit(cell, palette, counter, out);
 }

@@ -246,6 +246,16 @@ final class EditorState {
         set { bridge.generatorTorusTube = newValue; tick &+= 1 }
     }
 
+    var generatorPerlinPaletteLo: Int {
+        get { _ = tick; return bridge.generatorPerlinPaletteLo }
+        set { bridge.generatorPerlinPaletteLo = newValue; tick &+= 1 }
+    }
+
+    var generatorPerlinPaletteHi: Int {
+        get { _ = tick; return bridge.generatorPerlinPaletteHi }
+        set { bridge.generatorPerlinPaletteHi = newValue; tick &+= 1 }
+    }
+
     // ---- Render settings (panel-facing) ----
     //
     // Path tracer reads these every frame; raycast preview ignores

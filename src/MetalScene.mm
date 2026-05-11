@@ -306,7 +306,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     return [engine](macvoxel::generators::Kind kind,
                     macvoxel::generators::Bounds3i bounds,
                     macvoxel::generators::Params params,
-                    std::vector<macvoxel::shapes::Vec3i> &out) {
+                    std::vector<macvoxel::generators::CellOut> &out) {
         [engine generateInto:out kind:kind bounds:bounds params:params];
     };
 }

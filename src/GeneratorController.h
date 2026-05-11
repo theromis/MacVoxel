@@ -2,7 +2,6 @@
 
 #include "Generators.h"
 #include "InteractionState.h"
-#include "Shapes.h"
 #include "ToolState.h"
 
 #include <functional>
@@ -29,7 +28,7 @@ namespace macvoxel::generator_controller {
 // sees AppKit / Metal types and stays portable.
 using GenerateFn = std::function<
     void(generators::Kind, generators::Bounds3i, generators::Params,
-         std::vector<shapes::Vec3i>&)>;
+         std::vector<generators::CellOut>&)>;
 
 // mouseDown when tool=Generator and gizmo isn't active. Picks the
 // anchor cell, activates the gizmo at that cell (single-cell box),

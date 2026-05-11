@@ -64,19 +64,20 @@ void FaceWorldGeom(const generators::Bounds3i& b, int face,
 }
 
 // Single-cell stamp pipeline. Each cell from the engine is "fill this
-// exact cell" — brush size / shape / 2D / 3D options must NOT apply
-// (the kernel already produced the final cell list). Stages into
-// PreviewOverlay; Commit / Cancel close the gesture.
+// exact cell with the kernel-chosen palette" — brush size / shape / 2D
+// / 3D options must NOT apply (the kernel already produced the final
+// cell list). Stages into PreviewOverlay; Commit / Cancel close the
+// gesture.
 void StampCellsToOverlay(EditorContext& ctx,
-                         const std::vector<shapes::Vec3i>& cells,
+                         const std::vector<generators::CellOut>& cells,
                          ToolMode mode) {
     if (cells.empty()) return;
     Document& doc = ctx.document;
-    const uint8_t palette_idx = ctx.tool.palette_idx;
     PreviewOverlay& overlay = ctx.preview;
     for (const auto& c : cells) {
         const uint8_t old_val = doc.grid.Get(c.x, c.y, c.z);
-        const uint8_t new_val = ComputeNewCellValue(old_val, mode, palette_idx);
+        const uint8_t cell_palette = static_cast<uint8_t>(c.palette);
+        const uint8_t new_val = ComputeNewCellValue(old_val, mode, cell_palette);
         if (new_val != 0 && old_val == 0 &&
             !doc.volume.Contains(c.x, c.y, c.z)) continue;
         overlay.Stamp(c.x, c.y, c.z, new_val, old_val);
@@ -97,7 +98,7 @@ void RegenerateAndStamp(EditorContext& ctx, InteractionState& state,
 
     generators::Params p = ctx.generator.params;
     p.palette_idx = ctx.tool.palette_idx;
-    std::vector<shapes::Vec3i> cells;
+    std::vector<generators::CellOut> cells;
     generate(ctx.generator.active_kind, bounds, p, cells);
     StampCellsToOverlay(ctx, cells, mode);
 
@@ -223,7 +224,9 @@ void Tick(EditorContext& ctx, InteractionState& state,
         gs.params.noise_threshold != last.noise_threshold ||
         gs.params.noise_octaves != last.noise_octaves ||
         gs.params.noise_seed != last.noise_seed ||
-        gs.params.torus_tube != last.torus_tube;
+        gs.params.torus_tube != last.torus_tube ||
+        gs.params.perlin_palette_lo != last.perlin_palette_lo ||
+        gs.params.perlin_palette_hi != last.perlin_palette_hi;
     if (!dirty) return;
 
     RegenerateAndStamp(ctx, state, state.gen_gizmo.bounds,

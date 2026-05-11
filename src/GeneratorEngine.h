@@ -5,7 +5,6 @@
 #include <vector>
 
 #include "Generators.h"
-#include "Shapes.h"  // shapes::Vec3i — output cell list
 
 // GPU-backed generator runner. Owns a Metal compute pipeline state per
 // generator kind, an output buffer (grown on demand to hold the
@@ -30,7 +29,7 @@
 // Run the generator for `kind` over `bounds` with `params`. Cells the
 // kernel marks as "filled" are appended to `out` in undefined order
 // (atomic-append output, no ordering guarantee).
-- (void)generateInto:(std::vector<macvoxel::shapes::Vec3i>&)out
+- (void)generateInto:(std::vector<macvoxel::generators::CellOut>&)out
                 kind:(macvoxel::generators::Kind)kind
               bounds:(macvoxel::generators::Bounds3i)bounds
               params:(const macvoxel::generators::Params&)params;

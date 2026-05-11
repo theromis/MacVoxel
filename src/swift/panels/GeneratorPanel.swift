@@ -128,6 +128,64 @@ struct GeneratorPanel: View {
                 .controlSize(.small)
             }
         }
+        labeled("Palette range") {
+            paletteIndexRow(binding: Binding(
+                get: { state.generatorPerlinPaletteLo },
+                set: { state.generatorPerlinPaletteLo = $0 }
+            ))
+            paletteIndexRow(binding: Binding(
+                get: { state.generatorPerlinPaletteHi },
+                set: { state.generatorPerlinPaletteHi = $0 }
+            ))
+            gradientStrip
+                .frame(height: 8)
+                .clipShape(RoundedRectangle(cornerRadius: 2))
+        }
+    }
+
+    private func paletteIndexRow(binding: Binding<Int>) -> some View {
+        HStack(spacing: 6) {
+            Slider(value: Binding(
+                get: { Double(binding.wrappedValue) },
+                set: { binding.wrappedValue = Int($0.rounded()) }
+            ), in: 0...255)
+            paletteSwatch(index: binding.wrappedValue)
+            Text("\(binding.wrappedValue)")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, alignment: .trailing)
+        }
+    }
+
+    private func paletteSwatch(index: Int) -> some View {
+        Rectangle()
+            .fill(paletteColor(index: index))
+            .frame(width: 14, height: 14)
+            .overlay(
+                RoundedRectangle(cornerRadius: 2)
+                    .stroke(Color.primary.opacity(0.2), lineWidth: 0.5)
+            )
+    }
+
+    private var gradientStrip: some View {
+        let lo = state.generatorPerlinPaletteLo
+        let hi = state.generatorPerlinPaletteHi
+        let count = abs(hi - lo) + 1
+        return HStack(spacing: 0) {
+            ForEach(0..<count, id: \.self) { i in
+                let idx = lo + (hi >= lo ? i : -i)
+                paletteColor(index: idx)
+            }
+        }
+    }
+
+    private func paletteColor(index: Int) -> Color {
+        let rgba = state.bridge.paletteColor(at: index)
+        let r = Double((rgba >> 0)  & 0xff) / 255.0
+        let g = Double((rgba >> 8)  & 0xff) / 255.0
+        let b = Double((rgba >> 16) & 0xff) / 255.0
+        let a = Double((rgba >> 24) & 0xff) / 255.0
+        return Color(red: r, green: g, blue: b, opacity: a)
     }
 
     private func labeled<Content: View>(

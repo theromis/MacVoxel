@@ -16,6 +16,17 @@ struct Bounds3i {
     int32_t z1;
 };
 
+// One emitted cell from a generator kernel. The palette field lets
+// kernels that gradient-map across the noise (Perlin, future Worley)
+// produce a per-cell color; single-color kernels just write the
+// uniform palette index.
+struct CellOut {
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    uint32_t palette;
+};
+
 // What primitive a generator produces. Each kind is implemented as its
 // own MSL compute kernel; the engine selects a pipeline state by kind.
 // New kinds are added by writing a kernel and registering it in the
@@ -62,6 +73,11 @@ struct Params {
     // Perlin: seed for the lattice hash; pinned per-document so a
     // given (bounds, params, seed) tuple is reproducible.
     uint32_t noise_seed = 1;
+    // Perlin: palette-slot range across which the normalized fBm value
+    // is gradient-mapped. lo and hi can be in either order — swapping
+    // them reverses the gradient. lo == hi degenerates to single-color.
+    uint32_t perlin_palette_lo = 1;
+    uint32_t perlin_palette_hi = 8;
     // Torus: tube thickness as a fraction of the bounding box's
     // radial half-extent. 0 = vanishing; 1 = degenerate ellipsoid /
     // cylinder. Default 0.3 looks like a classic donut.

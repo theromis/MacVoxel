@@ -62,8 +62,12 @@ struct Uniforms {
     uint32_t noise_octaves;
     uint32_t noise_seed;
     float torus_tube;
+    uint32_t perlin_palette_lo;
+    uint32_t perlin_palette_hi;
 };
-static_assert(sizeof(Uniforms) == 68, "Uniforms layout mismatch");
+static_assert(sizeof(Uniforms) == 76, "Uniforms layout mismatch");
+static_assert(sizeof(macvoxel::generators::CellOut) == 16,
+              "PackedCell layout must match CellOut");
 
 }  // namespace
 
@@ -136,13 +140,13 @@ static_assert(sizeof(Uniforms) == 68, "Uniforms layout mismatch");
     // doubling until it covers the request.
     NSUInteger newCap = std::max<NSUInteger>(_outCapacityCells * 2, 4096);
     while (newCap < cells) newCap *= 2;
-    _outBuffer = [_device newBufferWithLength:newCap * 12  // PackedCell = 3×int32
+    _outBuffer = [_device newBufferWithLength:newCap * 16  // PackedCell = 4×int32
                                        options:MTLResourceStorageModeShared];
     _outBuffer.label = @"GeneratorOutput";
     _outCapacityCells = newCap;
 }
 
-- (void)generateInto:(std::vector<macvoxel::shapes::Vec3i>&)out
+- (void)generateInto:(std::vector<gen::CellOut>&)out
                 kind:(gen::Kind)kind
               bounds:(gen::Bounds3i)bounds
               params:(const gen::Params&)params {
@@ -183,6 +187,8 @@ static_assert(sizeof(Uniforms) == 68, "Uniforms layout mismatch");
     u.noise_octaves = params.noise_octaves;
     u.noise_seed = params.noise_seed;
     u.torus_tube = params.torus_tube;
+    u.perlin_palette_lo = params.perlin_palette_lo;
+    u.perlin_palette_hi = params.perlin_palette_hi;
 
     id<MTLCommandBuffer> cmd = [_queue commandBuffer];
     cmd.label = @"GeneratorDispatch";
@@ -209,10 +215,10 @@ static_assert(sizeof(Uniforms) == 68, "Uniforms layout mismatch");
     const uint32_t count = *static_cast<uint32_t*>(_counterBuffer.contents);
     out.resize(count);
     if (count > 0) {
-        // PackedCell == { int32, int32, int32 } == 12 bytes, matching
-        // shapes::Vec3i. Bulk copy is safe.
+        // PackedCell == { int32, int32, int32, uint32 } == 16 bytes,
+        // matching macvoxel::generators::CellOut. Bulk copy is safe.
         std::memcpy(out.data(), _outBuffer.contents,
-                    static_cast<size_t>(count) * 12);
+                    static_cast<size_t>(count) * sizeof(gen::CellOut));
     }
 }
 

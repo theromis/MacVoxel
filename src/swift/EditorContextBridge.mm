@@ -436,6 +436,24 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     _ctx->generator.params.torus_tube = tube;
 }
 
+- (NSInteger)generatorPerlinPaletteLo {
+    return static_cast<NSInteger>(_ctx->generator.params.perlin_palette_lo);
+}
+
+- (void)setGeneratorPerlinPaletteLo:(NSInteger)idx {
+    _ctx->generator.params.perlin_palette_lo =
+        static_cast<uint32_t>(std::clamp<NSInteger>(idx, 0, 255));
+}
+
+- (NSInteger)generatorPerlinPaletteHi {
+    return static_cast<NSInteger>(_ctx->generator.params.perlin_palette_hi);
+}
+
+- (void)setGeneratorPerlinPaletteHi:(NSInteger)idx {
+    _ctx->generator.params.perlin_palette_hi =
+        static_cast<uint32_t>(std::clamp<NSInteger>(idx, 0, 255));
+}
+
 // ---------------------------------------------------------------------------
 // Render settings
 // ---------------------------------------------------------------------------

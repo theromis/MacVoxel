@@ -178,6 +178,8 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, assign) NSInteger generatorPerlinOctaves;
 @property (nonatomic, assign) NSInteger generatorPerlinSeed;
 @property (nonatomic, assign) float generatorTorusTube;
+@property (nonatomic, assign) NSInteger generatorPerlinPaletteLo;
+@property (nonatomic, assign) NSInteger generatorPerlinPaletteHi;
 
 // ---------------------------------------------------------------------------
 // Render settings (path tracer inputs). Live state read by the
