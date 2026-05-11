@@ -241,6 +241,11 @@ final class EditorState {
         set { bridge.generatorPerlinSeed = newValue; tick &+= 1 }
     }
 
+    var generatorTorusTube: Float {
+        get { _ = tick; return bridge.generatorTorusTube }
+        set { bridge.generatorTorusTube = newValue; tick &+= 1 }
+    }
+
     // ---- Render settings (panel-facing) ----
     //
     // Path tracer reads these every frame; raycast preview ignores

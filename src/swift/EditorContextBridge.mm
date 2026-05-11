@@ -428,6 +428,14 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     _ctx->generator.params.noise_seed = static_cast<uint32_t>(seed);
 }
 
+- (float)generatorTorusTube {
+    return _ctx->generator.params.torus_tube;
+}
+
+- (void)setGeneratorTorusTube:(float)tube {
+    _ctx->generator.params.torus_tube = tube;
+}
+
 // ---------------------------------------------------------------------------
 // Render settings
 // ---------------------------------------------------------------------------

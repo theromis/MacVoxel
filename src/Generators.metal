@@ -26,6 +26,7 @@ struct Uniforms {
     float noise_threshold; // Perlin: fill when fBm ≥ threshold (0..1)
     uint  noise_octaves;   // Perlin: 1..6 fBm octaves
     uint  noise_seed;      // Perlin: lattice hash seed
+    float torus_tube;      // Torus: tube thickness (0..1 of bounds half-extent)
 };
 
 struct PackedCell { int x, y, z; };
@@ -179,6 +180,44 @@ kernel void generate_pyramid(
     float n_v = (v.pos[v_a] - center_v) / (v.dim[v_a] * 0.5);
 
     if (max(abs(n_u), abs(n_v)) <= r) {
+        emit(cell, counter, out);
+    }
+}
+
+// Torus inscribed in the bounding box, symmetry axis = u.axis. The tube
+// fully spans the axial direction; in the radial plane, the centerline
+// circle sits at normalized radius (1 - tube), and the tube has
+// normalized half-width `tube`. tube = 1 degenerates to a cylinder-ish
+// solid; tube → 0 vanishes. Cross-section in the (radial, axial) plane
+// is an ellipse, matching the Ellipsoid / Cylinder convention.
+kernel void generate_torus(
+    constant Uniforms& u                  [[buffer(0)]],
+    device atomic_uint* counter           [[buffer(1)]],
+    device PackedCell* out                [[buffer(2)]],
+    uint3 gid                             [[thread_position_in_grid]])
+{
+    int3 cell;
+    if (!resolve_cell(gid, u, cell)) return;
+
+    const float tube = clamp(u.torus_tube, 0.0, 1.0);
+    if (tube <= 0.001) return;
+
+    int axis = int(u.axis);
+    int u_a = (axis == 0) ? 1 : 0;
+    int v_a = (axis == 2) ? 1 : 2;
+    AxisView v = make_axis_view(cell, u);
+
+    float center_a = v.lo[axis] + v.dim[axis] * 0.5;
+    float center_u = v.lo[u_a] + v.dim[u_a] * 0.5;
+    float center_v = v.lo[v_a] + v.dim[v_a] * 0.5;
+    float n_a = (v.pos[axis] - center_a) / (v.dim[axis] * 0.5);
+    float n_u = (v.pos[u_a] - center_u) / (v.dim[u_a] * 0.5);
+    float n_v = (v.pos[v_a] - center_v) / (v.dim[v_a] * 0.5);
+
+    float radial = sqrt(n_u * n_u + n_v * n_v);
+    float dr = radial - (1.0 - tube);
+    float er = dr / tube;
+    if (er * er + n_a * n_a <= 1.0) {
         emit(cell, counter, out);
     }
 }

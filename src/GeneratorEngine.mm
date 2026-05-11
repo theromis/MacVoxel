@@ -44,6 +44,7 @@ NSString* KernelNameForKind(gen::Kind k) {
         case gen::Kind::Cone:      return @"generate_cone";
         case gen::Kind::Pyramid:   return @"generate_pyramid";
         case gen::Kind::Perlin:    return @"generate_perlin";
+        case gen::Kind::Torus:     return @"generate_torus";
         case gen::Kind::Count_:    return nil;
     }
     return nil;
@@ -60,8 +61,9 @@ struct Uniforms {
     float noise_threshold;
     uint32_t noise_octaves;
     uint32_t noise_seed;
+    float torus_tube;
 };
-static_assert(sizeof(Uniforms) == 64, "Uniforms layout mismatch");
+static_assert(sizeof(Uniforms) == 68, "Uniforms layout mismatch");
 
 }  // namespace
 
@@ -180,6 +182,7 @@ static_assert(sizeof(Uniforms) == 64, "Uniforms layout mismatch");
     u.noise_threshold = params.noise_threshold;
     u.noise_octaves = params.noise_octaves;
     u.noise_seed = params.noise_seed;
+    u.torus_tube = params.torus_tube;
 
     id<MTLCommandBuffer> cmd = [_queue commandBuffer];
     cmd.label = @"GeneratorDispatch";

@@ -11,6 +11,7 @@ struct GeneratorPanel: View {
                 Text("Cylinder").tag(BridgeGeneratorKind.cylinder)
                 Text("Cone").tag(BridgeGeneratorKind.cone)
                 Text("Pyramid").tag(BridgeGeneratorKind.pyramid)
+                Text("Torus").tag(BridgeGeneratorKind.torus)
                 Text("Perlin").tag(BridgeGeneratorKind.perlin)
             }
             .labelsHidden()
@@ -37,6 +38,9 @@ struct GeneratorPanel: View {
         case .cone, .pyramid:
             axisRow
             apexRow
+        case .torus:
+            axisRow
+            torusRows
         case .perlin:
             perlinRows
         @unknown default:
@@ -66,6 +70,19 @@ struct GeneratorPanel: View {
             }
             .labelsHidden()
             .pickerStyle(.segmented)
+        }
+    }
+
+    @ViewBuilder
+    private var torusRows: some View {
+        labeled("Tube") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorTorusTube },
+                    set: { state.generatorTorusTube = $0 }
+                ),
+                range: 0.05...1.0,
+                format: "%.2f")
         }
     }
 

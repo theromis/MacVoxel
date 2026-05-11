@@ -222,7 +222,8 @@ void Tick(EditorContext& ctx, InteractionState& state,
         gs.params.noise_scale != last.noise_scale ||
         gs.params.noise_threshold != last.noise_threshold ||
         gs.params.noise_octaves != last.noise_octaves ||
-        gs.params.noise_seed != last.noise_seed;
+        gs.params.noise_seed != last.noise_seed ||
+        gs.params.torus_tube != last.torus_tube;
     if (!dirty) return;
 
     RegenerateAndStamp(ctx, state, state.gen_gizmo.bounds,

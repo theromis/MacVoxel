@@ -26,6 +26,7 @@ enum class Kind : uint32_t {
     Cone,
     Pyramid,
     Perlin,
+    Torus,
     // Maze, Fractal — added in follow-ups
     Count_,
 };
@@ -61,6 +62,10 @@ struct Params {
     // Perlin: seed for the lattice hash; pinned per-document so a
     // given (bounds, params, seed) tuple is reproducible.
     uint32_t noise_seed = 1;
+    // Torus: tube thickness as a fraction of the bounding box's
+    // radial half-extent. 0 = vanishing; 1 = degenerate ellipsoid /
+    // cylinder. Default 0.3 looks like a classic donut.
+    float    torus_tube = 0.3f;
 };
 
 }  // namespace macvoxel::generators
