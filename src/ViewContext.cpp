@@ -32,12 +32,21 @@ bool IntersectVolumeWall(const EditVolume& vol,
     };
     const float ro[3] = {ray_origin.x, ray_origin.y, ray_origin.z};
     const float rd[3] = {ray_dir.x, ray_dir.y, ray_dir.z};
+    // Skip the 3 camera-facing walls — the user can't see them, and
+    // hiding the matching wireframe edges (raycast shader) only makes
+    // sense if clicks anchor consistently to the back walls instead.
+    const int near_side[3] = {
+        (ro[0] < (walls[0][0] + walls[0][1]) * 0.5f) ? 0 : 1,
+        (ro[1] < (walls[1][0] + walls[1][1]) * 0.5f) ? 0 : 1,
+        (ro[2] < (walls[2][0] + walls[2][1]) * 0.5f) ? 0 : 1,
+    };
     float best_t = std::numeric_limits<float>::infinity();
     int best_axis = -1, best_sign = 0;
     float best_h[3] = {0.0f, 0.0f, 0.0f};
     for (int axis = 0; axis < 3; ++axis) {
         if (std::abs(rd[axis]) < 1e-6f) continue;
         for (int side = 0; side < 2; ++side) {
+            if (side == near_side[axis]) continue;
             const float plane = walls[axis][side];
             const float t = (plane - ro[axis]) / rd[axis];
             if (t < 0.0f || t > 4096.0f) continue;

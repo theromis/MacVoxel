@@ -106,37 +106,95 @@ constant uint kChunkMask = 15u;
 constant uint kChunkSize = 16u;
 constant uint kChunkVolume = 4096u;
 
-// Floor of the edit volume — matches EditVolume's defaults. Hardcoded
-// since the volume is fixed-size for Phase 13.5; promote to uniforms
-// the moment the volume becomes per-document and editable.
-constant float kFloorXMin = -128.0;
-constant float kFloorXMax =  128.0;
-constant float kFloorYMin = -128.0;
-constant float kFloorYMax =  128.0;
+// Bounding-cube of the edit volume — matches EditVolume's defaults.
+// Hardcoded since the volume is fixed-size for Phase 13.5; promote to
+// uniforms the moment the volume becomes per-document and editable.
+constant float kBoxXMin = -128.0;
+constant float kBoxXMax =  128.0;
+constant float kBoxYMin = -128.0;
+constant float kBoxYMax =  128.0;
+constant float kBoxZMin =    0.0;
+constant float kBoxZMax =  256.0;
 
-// Faint floor grid drawn where the ray escapes into empty space and
-// intersects z=0 inside the volume's x/y footprint. Returns the
-// background color blended with a thin line at every integer cell
-// boundary. Width grows + opacity decays with distance so the grid
-// reads at all zooms without moiré.
-float3 floor_grid_color(float3 ray_origin, float3 ray_dir, float3 bg) {
-    if (abs(ray_dir.z) < 1e-6) return bg;
-    float t = -ray_origin.z / ray_dir.z;
-    if (t <= 0.0) return bg;
-    float gx = ray_origin.x + t * ray_dir.x;
-    float gy = ray_origin.y + t * ray_dir.y;
-    if (gx < kFloorXMin || gx > kFloorXMax ||
-        gy < kFloorYMin || gy > kFloorYMax) return bg;
-    float dx = min(fract(gx), 1.0 - fract(gx));
-    float dy = min(fract(gy), 1.0 - fract(gy));
-    float d = min(dx, dy);
-    float width = mix(0.02, 0.06, smoothstep(20.0, 200.0, t));
-    float line = 1.0 - smoothstep(width * 0.5, width, d);
-    float boundary_fade =
-        1.0 - smoothstep(120.0, 128.0, max(abs(gx), abs(gy)));
-    float distance_fade = 1.0 - smoothstep(96.0, 320.0, t);
-    line *= boundary_fade * distance_fade * 0.35;
-    return mix(bg, float3(0.55, 0.6, 0.7), line);
+// Closest approach of the forward ray (t ≥ 0) to an axis-aligned
+// infinite line. `axis` is which world axis the line runs along
+// (0=X, 1=Y, 2=Z); (a, b) are the line's two perpendicular
+// coordinates. Returns float3(perp_dist, t_at_closest, along_at_closest)
+// — caller clips along_at_closest to the segment range. Sentinel
+// returns 1e10 when the closest approach is behind the camera or the
+// ray is parallel to the line.
+float3 ray_to_axis_line(float3 ro, float3 rd, int axis, float a, float b) {
+    float2 r_perp, d_perp;
+    float r_along, d_along;
+    if (axis == 0) {
+        r_perp = float2(ro.y, ro.z); d_perp = float2(rd.y, rd.z);
+        r_along = ro.x; d_along = rd.x;
+    } else if (axis == 1) {
+        r_perp = float2(ro.x, ro.z); d_perp = float2(rd.x, rd.z);
+        r_along = ro.y; d_along = rd.y;
+    } else {
+        r_perp = float2(ro.x, ro.y); d_perp = float2(rd.x, rd.y);
+        r_along = ro.z; d_along = rd.z;
+    }
+    float denom = dot(d_perp, d_perp);
+    if (denom < 1e-8) return float3(1e10, 0.0, 0.0);
+    float t = dot(float2(a, b) - r_perp, d_perp) / denom;
+    if (t < 0.0) return float3(1e10, 0.0, 0.0);
+    float2 closest = r_perp + t * d_perp;
+    return float3(length(closest - float2(a, b)),
+                  t,
+                  r_along + t * d_along);
+}
+
+// Wireframe of (9 of) the 12 cube edges drawn into background pixels.
+// Width scales linearly with depth so edges hold a roughly constant
+// screen width across zoom levels; opacity max-pools so corners don't
+// bloom where edges meet. ro must be the *original* (pre-AABB-clip)
+// camera-space ray origin so edges behind the clip plane render
+// correctly when the ray entered through them.
+//
+// The 3 edges meeting at the cube vertex nearest the camera are
+// hidden — they'd visually plug the front of the box from typical
+// viewing angles. The matching 3 near faces are also excluded from
+// empty-space click anchoring (see ViewContext::IntersectVolumeWall),
+// so the cutaway is consistent between rendering and interaction.
+float3 bbox_edges_color(float3 ro, float3 rd, float3 bg) {
+    float xs[2] = {kBoxXMin, kBoxXMax};
+    float ys[2] = {kBoxYMin, kBoxYMax};
+    float zs[2] = {kBoxZMin, kBoxZMax};
+    int nx = (ro.x < (kBoxXMin + kBoxXMax) * 0.5) ? 0 : 1;
+    int ny = (ro.y < (kBoxYMin + kBoxYMax) * 0.5) ? 0 : 1;
+    int nz = (ro.z < (kBoxZMin + kBoxZMax) * 0.5) ? 0 : 1;
+    float strongest = 0.0;
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            // X-axis edge at perpendicular (ys[i], zs[j]). The near
+            // corner's X-edge has y == near_y and z == near_z.
+            if (!(i == ny && j == nz)) {
+                float3 ex = ray_to_axis_line(ro, rd, 0, ys[i], zs[j]);
+                if (ex.z >= kBoxXMin && ex.z <= kBoxXMax) {
+                    float w = max(0.18, ex.y * 0.0014);
+                    strongest = max(strongest, 1.0 - smoothstep(w * 0.5, w, ex.x));
+                }
+            }
+            if (!(i == nx && j == nz)) {
+                float3 ey = ray_to_axis_line(ro, rd, 1, xs[i], zs[j]);
+                if (ey.z >= kBoxYMin && ey.z <= kBoxYMax) {
+                    float w = max(0.18, ey.y * 0.0014);
+                    strongest = max(strongest, 1.0 - smoothstep(w * 0.5, w, ey.x));
+                }
+            }
+            if (!(i == nx && j == ny)) {
+                float3 ez = ray_to_axis_line(ro, rd, 2, xs[i], ys[j]);
+                if (ez.z >= kBoxZMin && ez.z <= kBoxZMax) {
+                    float w = max(0.18, ez.y * 0.0014);
+                    strongest = max(strongest, 1.0 - smoothstep(w * 0.5, w, ez.x));
+                }
+            }
+        }
+    }
+    if (strongest <= 0.0) return bg;
+    return mix(bg, float3(0.6, 0.65, 0.75), strongest * 0.45);
 }
 
 fragment float4 raycast_fragment(
@@ -164,6 +222,10 @@ fragment float4 raycast_fragment(
     // R^-1 (wx, wy, wz) = (wx, -wz, wy).
     float3 ray_origin = float3(ray_origin_world.x, -ray_origin_world.z, ray_origin_world.y);
     float3 ray_dir   = float3(ray_dir_world.x,   -ray_dir_world.z,   ray_dir_world.y);
+    // Pre-clip origin, kept across the AABB advance below — bbox-edge
+    // rendering needs the camera position to compute ray-to-edge
+    // distances in front of the clip plane.
+    float3 cam_origin = ray_origin;
 
     // Combined AABB clip. Without the buffer this is just the doc's
     // chunk extents; with it, we expand to include the buffer's footprint
@@ -191,7 +253,7 @@ fragment float4 raycast_fragment(
     float t_exit  = min(min(t_hi.x, t_hi.y), t_hi.z);
     if (t_exit < 0.0 || t_enter > t_exit) {
         float3 bg = float3(0.118, 0.118, 0.18);
-        return float4(floor_grid_color(ray_origin, ray_dir, bg), 1.0);
+        return float4(bbox_edges_color(cam_origin, ray_dir, bg), 1.0);
     }
     // Advance origin to the entry point if we're outside. The small nudge
     // past the boundary avoids landing on a cell edge with floor() rounding
@@ -280,7 +342,7 @@ fragment float4 raycast_fragment(
         // means we exited the union).
         if (!doc_in && !buf_in) {
             float3 bg = float3(0.118, 0.118, 0.18);
-            return float4(floor_grid_color(ray_origin, ray_dir, bg), 1.0);
+            return float4(bbox_edges_color(cam_origin, ray_dir, bg), 1.0);
         }
 
         if (pool_idx_doc == 0u && pool_idx_buf == 0u) {
@@ -427,7 +489,7 @@ fragment float4 raycast_fragment(
         }
     }
     float3 bg = float3(0.118, 0.118, 0.18);
-    return float4(floor_grid_color(ray_origin, ray_dir, bg), 1.0);
+    return float4(bbox_edges_color(cam_origin, ray_dir, bg), 1.0);
 }
 )MSL";
 
