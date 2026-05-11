@@ -209,6 +209,24 @@ phase boundary, not a side change.
   the running window; theme parity vs the old `ui/Theme.cpp`'s
   pro-app dark.
 
+- **Wall-anchored Line preview invisible from far cameras.** With
+  Phase 13.5's multi-plane empty-endpoint fallback, dragging a Line
+  out against a volume wall in an empty document only renders the
+  preview when the camera is close to the target wall — far cameras
+  see no preview during drag, though mouseUp still commits the line
+  correctly. Cause is in `RaycastRenderer`'s shader: the early-out
+  at line 856 (`_coarseBuffer == nil` → return) skips rendering
+  entirely on empty docs, and even with that bypassed the AABB
+  union of doc + buf reads from `coarse_min = (0,0,0)` on an empty
+  doc, dragging a phantom region from origin into the AABB and
+  triggering the "outside both volumes' chunk extents" mid-march
+  bail before the ray reaches the buf's actual chunks. Fixing
+  needs a coordinated change to (a) bind stub buffers for the doc
+  slot when empty so the shader can still run, and (b) compute the
+  AABB from non-degenerate sources only. Got partway through in
+  one session; reverted because the close-camera path already
+  works and the bug is rarely hit in real use.
+
 ---
 
 ## Suggested next-up
