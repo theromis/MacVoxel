@@ -47,7 +47,7 @@ struct RenderPanel: View {
                     Slider(value: Binding(
                         get: { Double(state.maxSamples) },
                         set: { state.maxSamples = Int($0.rounded()) }
-                    ), in: 16...8192, step: 1)
+                    ), in: 16...8192)
                     Text("\(state.maxSamples)")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
