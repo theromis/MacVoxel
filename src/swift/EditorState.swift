@@ -120,12 +120,12 @@ final class EditorState {
     // ---- History ----
 
     var canUndo: Bool {
-        _ = documentVersion
+        _ = tick
         return bridge.canUndo
     }
 
     var canRedo: Bool {
-        _ = documentVersion
+        _ = tick
         return bridge.canRedo
     }
 
@@ -142,17 +142,17 @@ final class EditorState {
     // ---- Edit ----
 
     var canCutOrCopyOrDelete: Bool {
-        _ = documentVersion
+        _ = tick
         return bridge.canCutOrCopyOrDelete
     }
 
     var canPaste: Bool {
-        _ = documentVersion
+        _ = tick
         return bridge.canPaste
     }
 
     var canDeselect: Bool {
-        _ = documentVersion
+        _ = tick
         return bridge.canDeselect
     }
 
@@ -446,6 +446,7 @@ final class EditorState {
     private func afterMutation(reframeCamera: Bool) {
         documentTitle = bridge.documentTitle
         documentVersion &+= 1
+        tick &+= 1
         scene?.invalidateRenderers()
         if reframeCamera {
             scene?.frameCameraToDocument()
