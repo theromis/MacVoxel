@@ -3,6 +3,7 @@
 #include "InteractionState.h"
 
 namespace macvoxel {
+class OverlayDraw;
 struct EditorContext;
 struct MouseEvent;
 struct ViewContext;
@@ -33,6 +34,7 @@ void OnMouseUp(EditorContext& ctx,
                const MouseEvent& e);
 
 // Live screen-space rectangle while the user is dragging the marquee.
-void DrawOverlay(const InteractionState& state, const ViewContext& vc);
+void DrawOverlay(const InteractionState& state, const ViewContext& vc,
+                 OverlayDraw& od);
 
 }  // namespace macvoxel::marquee_controller

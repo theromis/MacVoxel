@@ -38,6 +38,7 @@
 #include "InteractionState.h"
 #include "MarqueeController.h"
 #include "MoveSelectController.h"
+#include "OverlayDraw.h"
 #include "PreviewOverlay.h"
 #include "Raycast.h"
 #include "RenderState.h"
@@ -451,12 +452,18 @@ using Vec3i = macvoxel::shapes::Vec3i;
         macvoxel::DrawSelectionPanel(*_ctx);
         macvoxel::DrawPalettePanel(*_ctx);
         [self drawSelectionOverlay];
+        // Dead-code shell: the SwiftUI port runs through MetalScene now.
+        // These calls keep VoxelView compiling until Phase F removes it.
+        macvoxel::OverlayDraw _od_unused;
         macvoxel::xform_handle_controller::DrawOverlay(
-            _interaction, [self viewContext]);
-        macvoxel::marquee_controller::DrawOverlay(_interaction, [self viewContext]);
+            _interaction, [self viewContext], _od_unused,
+            ImGui::GetIO().WantCaptureMouse);
+        macvoxel::marquee_controller::DrawOverlay(
+            _interaction, [self viewContext], _od_unused);
         [self drawHoverOverlay];
         macvoxel::generator_controller::DrawOverlay(
-            _interaction, [self viewContext]);
+            _interaction, [self viewContext], _od_unused,
+            ImGui::GetIO().WantCaptureMouse);
 
         if (macvoxel::ConsumeSaveRenderClick(*_ctx)) {
             [self runSaveRenderPanel];

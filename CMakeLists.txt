@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
 
 # macOS settings must be set before project()
-set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS deployment target")
+# 14.0 (Sonoma) is the floor: SwiftUI shell uses @Observable + the
+# Observation framework, both of which are 14+.
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS deployment target")
 
 project(MacVoxel
     VERSION 0.1.0
     DESCRIPTION "Native macOS voxel editor"
-    LANGUAGES C CXX OBJC OBJCXX)
+    LANGUAGES C CXX OBJC OBJCXX Swift)
 
 if(NOT APPLE)
     message(FATAL_ERROR "MacVoxel is macOS-only.")
@@ -56,6 +58,7 @@ set(APP_SOURCES
     src/CliRender.mm
     src/RaycastRenderer.mm
     src/PathTraceRenderer.mm
+    src/SceneOverlayRenderer.mm
     src/VoxelGrid.cpp
     src/Palette.cpp
     src/VoxFile.cpp
@@ -65,6 +68,7 @@ set(APP_SOURCES
     src/EditHistory.cpp
     src/Selection.cpp
     src/SelectionOps.cpp
+    src/SelectionOverlay.cpp
     src/FloatingBufferOps.cpp
     src/EditorContext.cpp
     src/ViewContext.cpp
@@ -75,7 +79,9 @@ set(APP_SOURCES
     src/FloodSelectController.cpp
     src/GeneratorController.cpp
     src/MarqueeController.cpp
+    src/MetalScene.mm
     src/MoveSelectController.cpp
+    src/OverlayDraw.cpp
     src/PreviewOps.cpp
     src/ShapeController.cpp
     src/XformHandleController.cpp
@@ -88,21 +94,28 @@ set(APP_SOURCES
     src/ui/RenderPanel.cpp
     src/ui/Fonts.cpp
     src/ui/Theme.cpp
+    # SwiftUI shell — Obj-C++ bridge over EditorContext. Swift code in
+    # APP_SWIFT_SOURCES below.
+    src/swift/EditorContextBridge.mm
 )
 
-# Source files referenced in CMakeLists must exist for configure to succeed.
-# Step 2 only ships main.mm; touch placeholders so later steps can fill them in.
-foreach(_src IN ITEMS src/AppDelegate.mm src/VoxelView.mm src/Camera.cpp
-                       src/ui/ModelPanel.cpp)
-    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/${_src}")
-        file(WRITE "${CMAKE_SOURCE_DIR}/${_src}" "// placeholder - filled in by a later step\n")
-    endif()
-endforeach()
+# SwiftUI shell. Bridging header (MacVoxel-Bridging-Header.h) exposes
+# the Obj-C interface of EditorContextBridge to Swift; pure C++ types
+# never cross the Swift boundary.
+set(APP_SWIFT_SOURCES
+    src/swift/MainEntry.swift
+    src/swift/MacVoxelApp.swift
+    src/swift/MacVoxelCommands.swift
+    src/swift/ContentView.swift
+    src/swift/MetalSceneView.swift
+    src/swift/EditorState.swift
+)
 
 set(APP_RESOURCES
     resources/SF-Symbols-Export.ttf
     resources/default.vox
     src/Generators.metal
+    src/Overlay.metal
     src/PathTrace.metal
 )
 set_source_files_properties(${APP_RESOURCES}
@@ -110,8 +123,13 @@ set_source_files_properties(${APP_RESOURCES}
 
 add_executable(${APP_NAME} MACOSX_BUNDLE
     ${APP_SOURCES}
+    ${APP_SWIFT_SOURCES}
     ${IMGUI_SOURCES}
     ${APP_RESOURCES}
+)
+
+set_target_properties(${APP_NAME} PROPERTIES
+    Swift_LANGUAGE_VERSION 5
 )
 
 set_target_properties(${APP_NAME} PROPERTIES
@@ -160,4 +178,12 @@ target_link_libraries(${APP_NAME} PRIVATE
 # ARC for Obj-C++. ImGui's backends are written ARC-compatible upstream.
 target_compile_options(${APP_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+)
+
+# Swift sees the Obj-C side of the app via a bridging header. Pure C++
+# types never reach Swift — Obj-C++ wrappers (EditorContextBridge.mm)
+# do the translation.
+target_compile_options(${APP_NAME} PRIVATE
+    "$<$<COMPILE_LANGUAGE:Swift>:-import-objc-header>"
+    "$<$<COMPILE_LANGUAGE:Swift>:${CMAKE_SOURCE_DIR}/src/swift/MacVoxel-Bridging-Header.h>"
 )

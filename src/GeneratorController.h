@@ -9,6 +9,7 @@
 #include <vector>
 
 namespace macvoxel {
+class OverlayDraw;
 struct EditorContext;
 struct MouseEvent;
 struct ViewContext;
@@ -89,6 +90,9 @@ void Commit(EditorContext& ctx, InteractionState& state);
 void Cancel(EditorContext& ctx, InteractionState& state);
 
 // Gizmo overlay: 12-edge AABB outline + 6 face-normal arrow handles.
-void DrawOverlay(const InteractionState& state, const ViewContext& vc);
+// mouse_captured_by_ui suppresses hover-tinting when an overlaying
+// panel has the cursor.
+void DrawOverlay(const InteractionState& state, const ViewContext& vc,
+                 OverlayDraw& od, bool mouse_captured_by_ui);
 
 }  // namespace macvoxel::generator_controller

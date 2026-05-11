@@ -1,25 +1,20 @@
 #import <Cocoa/Cocoa.h>
 
-#import "AppDelegate.h"
 #include "CliRender.h"
 
 #include <cstring>
 
+// Defined in src/swift/MainEntry.swift via @_cdecl. Runs SwiftUI's
+// event loop and never returns until the app quits.
+extern "C" void MacVoxelRunApp(void);
+
 int main(int argc, const char* argv[]) {
-    // Headless subcommand dispatch. Skips NSApplicationMain entirely so
+    // Headless subcommand dispatch. Skips the SwiftUI App entirely so
     // running from CI / scripts doesn't spawn a GUI process.
     if (argc >= 2 && std::strcmp(argv[1], "render") == 0) {
         return macvoxel::RunCliRender(argc - 1, argv + 1);
     }
 
-    @autoreleasepool {
-        NSApplication* app = [NSApplication sharedApplication];
-        [app setActivationPolicy:NSApplicationActivationPolicyRegular];
-
-        AppDelegate* delegate = [[AppDelegate alloc] init];
-        [app setDelegate:delegate];
-
-        [app run];
-    }
+    MacVoxelRunApp();
     return 0;
 }

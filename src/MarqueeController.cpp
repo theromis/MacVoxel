@@ -2,11 +2,10 @@
 
 #include "EditorContext.h"
 #include "Input.h"
+#include "OverlayDraw.h"
 #include "Selection.h"
 #include "SelectionOps.h"
 #include "ViewContext.h"
-
-#include "imgui.h"
 
 #include <algorithm>
 #include <simd/simd.h>
@@ -71,19 +70,19 @@ void OnMouseUp(EditorContext& ctx,
     });
 }
 
-void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
+void DrawOverlay(const InteractionState& state, const ViewContext& vc,
+                 OverlayDraw& od) {
     if (state.drag_mode != DragMode::Marquee) return;
     const float h = vc.viewport_h;
     if (h <= 0.0f) return;
     const simd::float2 a = state.marquee.anchor_local;
     const simd::float2 b = state.marquee.current_local;
-    // Local y is bottom-up; ImGui draws top-down — flip once on the
-    // way out so the marquee follows the cursor exactly.
-    const ImVec2 tl{std::min(a.x, b.x), h - std::max(a.y, b.y)};
-    const ImVec2 br{std::max(a.x, b.x), h - std::min(a.y, b.y)};
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
-    dl->AddRectFilled(tl, br, IM_COL32(255, 220, 80, 28));
-    dl->AddRect(tl, br, IM_COL32(255, 220, 80, 220), 0.0f, 0, 1.0f);
+    // Local y is bottom-up; the overlay renderer is top-down — flip
+    // once on the way out so the marquee follows the cursor exactly.
+    const simd::float2 tl{std::min(a.x, b.x), h - std::max(a.y, b.y)};
+    const simd::float2 br{std::max(a.x, b.x), h - std::min(a.y, b.y)};
+    od.AddRectFilled(tl, br, Rgba8(255, 220, 80, 28));
+    od.AddRect(tl, br, Rgba8(255, 220, 80, 220), 1.0f);
 }
 
 }  // namespace macvoxel::marquee_controller

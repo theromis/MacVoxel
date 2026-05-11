@@ -4,10 +4,9 @@
 #include "FloatingBuffer.h"
 #include "FloatingBufferOps.h"
 #include "Input.h"
+#include "OverlayDraw.h"
 #include "ViewContext.h"
 #include "VoxelGrid.h"
-
-#include "imgui.h"
 
 #include <algorithm>
 #include <cmath>
@@ -113,7 +112,8 @@ void OnMouseUp(InteractionState& state) {
     state.xform.orig_grid.Clear();
 }
 
-void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
+void DrawOverlay(const InteractionState& state, const ViewContext& vc,
+                 OverlayDraw& od, bool mouse_captured_by_ui) {
     Bounds3 wb;
     if (!vc.XformGizmoBounds(&wb)) return;
     const float w = vc.viewport_w;
@@ -123,7 +123,7 @@ void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
     const simd::float4x4 vp =
         vc.camera.ProjectionMatrix(aspect) * vc.camera.ViewMatrix();
 
-    auto project = [&](simd::float3 wpos, ImVec2* screen, bool* valid) {
+    auto project = [&](simd::float3 wpos, simd::float2* screen, bool* valid) {
         const simd::float4 clip =
             simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
         *valid = clip.w > 0.001f;
@@ -137,7 +137,7 @@ void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
     int hover_face = -1;
     if (state.drag_mode == DragMode::XformHandle) {
         hover_face = state.xform.drag_face;
-    } else if (state.hover.has_point && !ImGui::GetIO().WantCaptureMouse) {
+    } else if (state.hover.has_point && !mouse_captured_by_ui) {
         hover_face = vc.PickXformHandle(state.hover.local.x,
                                         state.hover.local.y);
     }
@@ -147,34 +147,33 @@ void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
     constexpr float kArrowheadHalfWidthPx = 7.0f;
     // Same X/Y/Z = red/green/blue palette as the generator gizmo so
     // axis colour reads consistently across the editor.
-    const ImU32 kAxisBase[3] = {
-        IM_COL32(230,  80,  80, 255),
-        IM_COL32( 90, 200, 100, 255),
-        IM_COL32( 90, 140, 240, 255),
+    const uint32_t kAxisBase[3] = {
+        Rgba8(230,  80,  80, 255),
+        Rgba8( 90, 200, 100, 255),
+        Rgba8( 90, 140, 240, 255),
     };
-    const ImU32 kAxisHover[3] = {
-        IM_COL32(255, 160, 160, 255),
-        IM_COL32(170, 250, 180, 255),
-        IM_COL32(160, 200, 255, 255),
+    const uint32_t kAxisHover[3] = {
+        Rgba8(255, 160, 160, 255),
+        Rgba8(170, 250, 180, 255),
+        Rgba8(160, 200, 255, 255),
     };
-    const ImU32 kAxisActive[3] = {
-        IM_COL32(255, 220, 220, 255),
-        IM_COL32(220, 255, 230, 255),
-        IM_COL32(220, 240, 255, 255),
+    const uint32_t kAxisActive[3] = {
+        Rgba8(255, 220, 220, 255),
+        Rgba8(220, 255, 230, 255),
+        Rgba8(220, 240, 255, 255),
     };
 
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
     for (int f = 0; f < 6; ++f) {
         simd::float3 cw, nw;
         FaceWorldGeom(wb, f, &cw, &nw);
-        ImVec2 base, tip;
+        simd::float2 base, tip;
         bool base_v, tip_v;
         project(cw, &base, &base_v);
         project(cw + nw * kTipLengthVoxels, &tip, &tip_v);
         if (!base_v || !tip_v) continue;
 
         const int axis = f / 2;
-        const ImU32 color =
+        const uint32_t color =
             (state.drag_mode == DragMode::XformHandle && f == state.xform.drag_face)
                 ? kAxisActive[axis]
             : (f == hover_face) ? kAxisHover[axis]
@@ -183,7 +182,7 @@ void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
             (f == hover_face ||
              (state.drag_mode == DragMode::XformHandle && f == state.xform.drag_face))
                 ? 2.8f : 2.0f;
-        dl->AddLine(base, tip, color, thickness);
+        od.AddLine(base, tip, color, thickness);
 
         const float stem_dx = tip.x - base.x;
         const float stem_dy = tip.y - base.y;
@@ -194,16 +193,16 @@ void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
             const float uy = stem_dy / stem_len;
             const float pxn = -uy;
             const float pyn =  ux;
-            const ImVec2 back{
+            const simd::float2 back{
                 tip.x - ux * kArrowheadLenPx,
                 tip.y - uy * kArrowheadLenPx};
-            const ImVec2 leg1{
+            const simd::float2 leg1{
                 back.x + pxn * kArrowheadHalfWidthPx,
                 back.y + pyn * kArrowheadHalfWidthPx};
-            const ImVec2 leg2{
+            const simd::float2 leg2{
                 back.x - pxn * kArrowheadHalfWidthPx,
                 back.y - pyn * kArrowheadHalfWidthPx};
-            dl->AddTriangleFilled(tip, leg1, leg2, color);
+            od.AddTriangleFilled(tip, leg1, leg2, color);
         }
     }
 }

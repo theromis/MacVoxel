@@ -5,13 +5,12 @@
 #include "EditorContext.h"
 #include "GeneratorState.h"
 #include "Input.h"
+#include "OverlayDraw.h"
 #include "PreviewOps.h"
 #include "PreviewOverlay.h"
 #include "ShapeController.h"
 #include "ViewContext.h"
 #include "VoxelGrid.h"
-
-#include "imgui.h"
 
 #include <algorithm>
 #include <cmath>
@@ -239,7 +238,8 @@ void Cancel(EditorContext& ctx, InteractionState& state) {
     }
 }
 
-void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
+void DrawOverlay(const InteractionState& state, const ViewContext& vc,
+                 OverlayDraw& od, bool mouse_captured_by_ui) {
     if (!state.gen_gizmo.active) return;
     const float w = vc.viewport_w;
     const float h = vc.viewport_h;
@@ -248,7 +248,7 @@ void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
     const simd::float4x4 vp =
         vc.camera.ProjectionMatrix(aspect) * vc.camera.ViewMatrix();
 
-    auto project = [&](simd::float3 wpos, ImVec2* screen, bool* valid) {
+    auto project = [&](simd::float3 wpos, simd::float2* screen, bool* valid) {
         const simd::float4 clip =
             simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
         *valid = clip.w > 0.001f;
@@ -273,7 +273,7 @@ void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
         {bx0, by0, bz1}, {bx1, by0, bz1},
         {bx1, by1, bz1}, {bx0, by1, bz1},
     };
-    ImVec2 screen[8];
+    simd::float2 screen[8];
     bool valid[8];
     for (int i = 0; i < 8; ++i) {
         const simd::float3 g = corners_grid[i];
@@ -284,13 +284,12 @@ void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
         {4, 5}, {5, 6}, {6, 7}, {7, 4},
         {0, 4}, {1, 5}, {2, 6}, {3, 7},
     };
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    const ImU32 outline_color = IM_COL32(120, 200, 255, 230);
+    const uint32_t outline_color = Rgba8(120, 200, 255, 230);
     for (int i = 0; i < 12; ++i) {
         const int a = kEdges[i][0];
         const int b = kEdges[i][1];
         if (!valid[a] || !valid[b]) continue;
-        dl->AddLine(screen[a], screen[b], outline_color, 1.5f);
+        od.AddLine(screen[a], screen[b], outline_color, 1.5f);
     }
 
     // Hover face: derived per-frame from the cursor unless we're
@@ -300,7 +299,7 @@ void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
     int hover_face = -1;
     if (state.drag_mode == DragMode::GenHandle) {
         hover_face = state.gen_gizmo.active_drag_face;
-    } else if (state.hover.has_point && !ImGui::GetIO().WantCaptureMouse) {
+    } else if (state.hover.has_point && !mouse_captured_by_ui) {
         hover_face = vc.PickGenHandle(state.hover.local.x, state.hover.local.y,
                                       state.gen_gizmo.bounds);
     }
@@ -311,40 +310,40 @@ void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
     // Standard X / Y / Z = red / green / blue, with brighter variants
     // for hover and active states. Both the +axis and -axis face share
     // their axis's colour — position on the box disambiguates direction.
-    const ImU32 kAxisBase[3] = {
-        IM_COL32(230,  80,  80, 255),
-        IM_COL32( 90, 200, 100, 255),
-        IM_COL32( 90, 140, 240, 255),
+    const uint32_t kAxisBase[3] = {
+        Rgba8(230,  80,  80, 255),
+        Rgba8( 90, 200, 100, 255),
+        Rgba8( 90, 140, 240, 255),
     };
-    const ImU32 kAxisHover[3] = {
-        IM_COL32(255, 160, 160, 255),
-        IM_COL32(170, 250, 180, 255),
-        IM_COL32(160, 200, 255, 255),
+    const uint32_t kAxisHover[3] = {
+        Rgba8(255, 160, 160, 255),
+        Rgba8(170, 250, 180, 255),
+        Rgba8(160, 200, 255, 255),
     };
-    const ImU32 kAxisActive[3] = {
-        IM_COL32(255, 220, 220, 255),
-        IM_COL32(220, 255, 230, 255),
-        IM_COL32(220, 240, 255, 255),
+    const uint32_t kAxisActive[3] = {
+        Rgba8(255, 220, 220, 255),
+        Rgba8(220, 255, 230, 255),
+        Rgba8(220, 240, 255, 255),
     };
 
     for (int f = 0; f < 6; ++f) {
         simd::float3 cw, nw;
         FaceWorldGeom(state.gen_gizmo.bounds, f, &cw, &nw);
-        ImVec2 base, tip;
+        simd::float2 base, tip;
         bool base_v, tip_v;
         project(cw, &base, &base_v);
         project(cw + nw * kTipLengthVoxels, &tip, &tip_v);
         if (!base_v || !tip_v) continue;
 
         const int axis = f / 2;
-        const ImU32 color =
+        const uint32_t color =
             (f == state.gen_gizmo.active_drag_face) ? kAxisActive[axis] :
             (f == hover_face)                       ? kAxisHover[axis]  :
                                                       kAxisBase[axis];
         const float thickness =
             (f == hover_face || f == state.gen_gizmo.active_drag_face)
                 ? 2.8f : 2.0f;
-        dl->AddLine(base, tip, color, thickness);
+        od.AddLine(base, tip, color, thickness);
 
         // Solid filled-triangle arrowhead. Triangle base at `back`
         // (pulled back along the stem from the tip); leg1 / leg2 are
@@ -359,16 +358,16 @@ void DrawOverlay(const InteractionState& state, const ViewContext& vc) {
             const float uy = stem_dy / stem_len;
             const float px = -uy;   // perpendicular in screen space
             const float py =  ux;
-            const ImVec2 back{
+            const simd::float2 back{
                 tip.x - ux * kArrowheadLenPx,
                 tip.y - uy * kArrowheadLenPx};
-            const ImVec2 leg1{
+            const simd::float2 leg1{
                 back.x + px * kArrowheadHalfWidthPx,
                 back.y + py * kArrowheadHalfWidthPx};
-            const ImVec2 leg2{
+            const simd::float2 leg2{
                 back.x - px * kArrowheadHalfWidthPx,
                 back.y - py * kArrowheadHalfWidthPx};
-            dl->AddTriangleFilled(tip, leg1, leg2, color);
+            od.AddTriangleFilled(tip, leg1, leg2, color);
         }
     }
 }

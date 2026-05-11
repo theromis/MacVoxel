@@ -3,6 +3,7 @@
 #include "InteractionState.h"
 
 namespace macvoxel {
+class OverlayDraw;
 struct EditorContext;
 struct MouseEvent;
 struct ViewContext;
@@ -35,7 +36,9 @@ void OnMouseDragged(EditorContext& ctx, InteractionState& state,
 void OnMouseUp(InteractionState& state);
 
 // Six axis-coloured face-arrow handles. Hovered / actively-dragged
-// face gets a brighter tint and a thicker stem.
-void DrawOverlay(const InteractionState& state, const ViewContext& vc);
+// face gets a brighter tint and a thicker stem. mouse_captured_by_ui
+// suppresses hover-tinting when an overlaying panel has the cursor.
+void DrawOverlay(const InteractionState& state, const ViewContext& vc,
+                 OverlayDraw& od, bool mouse_captured_by_ui);
 
 }  // namespace macvoxel::xform_handle_controller
