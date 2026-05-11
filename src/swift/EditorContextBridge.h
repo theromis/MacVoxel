@@ -65,6 +65,13 @@ typedef NS_ENUM(NSInteger, BridgeGlassMode) {
     BridgeGlassModeAbsorption    NS_SWIFT_NAME(absorption)    = 1,
 };
 
+typedef NS_ENUM(NSInteger, BridgeMaterialType) {
+    BridgeMaterialTypeDiffuse  NS_SWIFT_NAME(diffuse)  = 0,
+    BridgeMaterialTypeMetal    NS_SWIFT_NAME(metal)    = 1,
+    BridgeMaterialTypeEmissive NS_SWIFT_NAME(emissive) = 2,
+    BridgeMaterialTypeGlass    NS_SWIFT_NAME(glass)    = 3,
+};
+
 // Obj-C wrapper around macvoxel::EditorContext. Owns the C++ context
 // via std::unique_ptr behind the @implementation; Swift sees only this
 // Obj-C interface (pulled in by MacVoxel-Bridging-Header.h). Pure C++
@@ -246,6 +253,42 @@ typedef NS_ENUM(NSInteger, BridgeGlassMode) {
 - (void)applyPaletteColorR:(uint8_t)r g:(uint8_t)g b:(uint8_t)b a:(uint8_t)a
     NS_SWIFT_NAME(applyPaletteColor(r:g:b:a:));
 - (void)commitPaletteEdit;
+
+// ---------------------------------------------------------------------------
+// Material editor. Reads the active slot for display; writes apply to
+// every slot in the selection. Begin/Set/Commit coalesces multi-widget
+// drags (slider + combo) into one Cmd-Z step via panel.material_edit's
+// per-slot pre snapshot.
+// ---------------------------------------------------------------------------
+
+// Read accessors (active slot).
+@property (nonatomic, readonly) BridgeMaterialType activeMaterialType;
+@property (nonatomic, readonly) float activeMaterialRoughness;
+@property (nonatomic, readonly) float activeMaterialMetallic;
+@property (nonatomic, readonly) float activeMaterialEmission;
+@property (nonatomic, readonly) NSInteger activeMaterialEmissionPower;
+@property (nonatomic, readonly) float activeMaterialTransparency;
+@property (nonatomic, readonly) float activeMaterialIor;
+
+// Selected-slot count for the "Index N (+M more selected)" label.
+@property (nonatomic, readonly) NSInteger selectedSlotCount;
+
+- (void)beginMaterialEdit;
+- (void)applyMaterialType:(BridgeMaterialType)type
+    NS_SWIFT_NAME(applyMaterialType(_:));
+- (void)applyMaterialRoughness:(float)v
+    NS_SWIFT_NAME(applyMaterialRoughness(_:));
+- (void)applyMaterialMetallic:(float)v
+    NS_SWIFT_NAME(applyMaterialMetallic(_:));
+- (void)applyMaterialEmission:(float)v
+    NS_SWIFT_NAME(applyMaterialEmission(_:));
+- (void)applyMaterialEmissionPower:(NSInteger)v
+    NS_SWIFT_NAME(applyMaterialEmissionPower(_:));
+- (void)applyMaterialTransparency:(float)v
+    NS_SWIFT_NAME(applyMaterialTransparency(_:));
+- (void)applyMaterialIor:(float)v
+    NS_SWIFT_NAME(applyMaterialIor(_:));
+- (void)commitMaterialEdit;
 
 @end
 

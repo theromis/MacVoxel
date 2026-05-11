@@ -648,4 +648,110 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     edit.drag = false;
 }
 
+// ---------------------------------------------------------------------------
+// Material editor
+// ---------------------------------------------------------------------------
+
+- (BridgeMaterialType)activeMaterialType {
+    return static_cast<BridgeMaterialType>(
+        _ctx->document.palette.GetMaterial(_ctx->tool.palette_idx).type);
+}
+- (float)activeMaterialRoughness {
+    return _ctx->document.palette.GetMaterial(_ctx->tool.palette_idx).roughness;
+}
+- (float)activeMaterialMetallic {
+    return _ctx->document.palette.GetMaterial(_ctx->tool.palette_idx).metallic;
+}
+- (float)activeMaterialEmission {
+    return _ctx->document.palette.GetMaterial(_ctx->tool.palette_idx).emission;
+}
+- (NSInteger)activeMaterialEmissionPower {
+    return _ctx->document.palette.GetMaterial(_ctx->tool.palette_idx).emissionPower;
+}
+- (float)activeMaterialTransparency {
+    return _ctx->document.palette.GetMaterial(_ctx->tool.palette_idx).transparency;
+}
+- (float)activeMaterialIor {
+    return _ctx->document.palette.GetMaterial(_ctx->tool.palette_idx).ior;
+}
+
+- (NSInteger)selectedSlotCount {
+    return static_cast<NSInteger>(_ctx->tool.selected_slots.count());
+}
+
+- (void)beginMaterialEdit {
+    auto &me = _ctx->panel.material_edit;
+    if (me.drag) return;
+    me.drag = true;
+    for (auto &v : me.pre) v.reset();
+    macvoxel::ToolSettings &tool = _ctx->tool;
+    for (size_t i = 1; i < tool.selected_slots.size(); ++i) {
+        if (tool.selected_slots.test(i)) {
+            me.pre[i] = _ctx->document.palette.GetMaterial(
+                static_cast<uint8_t>(i));
+        }
+    }
+    const uint8_t aidx = tool.palette_idx;
+    if (aidx != 0 && !me.pre[aidx].has_value()) {
+        me.pre[aidx] = _ctx->document.palette.GetMaterial(aidx);
+    }
+    _ctx->history.BeginOp();
+}
+
+- (void)applyMaterialChange:(void(NS_NOESCAPE ^)(macvoxel::Material &))mutator {
+    auto &me = _ctx->panel.material_edit;
+    if (!me.drag) return;
+    macvoxel::ToolSettings &tool = _ctx->tool;
+    auto apply_to = [&](uint8_t s) {
+        if (!me.pre[s].has_value()) return;
+        macvoxel::Material m = _ctx->document.palette.GetMaterial(s);
+        mutator(m);
+        _ctx->document.palette.SetMaterial(s, m);
+        _ctx->history.RecordMaterial(s, *me.pre[s], m);
+    };
+    for (size_t i = 1; i < tool.selected_slots.size(); ++i) {
+        if (tool.selected_slots.test(i)) {
+            apply_to(static_cast<uint8_t>(i));
+        }
+    }
+    if (tool.palette_idx != 0 &&
+        !tool.selected_slots.test(static_cast<size_t>(tool.palette_idx))) {
+        apply_to(tool.palette_idx);
+    }
+    _ctx->document.BumpMaterials();
+}
+
+- (void)applyMaterialType:(BridgeMaterialType)type {
+    [self applyMaterialChange:^(macvoxel::Material &m) {
+        m.type = static_cast<macvoxel::MaterialType>(type);
+    }];
+}
+- (void)applyMaterialRoughness:(float)v {
+    [self applyMaterialChange:^(macvoxel::Material &m) { m.roughness = v; }];
+}
+- (void)applyMaterialMetallic:(float)v {
+    [self applyMaterialChange:^(macvoxel::Material &m) { m.metallic = v; }];
+}
+- (void)applyMaterialEmission:(float)v {
+    [self applyMaterialChange:^(macvoxel::Material &m) { m.emission = v; }];
+}
+- (void)applyMaterialEmissionPower:(NSInteger)v {
+    [self applyMaterialChange:^(macvoxel::Material &m) {
+        m.emissionPower = static_cast<int>(v);
+    }];
+}
+- (void)applyMaterialTransparency:(float)v {
+    [self applyMaterialChange:^(macvoxel::Material &m) { m.transparency = v; }];
+}
+- (void)applyMaterialIor:(float)v {
+    [self applyMaterialChange:^(macvoxel::Material &m) { m.ior = v; }];
+}
+
+- (void)commitMaterialEdit {
+    auto &me = _ctx->panel.material_edit;
+    if (!me.drag) return;
+    _ctx->history.CommitOp();
+    me.drag = false;
+}
+
 @end

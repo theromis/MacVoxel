@@ -71,6 +71,10 @@ struct RenderPanel: View {
                 Button("Save render\u{2026}") { state.saveRenderDialog() }
                     .disabled(state.sampleCount == 0)
             }
+
+            Divider().padding(.vertical, 4)
+            MaterialEditor(state: state)
+
             Spacer(minLength: 0)
         }
         .padding(12)
@@ -98,5 +102,140 @@ struct RenderPanel: View {
             .font(.system(size: 11, weight: .semibold))
             .textCase(.uppercase)
             .foregroundStyle(.secondary)
+    }
+}
+
+private struct MaterialEditor: View {
+    @Bindable var state: EditorState
+    @State private var coalesceTimer: Timer?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Material")
+                .font(.system(size: 11, weight: .semibold))
+                .textCase(.uppercase)
+                .foregroundStyle(.secondary)
+            indexLabel
+
+            HStack(spacing: 8) {
+                Text("Type")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 60, alignment: .leading)
+                Picker("Type", selection: typeBinding) {
+                    Text("Diffuse").tag(BridgeMaterialType.diffuse)
+                    Text("Metal").tag(BridgeMaterialType.metal)
+                    Text("Emissive").tag(BridgeMaterialType.emissive)
+                    Text("Glass").tag(BridgeMaterialType.glass)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+
+            slider("Roughness", value: floatBinding(get: { state.activeMaterialRoughness },
+                                                    apply: state.applyMaterialRoughness),
+                   range: 0...1, format: "%.2f")
+            slider("Metallic", value: floatBinding(get: { state.activeMaterialMetallic },
+                                                   apply: state.applyMaterialMetallic),
+                   range: 0...1, format: "%.2f")
+            slider("Emission",
+                   value: floatBinding(
+                       get: { state.activeMaterialEmission * 100.0 },
+                       apply: { state.applyMaterialEmission($0 * 0.01) }),
+                   range: 0...100, format: "%.0f")
+            slider("Power",
+                   value: floatBinding(
+                       get: { Float(state.activeMaterialEmissionPower) },
+                       apply: { state.applyMaterialEmissionPower(Int($0.rounded())) }),
+                   range: 1...5, format: "%.0f", step: 1)
+            slider("Transparency",
+                   value: floatBinding(get: { state.activeMaterialTransparency },
+                                       apply: state.applyMaterialTransparency),
+                   range: 0...1, format: "%.2f")
+            slider("IoR",
+                   value: floatBinding(get: { state.activeMaterialIor },
+                                       apply: state.applyMaterialIor),
+                   range: 1...3, format: "%.2f")
+        }
+        .disabled(state.activePaletteSlot == 0)
+    }
+
+    private var indexLabel: some View {
+        let n = state.selectedSlotCount
+        let active = state.activePaletteSlot
+        return Group {
+            if n > 1 {
+                Text("Index \(active)  (+\(n - 1) more selected)")
+            } else {
+                Text("Index \(active)")
+            }
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(.tertiary)
+    }
+
+    private func slider(_ label: String, value: Binding<Float>,
+                        range: ClosedRange<Float>, format: String,
+                        step: Float = 0) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(width: 88, alignment: .leading)
+            sliderControl(value: value, range: range, step: step)
+            Text(String(format: format, value.wrappedValue))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .trailing)
+        }
+    }
+
+    @ViewBuilder
+    private func sliderControl(value: Binding<Float>,
+                               range: ClosedRange<Float>, step: Float) -> some View {
+        let binding = Binding<Double>(
+            get: { Double(value.wrappedValue) },
+            set: { value.wrappedValue = Float($0) }
+        )
+        let lo = Double(range.lowerBound)
+        let hi = Double(range.upperBound)
+        // Slider's `step:` requires > 0; pass it only when the caller
+        // wants quantised values.
+        if step > 0 {
+            Slider(value: binding, in: lo...hi, step: Double(step))
+        } else {
+            Slider(value: binding, in: lo...hi)
+        }
+    }
+
+    private var typeBinding: Binding<BridgeMaterialType> {
+        Binding(
+            get: { state.activeMaterialType },
+            set: { newType in
+                state.beginMaterialEdit()
+                state.applyMaterialType(newType)
+                scheduleCommit()
+            }
+        )
+    }
+
+    private func floatBinding(get: @escaping () -> Float,
+                              apply: @escaping (Float) -> Void) -> Binding<Float> {
+        Binding(
+            get: get,
+            set: { newValue in
+                state.beginMaterialEdit()
+                apply(newValue)
+                scheduleCommit()
+            }
+        )
+    }
+
+    private func scheduleCommit() {
+        coalesceTimer?.invalidate()
+        coalesceTimer = Timer.scheduledTimer(withTimeInterval: 0.4,
+                                             repeats: false) { _ in
+            state.commitMaterialEdit()
+        }
     }
 }

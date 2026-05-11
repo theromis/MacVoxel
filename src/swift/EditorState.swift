@@ -393,6 +393,31 @@ final class EditorState {
     }
     func commitPaletteEdit() { bridge.commitPaletteEdit() }
 
+    // ---- Material editor ----
+
+    var selectedSlotCount: Int {
+        _ = tick; return bridge.selectedSlotCount
+    }
+    var activeMaterialType: BridgeMaterialType {
+        _ = tick; return bridge.activeMaterialType
+    }
+    var activeMaterialRoughness: Float    { _ = tick; return bridge.activeMaterialRoughness }
+    var activeMaterialMetallic: Float     { _ = tick; return bridge.activeMaterialMetallic }
+    var activeMaterialEmission: Float     { _ = tick; return bridge.activeMaterialEmission }
+    var activeMaterialEmissionPower: Int  { _ = tick; return bridge.activeMaterialEmissionPower }
+    var activeMaterialTransparency: Float { _ = tick; return bridge.activeMaterialTransparency }
+    var activeMaterialIor: Float          { _ = tick; return bridge.activeMaterialIor }
+
+    func beginMaterialEdit()  { bridge.beginMaterialEdit() }
+    func applyMaterialType(_ t: BridgeMaterialType)        { bridge.applyMaterialType(t) }
+    func applyMaterialRoughness(_ v: Float)                { bridge.applyMaterialRoughness(v) }
+    func applyMaterialMetallic(_ v: Float)                 { bridge.applyMaterialMetallic(v) }
+    func applyMaterialEmission(_ v: Float)                 { bridge.applyMaterialEmission(v) }
+    func applyMaterialEmissionPower(_ v: Int)              { bridge.applyMaterialEmissionPower(v) }
+    func applyMaterialTransparency(_ v: Float)             { bridge.applyMaterialTransparency(v) }
+    func applyMaterialIor(_ v: Float)                      { bridge.applyMaterialIor(v) }
+    func commitMaterialEdit() { bridge.commitMaterialEdit() }
+
     func saveRenderDialog() {
         let panel = NSSavePanel()
         panel.title = "Save render"
