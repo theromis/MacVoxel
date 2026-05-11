@@ -22,7 +22,8 @@ Deferred polish, not yet implemented:
 - Palette drag-rectangle multi-select. Single-click + shift-toggle work.
 - Palette context menu (Copy/Paste color, Make gradient, Select voxels
   by color, Paint voxels).
-- Tool quick-keys (1-9/0, `[`/`]`).
+- Brush-size quick-keys (`[` / `]`). Tool / mode letter keys
+  (V / L / B / F / M / T / R / G) are wired in `MetalScene` keyDown.
 - Drag-drop a `.vox` onto the running window (cold-launch via Finder
   Open With works through `.onOpenURL`).
 - Theme parity vs the old `ui/Theme.cpp` pro-app dark — SwiftUI defaults

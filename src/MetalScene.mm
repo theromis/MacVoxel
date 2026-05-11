@@ -193,6 +193,9 @@ constexpr unsigned short kKeyCodeEscape = 53;
 
 // Absorb the keys we use as drag modifiers so they don't beep up the
 // responder chain. Track Space / Escape state for ImGui-replacement.
+// Plain (no-modifier) letter keys map to tool / mode quick-switches —
+// these only reach us when MetalScene is first responder, so a focused
+// TextField still gets its keystrokes.
 - (void)keyDown:(NSEvent *)event {
     const unsigned short kc = event.keyCode;
     if (kc == kKeyCodeSpace) {
@@ -202,6 +205,28 @@ constexpr unsigned short kKeyCodeEscape = 53;
     if (kc == kKeyCodeEscape) {
         _escapePending = YES;
         return;
+    }
+    const NSEventModifierFlags m = event.modifierFlags &
+        (NSEventModifierFlagCommand |
+         NSEventModifierFlagOption |
+         NSEventModifierFlagControl);
+    if (m == 0) {
+        NSString *chars = event.charactersIgnoringModifiers;
+        if (chars.length == 1) {
+            using K = macvoxel::ToolKind;
+            using M = macvoxel::ToolMode;
+            const unichar c = [chars characterAtIndex:0];
+            switch (c) {
+            case 'v': case 'V': _ctx->tool.tool = K::Brush;   return;
+            case 'l': case 'L': _ctx->tool.tool = K::Line;    return;
+            case 'b': case 'B': _ctx->tool.tool = K::Box;     return;
+            case 'f': case 'F': _ctx->tool.tool = K::Face;    return;
+            case 'm': case 'M': _ctx->tool.tool = K::Marquee; return;
+            case 't': case 'T': _ctx->tool.mode = M::Add;     return;
+            case 'r': case 'R': _ctx->tool.mode = M::Remove;  return;
+            case 'g': case 'G': _ctx->tool.mode = M::Paint;   return;
+            }
+        }
     }
     [super keyDown:event];
 }
