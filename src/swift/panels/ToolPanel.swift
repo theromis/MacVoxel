@@ -101,7 +101,7 @@ struct ToolPanel: View {
             Slider(value: Binding(
                 get: { Double(state.brushSize) },
                 set: { state.brushSize = Int($0.rounded()) }
-            ), in: 1...63, step: 1)
+            ), in: 1...63)
             Text("\(state.brushSize)")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
