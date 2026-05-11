@@ -28,31 +28,53 @@ struct ToolPanel: View {
 
     // ----- Tool grid -----
 
+    private struct ToolDef {
+        let kind: BridgeToolKind
+        let symbol: String
+        let label: String
+        let key: String?
+    }
+
+    private static let tools: [ToolDef] = [
+        .init(kind: .brush,       symbol: "paintbrush.pointed.fill",                  label: "Brush",       key: "V"),
+        .init(kind: .line,        symbol: "pencil.line",                              label: "Line",        key: "L"),
+        .init(kind: .circle,      symbol: "circle.fill",                              label: "Circle",      key: nil),
+        .init(kind: .square,      symbol: "square.fill",                              label: "Square",      key: nil),
+        .init(kind: .box,         symbol: "cube.fill",                                label: "Box",         key: "B"),
+        .init(kind: .face,        symbol: "rectangle.portrait.and.arrow.right.fill",  label: "Face",        key: "F"),
+        .init(kind: .generator,   symbol: "gearshape.2.fill",                         label: "Generator",   key: nil),
+        .init(kind: .marquee,     symbol: "square.dashed",                            label: "Marquee",     key: "M"),
+        .init(kind: .boxSelect,   symbol: "cube.transparent.fill",                    label: "Box Select",  key: nil),
+        .init(kind: .floodSelect, symbol: "paintbrush.fill",                          label: "Flood Select", key: nil),
+    ]
+
     private var toolGrid: some View {
         let columns = Array(repeating: GridItem(.flexible(), spacing: 4),
                             count: 2)
         return LazyVGrid(columns: columns, spacing: 4) {
-            toolButton("Brush", .brush)
-            toolButton("Line", .line)
-            toolButton("Circle", .circle)
-            toolButton("Square", .square)
-            toolButton("Box", .box)
-            toolButton("Face", .face)
-            toolButton("Generator", .generator)
-            toolButton("Marquee", .marquee)
-            toolButton("Box-sel", .boxSelect)
-            toolButton("Flood-sel", .floodSelect)
+            ForEach(Self.tools, id: \.kind) { tool in
+                toolButton(tool)
+            }
         }
     }
 
-    private func toolButton(_ label: String, _ kind: BridgeToolKind) -> some View {
-        Button(action: { state.toolKind = kind }) {
-            Text(label)
-                .font(.system(size: 11, weight: state.toolKind == kind ? .semibold : .regular))
-                .frame(maxWidth: .infinity)
+    private func toolButton(_ tool: ToolDef) -> some View {
+        let selected = state.toolKind == tool.kind
+        let tooltip = tool.key.map { "\(tool.label) (\($0))" } ?? tool.label
+        return Button(action: { state.toolKind = tool.kind }) {
+            Image(systemName: tool.symbol)
+                .font(.system(size: 16))
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                .frame(maxWidth: .infinity, minHeight: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(selected ? Color.accentColor
+                                       : Color.gray.opacity(0.12))
+                )
+                .contentShape(Rectangle())
+                .help(tooltip)
         }
-        .buttonStyle(.bordered)
-        .tint(state.toolKind == kind ? .accentColor : .secondary)
+        .buttonStyle(.plain)
     }
 
     // ----- Mode -----
