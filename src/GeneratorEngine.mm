@@ -43,6 +43,7 @@ NSString* KernelNameForKind(gen::Kind k) {
         case gen::Kind::Cylinder:  return @"generate_cylinder";
         case gen::Kind::Cone:      return @"generate_cone";
         case gen::Kind::Pyramid:   return @"generate_pyramid";
+        case gen::Kind::Perlin:    return @"generate_perlin";
         case gen::Kind::Count_:    return nil;
     }
     return nil;
@@ -55,8 +56,12 @@ struct Uniforms {
     uint32_t axis;
     uint32_t apex_at_max;
     uint32_t pad;
+    float noise_scale;
+    float noise_threshold;
+    uint32_t noise_octaves;
+    uint32_t noise_seed;
 };
-static_assert(sizeof(Uniforms) == 48, "Uniforms layout mismatch");
+static_assert(sizeof(Uniforms) == 64, "Uniforms layout mismatch");
 
 }  // namespace
 
@@ -171,6 +176,10 @@ static_assert(sizeof(Uniforms) == 48, "Uniforms layout mismatch");
     u.palette_idx = params.palette_idx;
     u.axis = params.axis;
     u.apex_at_max = params.apex_at_max;
+    u.noise_scale = params.noise_scale;
+    u.noise_threshold = params.noise_threshold;
+    u.noise_octaves = params.noise_octaves;
+    u.noise_seed = params.noise_seed;
 
     id<MTLCommandBuffer> cmd = [_queue commandBuffer];
     cmd.label = @"GeneratorDispatch";

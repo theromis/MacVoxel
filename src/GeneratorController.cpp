@@ -207,17 +207,22 @@ void Tick(EditorContext& ctx, InteractionState& state,
     }
 
     // Dirty check: bounds (memcmp-safe — Bounds3i is a POD), kind,
-    // palette, and the per-kind params we care about (axis,
-    // apex_at_max). Param changes flow in from the panel UI.
+    // palette, and the per-kind params we care about. Param changes
+    // flow in from the panel UI.
     const auto& gs = ctx.generator;
+    const auto& last = state.gen_gizmo.last_params;
     const uint8_t cur_palette = ctx.tool.palette_idx;
     const bool dirty =
         gs.active_kind != state.gen_gizmo.last_kind ||
         std::memcmp(&state.gen_gizmo.bounds, &state.gen_gizmo.last_bounds,
                     sizeof(state.gen_gizmo.bounds)) != 0 ||
-        cur_palette != state.gen_gizmo.last_params.palette_idx ||
-        gs.params.axis != state.gen_gizmo.last_params.axis ||
-        gs.params.apex_at_max != state.gen_gizmo.last_params.apex_at_max;
+        cur_palette != last.palette_idx ||
+        gs.params.axis != last.axis ||
+        gs.params.apex_at_max != last.apex_at_max ||
+        gs.params.noise_scale != last.noise_scale ||
+        gs.params.noise_threshold != last.noise_threshold ||
+        gs.params.noise_octaves != last.noise_octaves ||
+        gs.params.noise_seed != last.noise_seed;
     if (!dirty) return;
 
     RegenerateAndStamp(ctx, state, state.gen_gizmo.bounds,

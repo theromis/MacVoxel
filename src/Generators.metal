@@ -22,6 +22,10 @@ struct Uniforms {
     uint axis;        // 0 = X, 1 = Y, 2 = Z (cylinder/cone/pyramid axis)
     uint apex_at_max; // 0 = apex at -axis face, 1 = apex at +axis face
     uint pad;
+    float noise_scale;     // Perlin: voxels per feature
+    float noise_threshold; // Perlin: fill when fBm ≥ threshold (0..1)
+    uint  noise_octaves;   // Perlin: 1..6 fBm octaves
+    uint  noise_seed;      // Perlin: lattice hash seed
 };
 
 struct PackedCell { int x, y, z; };
@@ -175,6 +179,96 @@ kernel void generate_pyramid(
     float n_v = (v.pos[v_a] - center_v) / (v.dim[v_a] * 0.5);
 
     if (max(abs(n_u), abs(n_v)) <= r) {
+        emit(cell, counter, out);
+    }
+}
+
+// --- Perlin noise -----------------------------------------------------------
+//
+// Classic gradient noise on the integer lattice, summed across octaves as
+// fBm. Output is normalized to roughly [0, 1] and thresholded — cells whose
+// fBm value clears `noise_threshold` fill. Reproducible per `noise_seed`:
+// the same (bounds, params, seed) tuple yields byte-identical results.
+
+static uint perlin_hash(int3 c, uint seed) {
+    uint h = uint(c.x) * 1597334677u;
+    h = (h ^ (uint(c.y) * 3812015801u)) * 1597334677u;
+    h = (h ^ (uint(c.z) * 2798796415u)) * 1597334677u;
+    h = (h ^ seed) * 1597334677u;
+    h ^= h >> 16;
+    h *= 2246822507u;
+    h ^= h >> 13;
+    return h;
+}
+
+static float3 perlin_grad(int3 c, uint seed) {
+    // Standard 12 edge-midpoint gradients of the unit cube — the
+    // canonical Perlin gradient set.
+    const float3 kGrads[12] = {
+        float3( 1,  1,  0), float3(-1,  1,  0), float3( 1, -1,  0), float3(-1, -1,  0),
+        float3( 1,  0,  1), float3(-1,  0,  1), float3( 1,  0, -1), float3(-1,  0, -1),
+        float3( 0,  1,  1), float3( 0, -1,  1), float3( 0,  1, -1), float3( 0, -1, -1),
+    };
+    return kGrads[perlin_hash(c, seed) % 12u];
+}
+
+static float perlin_fade(float t) {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+static float perlin3(float3 p, uint seed) {
+    int3 pi = int3(floor(p));
+    float3 pf = p - float3(pi);
+    float3 f = float3(perlin_fade(pf.x), perlin_fade(pf.y), perlin_fade(pf.z));
+
+    float n000 = dot(perlin_grad(pi + int3(0,0,0), seed), pf - float3(0,0,0));
+    float n100 = dot(perlin_grad(pi + int3(1,0,0), seed), pf - float3(1,0,0));
+    float n010 = dot(perlin_grad(pi + int3(0,1,0), seed), pf - float3(0,1,0));
+    float n110 = dot(perlin_grad(pi + int3(1,1,0), seed), pf - float3(1,1,0));
+    float n001 = dot(perlin_grad(pi + int3(0,0,1), seed), pf - float3(0,0,1));
+    float n101 = dot(perlin_grad(pi + int3(1,0,1), seed), pf - float3(1,0,1));
+    float n011 = dot(perlin_grad(pi + int3(0,1,1), seed), pf - float3(0,1,1));
+    float n111 = dot(perlin_grad(pi + int3(1,1,1), seed), pf - float3(1,1,1));
+
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+    float nxy0 = mix(nx00, nx10, f.y);
+    float nxy1 = mix(nx01, nx11, f.y);
+    return mix(nxy0, nxy1, f.z);
+}
+
+kernel void generate_perlin(
+    constant Uniforms& u                  [[buffer(0)]],
+    device atomic_uint* counter           [[buffer(1)]],
+    device PackedCell* out                [[buffer(2)]],
+    uint3 gid                             [[thread_position_in_grid]])
+{
+    int3 cell;
+    if (!resolve_cell(gid, u, cell)) return;
+
+    const float scale = max(u.noise_scale, 0.001);
+    const uint octaves = clamp(u.noise_octaves, 1u, 8u);
+
+    // Cell-center sampling, in feature-space (scale voxels per unit).
+    float3 p = (float3(cell) + 0.5) / scale;
+
+    float total = 0.0;
+    float amp = 1.0;
+    float total_amp = 0.0;
+    for (uint o = 0u; o < octaves; ++o) {
+        // 1013 keeps octave hashes far apart in seed-space so successive
+        // octaves don't share lattice points.
+        total += amp * perlin3(p, u.noise_seed + o * 1013u);
+        total_amp += amp;
+        amp *= 0.5;
+        p *= 2.0;
+    }
+    // Perlin3 output sits in roughly [-0.87, 0.87]; the fBm sum (normalized
+    // by total_amp) stays in the same range. Map to [0, 1] for threshold.
+    float n = clamp((total / total_amp) * 0.5 + 0.5, 0.0, 1.0);
+    if (n >= u.noise_threshold) {
         emit(cell, counter, out);
     }
 }

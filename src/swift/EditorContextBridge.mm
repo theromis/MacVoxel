@@ -396,6 +396,38 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     _ctx->generator.params.apex_at_max = apex ? 1u : 0u;
 }
 
+- (float)generatorPerlinScale {
+    return _ctx->generator.params.noise_scale;
+}
+
+- (void)setGeneratorPerlinScale:(float)scale {
+    _ctx->generator.params.noise_scale = scale;
+}
+
+- (float)generatorPerlinThreshold {
+    return _ctx->generator.params.noise_threshold;
+}
+
+- (void)setGeneratorPerlinThreshold:(float)threshold {
+    _ctx->generator.params.noise_threshold = threshold;
+}
+
+- (NSInteger)generatorPerlinOctaves {
+    return static_cast<NSInteger>(_ctx->generator.params.noise_octaves);
+}
+
+- (void)setGeneratorPerlinOctaves:(NSInteger)octaves {
+    _ctx->generator.params.noise_octaves = static_cast<uint32_t>(octaves);
+}
+
+- (NSInteger)generatorPerlinSeed {
+    return static_cast<NSInteger>(_ctx->generator.params.noise_seed);
+}
+
+- (void)setGeneratorPerlinSeed:(NSInteger)seed {
+    _ctx->generator.params.noise_seed = static_cast<uint32_t>(seed);
+}
+
 // ---------------------------------------------------------------------------
 // Render settings
 // ---------------------------------------------------------------------------

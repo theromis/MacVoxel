@@ -221,6 +221,26 @@ final class EditorState {
         set { bridge.generatorApexAtMax = newValue; tick &+= 1 }
     }
 
+    var generatorPerlinScale: Float {
+        get { _ = tick; return bridge.generatorPerlinScale }
+        set { bridge.generatorPerlinScale = newValue; tick &+= 1 }
+    }
+
+    var generatorPerlinThreshold: Float {
+        get { _ = tick; return bridge.generatorPerlinThreshold }
+        set { bridge.generatorPerlinThreshold = newValue; tick &+= 1 }
+    }
+
+    var generatorPerlinOctaves: Int {
+        get { _ = tick; return bridge.generatorPerlinOctaves }
+        set { bridge.generatorPerlinOctaves = newValue; tick &+= 1 }
+    }
+
+    var generatorPerlinSeed: Int {
+        get { _ = tick; return bridge.generatorPerlinSeed }
+        set { bridge.generatorPerlinSeed = newValue; tick &+= 1 }
+    }
+
     // ---- Render settings (panel-facing) ----
     //
     // Path tracer reads these every frame; raycast preview ignores

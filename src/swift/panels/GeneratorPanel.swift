@@ -11,6 +11,7 @@ struct GeneratorPanel: View {
                 Text("Cylinder").tag(BridgeGeneratorKind.cylinder)
                 Text("Cone").tag(BridgeGeneratorKind.cone)
                 Text("Pyramid").tag(BridgeGeneratorKind.pyramid)
+                Text("Perlin").tag(BridgeGeneratorKind.perlin)
             }
             .labelsHidden()
             .pickerStyle(.menu)
@@ -36,6 +37,8 @@ struct GeneratorPanel: View {
         case .cone, .pyramid:
             axisRow
             apexRow
+        case .perlin:
+            perlinRows
         @unknown default:
             EmptyView()
         }
@@ -66,6 +69,60 @@ struct GeneratorPanel: View {
         }
     }
 
+    @ViewBuilder
+    private var perlinRows: some View {
+        labeled("Scale") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorPerlinScale },
+                    set: { state.generatorPerlinScale = $0 }
+                ),
+                range: 1.0...64.0,
+                format: "%.1f")
+        }
+        labeled("Threshold") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorPerlinThreshold },
+                    set: { state.generatorPerlinThreshold = $0 }
+                ),
+                range: 0.0...1.0,
+                format: "%.2f")
+        }
+        labeled("Octaves") {
+            IntSliderRow(
+                value: Binding(
+                    get: { state.generatorPerlinOctaves },
+                    set: { state.generatorPerlinOctaves = $0 }
+                ),
+                range: 1...6)
+        }
+        labeled("Seed") {
+            HStack(spacing: 6) {
+                TextField("", value: Binding(
+                    get: { state.generatorPerlinSeed },
+                    set: { state.generatorPerlinSeed = $0 }
+                ), format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                Button("Randomize") {
+                    state.generatorPerlinSeed = Int.random(in: 1...Int(Int32.max))
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private func labeled<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 10)).foregroundStyle(.tertiary)
+            content()
+        }
+    }
+
     private var kindBinding: Binding<BridgeGeneratorKind> {
         Binding(get: { state.generatorKind },
                 set: { state.generatorKind = $0 })
@@ -86,5 +143,43 @@ struct GeneratorPanel: View {
             .font(.system(size: 11, weight: .semibold))
             .textCase(.uppercase)
             .foregroundStyle(.secondary)
+    }
+}
+
+private struct FloatSliderRow: View {
+    @Binding var value: Float
+    let range: ClosedRange<Float>
+    let format: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Slider(value: Binding(
+                get: { Double(value) },
+                set: { value = Float($0) }
+            ), in: Double(range.lowerBound)...Double(range.upperBound))
+            Text(String(format: format, value))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .trailing)
+        }
+    }
+}
+
+private struct IntSliderRow: View {
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Slider(value: Binding(
+                get: { Double(value) },
+                set: { value = Int($0.rounded()) }
+            ), in: Double(range.lowerBound)...Double(range.upperBound),
+            step: 1)
+            Text("\(value)")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, alignment: .trailing)
+        }
     }
 }

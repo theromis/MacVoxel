@@ -18,6 +18,7 @@ typedef NS_ENUM(NSInteger, BridgeGeneratorKind) {
     BridgeGeneratorKindCylinder  NS_SWIFT_NAME(cylinder)  = 1,
     BridgeGeneratorKindCone      NS_SWIFT_NAME(cone)      = 2,
     BridgeGeneratorKindPyramid   NS_SWIFT_NAME(pyramid)   = 3,
+    BridgeGeneratorKindPerlin    NS_SWIFT_NAME(perlin)    = 4,
 };
 
 // Mirror of macvoxel::ToolKind.
@@ -171,6 +172,10 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, assign) BridgeGeneratorKind generatorKind;
 @property (nonatomic, assign) BridgeAxis generatorAxis;
 @property (nonatomic, assign) BOOL generatorApexAtMax;
+@property (nonatomic, assign) float generatorPerlinScale;
+@property (nonatomic, assign) float generatorPerlinThreshold;
+@property (nonatomic, assign) NSInteger generatorPerlinOctaves;
+@property (nonatomic, assign) NSInteger generatorPerlinSeed;
 
 // ---------------------------------------------------------------------------
 // Render settings (path tracer inputs). Live state read by the

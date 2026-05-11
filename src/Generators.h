@@ -25,7 +25,8 @@ enum class Kind : uint32_t {
     Cylinder,
     Cone,
     Pyramid,
-    // Maze, Perlin, Fractal — added in follow-ups
+    Perlin,
+    // Maze, Fractal — added in follow-ups
     Count_,
 };
 
@@ -49,6 +50,17 @@ struct Params {
     // 0 = -axis face (apex at bounds min on that axis); 1 = +axis
     // face (apex at bounds max). Ignored by Cylinder.
     uint32_t apex_at_max = 1;
+    // Perlin: voxels per noise "feature" — larger = chunkier blobs.
+    float    noise_scale = 8.0f;
+    // Perlin: cells fill when normalized fBm output ≥ threshold.
+    // 0 fills everything, 1 fills nothing; 0.5 is the natural midline.
+    float    noise_threshold = 0.5f;
+    // Perlin: number of fBm octaves (1..6 in the UI). Each octave
+    // doubles frequency and halves amplitude.
+    uint32_t noise_octaves = 4;
+    // Perlin: seed for the lattice hash; pinned per-document so a
+    // given (bounds, params, seed) tuple is reproducible.
+    uint32_t noise_seed = 1;
 };
 
 }  // namespace macvoxel::generators
