@@ -32,9 +32,25 @@ final class EditorState {
     // every access; the version counter is what wakes the observer.
     private(set) var documentVersion: UInt64 = 0
 
+    // Low-rate observation tick. Bumped at 10 Hz by a run-loop Timer
+    // so panels that proxy bridge state (gridFilledCount,
+    // selection.empty, ...) re-render in response to controller-driven
+    // mutations (brush strokes, selection ops) without each callsite
+    // wiring its own version counter.
+    private(set) var tick: UInt64 = 0
+    private var tickTimer: Timer?
+
     init() {
         self.bridge = EditorContextBridge()
         self.documentTitle = bridge.documentTitle
+        self.tickTimer = Timer.scheduledTimer(withTimeInterval: 0.1,
+                                              repeats: true) { [weak self] _ in
+            self?.tick &+= 1
+        }
+    }
+
+    deinit {
+        tickTimer?.invalidate()
     }
 
     // ---- File ops ----
@@ -136,6 +152,261 @@ final class EditorState {
     func paste()           { bridge.paste();           afterMutation(reframeCamera: false) }
     func deleteSelection() { bridge.deleteSelection(); afterMutation(reframeCamera: false) }
     func deselect()        { bridge.deselect();        afterMutation(reframeCamera: false) }
+
+    // ---- Document stats (panel-facing) ----
+    //
+    // Computed views over the bridge. Each reads `tick` first so
+    // SwiftUI's @Observable machinery records the dependency — the
+    // panel re-evaluates when the 10 Hz timer fires.
+
+    var documentPath: String {
+        bridge.documentPath
+    }
+
+    var gridFilledCount: Int {
+        _ = tick
+        return bridge.gridFilledCount
+    }
+
+    var gridIsEmpty: Bool {
+        _ = tick
+        return bridge.gridIsEmpty
+    }
+
+    var gridSize: (x: Int, y: Int, z: Int) {
+        _ = tick
+        return (bridge.gridSizeX, bridge.gridSizeY, bridge.gridSizeZ)
+    }
+
+    // ---- Selection transforms (panel-facing) ----
+
+    var canTransformSelection: Bool {
+        _ = tick
+        return bridge.canCutOrCopyOrDelete  // same predicate
+    }
+
+    func rotateSelection(axis: BridgeAxis, clockwise: Bool) {
+        bridge.rotateSelection(axis: axis, clockwise: clockwise)
+        afterMutation(reframeCamera: false)
+    }
+
+    func flipSelection(axis: BridgeAxis) {
+        bridge.flipSelection(axis: axis)
+        afterMutation(reframeCamera: false)
+    }
+
+    // ---- Generator (panel-facing) ----
+    // Live state — no version bump needed; the controller's per-frame
+    // Tick detects changes and re-runs the engine.
+
+    var generatorKind: BridgeGeneratorKind {
+        get { bridge.generatorKind }
+        set { bridge.generatorKind = newValue }
+    }
+
+    var generatorAxis: BridgeAxis {
+        get { bridge.generatorAxis }
+        set { bridge.generatorAxis = newValue }
+    }
+
+    var generatorApexAtMax: Bool {
+        get { bridge.generatorApexAtMax }
+        set { bridge.generatorApexAtMax = newValue }
+    }
+
+    // ---- Render settings (panel-facing) ----
+    //
+    // Path tracer reads these every frame; raycast preview ignores
+    // sky / sun. Changes don't auto-reset accumulation (matches old
+    // ImGui behavior — user toggles to re-start).
+
+    var maxBounces: Int {
+        get { _ = tick; return bridge.maxBounces }
+        set { bridge.maxBounces = newValue }
+    }
+    var maxSamples: Int {
+        get { _ = tick; return bridge.maxSamples }
+        set { bridge.maxSamples = newValue }
+    }
+    var pathTraced: Bool {
+        get { _ = tick; return bridge.pathTraced }
+        set { bridge.pathTraced = newValue }
+    }
+    var acesTonemap: Bool {
+        get { _ = tick; return bridge.acesTonemap }
+        set { bridge.acesTonemap = newValue }
+    }
+    var powerWeightedNEE: Bool {
+        get { _ = tick; return bridge.powerWeightedNEE }
+        set { bridge.powerWeightedNEE = newValue }
+    }
+    var neeRisCount: Int {
+        get { _ = tick; return bridge.neeRisCount }
+        set { bridge.neeRisCount = newValue }
+    }
+    var atmosphericSky: Bool {
+        get { _ = tick; return bridge.atmosphericSky }
+        set { bridge.atmosphericSky = newValue }
+    }
+    var skyIntensity: Float {
+        get { _ = tick; return bridge.skyIntensity }
+        set { bridge.skyIntensity = newValue }
+    }
+    var horizonSoftnessDeg: Float {
+        get { _ = tick; return bridge.horizonSoftnessDeg }
+        set { bridge.horizonSoftnessDeg = newValue }
+    }
+    var sunElevationDeg: Float {
+        get { _ = tick; return bridge.sunElevationDeg }
+        set { bridge.sunElevationDeg = newValue }
+    }
+    var sunAzimuthDeg: Float {
+        get { _ = tick; return bridge.sunAzimuthDeg }
+        set { bridge.sunAzimuthDeg = newValue }
+    }
+    var sunAngularDiameterDeg: Float {
+        get { _ = tick; return bridge.sunAngularDiameterDeg }
+        set { bridge.sunAngularDiameterDeg = newValue }
+    }
+    var sunIntensity: Float {
+        get { _ = tick; return bridge.sunIntensity }
+        set { bridge.sunIntensity = newValue }
+    }
+    var sunColor: (r: Float, g: Float, b: Float) {
+        get { _ = tick; return (bridge.sunColorR, bridge.sunColorG, bridge.sunColorB) }
+        set {
+            bridge.sunColorR = newValue.r
+            bridge.sunColorG = newValue.g
+            bridge.sunColorB = newValue.b
+        }
+    }
+
+    // ---- Tool settings (panel-facing) ----
+
+    var toolKind: BridgeToolKind {
+        get { _ = tick; return bridge.toolKind }
+        set { bridge.toolKind = newValue }
+    }
+    var toolMode: BridgeToolMode {
+        get { _ = tick; return bridge.toolMode }
+        set { bridge.toolMode = newValue }
+    }
+    var brushSize: Int {
+        get { _ = tick; return bridge.brushSize }
+        set { bridge.brushSize = newValue }
+    }
+    var brushShape: BridgeBrushShape {
+        get { _ = tick; return bridge.brushShape }
+        set { bridge.brushShape = newValue }
+    }
+    var brush3D: Bool {
+        get { _ = tick; return bridge.brush3D }
+        set { bridge.brush3D = newValue }
+    }
+    var lineMode: BridgeLineMode {
+        get { _ = tick; return bridge.lineMode }
+        set { bridge.lineMode = newValue }
+    }
+    var circleFill: Bool {
+        get { _ = tick; return bridge.circleFill }
+        set { bridge.circleFill = newValue }
+    }
+    var circleEven: Bool {
+        get { _ = tick; return bridge.circleEven }
+        set { bridge.circleEven = newValue }
+    }
+    var squareFill: Bool {
+        get { _ = tick; return bridge.squareFill }
+        set { bridge.squareFill = newValue }
+    }
+    var squareEven: Bool {
+        get { _ = tick; return bridge.squareEven }
+        set { bridge.squareEven = newValue }
+    }
+    var boxFill: Bool {
+        get { _ = tick; return bridge.boxFill }
+        set { bridge.boxFill = newValue }
+    }
+    var faceExtrude: BridgeFaceExtrudeKind {
+        get { _ = tick; return bridge.faceExtrude }
+        set { bridge.faceExtrude = newValue }
+    }
+    var faceWith: BridgeFaceWithColor {
+        get { _ = tick; return bridge.faceWith }
+        set { bridge.faceWith = newValue }
+    }
+    var faceEightConnected: Bool {
+        get { _ = tick; return bridge.faceEightConnected }
+        set { bridge.faceEightConnected = newValue }
+    }
+
+    // ---- Render panel ----
+
+    var glassMode: BridgeGlassMode {
+        get { _ = tick; return bridge.glassMode }
+        set { bridge.glassMode = newValue }
+    }
+    var resolutionMatchWindow: Bool {
+        get { _ = tick; return bridge.resolutionMatchWindow }
+        set { bridge.resolutionMatchWindow = newValue }
+    }
+    var renderWidth: Int {
+        get { _ = tick; return bridge.renderWidth }
+        set { bridge.renderWidth = newValue }
+    }
+    var renderHeight: Int {
+        get { _ = tick; return bridge.renderHeight }
+        set { bridge.renderHeight = newValue }
+    }
+    var sampleCount: Int {
+        _ = tick
+        return bridge.sampleCount
+    }
+
+    // ---- Palette ----
+
+    var paletteSize: Int { bridge.paletteSize }
+
+    var activePaletteSlot: Int {
+        get { _ = tick; return bridge.activePaletteSlot }
+        set { bridge.activePaletteSlot = newValue }
+    }
+
+    func paletteColor(at index: Int) -> UInt32 {
+        _ = tick
+        return bridge.paletteColor(at: index)
+    }
+
+    func isPaletteSlotSelected(_ index: Int) -> Bool {
+        _ = tick
+        return bridge.isPaletteSlotSelected(index)
+    }
+
+    func selectPaletteSlot(_ index: Int, extend: Bool) {
+        bridge.selectPaletteSlot(index, extend: extend)
+        documentVersion &+= 1
+    }
+
+    func beginPaletteEdit()  { bridge.beginPaletteEdit() }
+    func applyPaletteColor(r: UInt8, g: UInt8, b: UInt8, a: UInt8) {
+        bridge.applyPaletteColor(r: r, g: g, b: b, a: a)
+    }
+    func commitPaletteEdit() { bridge.commitPaletteEdit() }
+
+    func saveRenderDialog() {
+        let panel = NSSavePanel()
+        panel.title = "Save render"
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = "render.png"
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try scene?.exportRender(to: url)
+            } catch {
+                presentError(title: "Couldn't save render", error: error)
+            }
+        }
+    }
 
     // ---- Plumbing ----
 

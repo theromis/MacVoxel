@@ -166,6 +166,19 @@ constexpr unsigned short kKeyCodeEscape = 53;
     [_pathTraceRenderer invalidate];
 }
 
+- (BOOL)exportRenderToURL:(NSURL *)url error:(NSError **)error {
+    if (url == nil) {
+        if (error) *error = [NSError errorWithDomain:@"MacVoxel" code:10
+            userInfo:@{NSLocalizedDescriptionKey: @"No URL provided."}];
+        return NO;
+    }
+    const BOOL aces = _ctx->render_settings.aces_tonemap ? YES : NO;
+    return [_pathTraceRenderer exportPNGToURL:url
+                                  acesTonemap:aces
+                                 commandQueue:_commandQueue
+                                        error:error];
+}
+
 // ---------------------------------------------------------------------------
 // First responder. Unlike VoxelView (which deferred to ImGui's hidden
 // KeyEventResponder), MetalScene needs to take key events directly so

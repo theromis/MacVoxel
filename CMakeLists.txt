@@ -109,6 +109,13 @@ set(APP_SWIFT_SOURCES
     src/swift/ContentView.swift
     src/swift/MetalSceneView.swift
     src/swift/EditorState.swift
+    src/swift/panels/GeneratorPanel.swift
+    src/swift/panels/LightPanel.swift
+    src/swift/panels/ModelPanel.swift
+    src/swift/panels/PalettePanel.swift
+    src/swift/panels/RenderPanel.swift
+    src/swift/panels/SelectionPanel.swift
+    src/swift/panels/ToolPanel.swift
 )
 
 set(APP_RESOURCES

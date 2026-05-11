@@ -32,4 +32,9 @@
 // the GPU as zombies.
 - (void)invalidateRenderers;
 
+// Export the path tracer's currently-accumulated buffer to a PNG.
+// Returns NO with `error` set on failure or if the path tracer hasn't
+// produced any samples yet.
+- (BOOL)exportRenderToURL:(NSURL *)url error:(NSError **)error;
+
 @end
