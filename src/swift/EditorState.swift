@@ -205,21 +205,19 @@ final class EditorState {
     }
 
     // ---- Generator (panel-facing) ----
-    // Live state — no version bump needed; the controller's per-frame
-    // Tick detects changes and re-runs the engine.
 
     var generatorKind: BridgeGeneratorKind {
-        get { bridge.generatorKind }
+        get { _ = tick; return bridge.generatorKind }
         set { bridge.generatorKind = newValue; tick &+= 1 }
     }
 
     var generatorAxis: BridgeAxis {
-        get { bridge.generatorAxis }
+        get { _ = tick; return bridge.generatorAxis }
         set { bridge.generatorAxis = newValue; tick &+= 1 }
     }
 
     var generatorApexAtMax: Bool {
-        get { bridge.generatorApexAtMax }
+        get { _ = tick; return bridge.generatorApexAtMax }
         set { bridge.generatorApexAtMax = newValue; tick &+= 1 }
     }
 
