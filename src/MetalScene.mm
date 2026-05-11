@@ -188,7 +188,6 @@ constexpr unsigned short kKeyCodeEscape = 53;
 // ---------------------------------------------------------------------------
 
 - (BOOL)acceptsFirstResponder { return YES; }
-- (BOOL)acceptsFirstMouse:(NSEvent *)__unused event { return YES; }
 
 - (BOOL)canBecomeKeyView { return YES; }
 
