@@ -430,11 +430,64 @@ final class EditorState {
         documentVersion &+= 1
     }
 
+    func selectPaletteRange(fromCol c0: Int, row r0: Int,
+                            toCol c1: Int, row r1: Int,
+                            shift: Bool) {
+        bridge.selectPaletteRange(fromCol: c0, row: r0,
+                                  toCol: c1, row: r1, shift: shift)
+        tick &+= 1
+    }
+
     func beginPaletteEdit()  { bridge.beginPaletteEdit() }
     func applyPaletteColor(r: UInt8, g: UInt8, b: UInt8, a: UInt8) {
         bridge.applyPaletteColor(r: r, g: g, b: b, a: a)
     }
     func commitPaletteEdit() { bridge.commitPaletteEdit() }
+
+    // ---- Palette context menu ----
+
+    var hasColorClipboard: Bool {
+        _ = tick; return bridge.hasColorClipboard
+    }
+
+    var hasVoxelSelection: Bool {
+        _ = tick; return bridge.hasVoxelSelection
+    }
+
+    func effectiveSelectedSlotCount(anchor: Int) -> Int {
+        _ = tick
+        return bridge.effectiveSelectedSlotCount(anchor: anchor)
+    }
+
+    func copyPaletteColor(from slot: Int) {
+        bridge.copyPaletteColor(from: slot)
+        tick &+= 1
+    }
+
+    func pastePaletteColor(anchor: Int) {
+        bridge.pastePaletteColor(anchor: anchor)
+        afterMutation(reframeCamera: false)
+    }
+
+    func makePaletteGradient(anchor: Int) {
+        bridge.makePaletteGradient(anchor: anchor)
+        afterMutation(reframeCamera: false)
+    }
+
+    func selectVoxelsByColor(anchor: Int) {
+        bridge.selectVoxelsByColor(anchor: anchor)
+        afterMutation(reframeCamera: false)
+    }
+
+    func paintSelectedVoxelsWithColor(anchor: Int) {
+        bridge.paintSelectedVoxelsWithColor(anchor: anchor)
+        afterMutation(reframeCamera: false)
+    }
+
+    func paintSelectedVoxelsWithRandomColors(anchor: Int) {
+        bridge.paintSelectedVoxelsWithRandomColors(anchor: anchor)
+        afterMutation(reframeCamera: false)
+    }
 
     // ---- Material editor ----
 

@@ -4,10 +4,13 @@
 #import <AppKit/AppKit.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <memory>
+#include <random>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "Clipboard.h"
 #include "Document.h"
@@ -704,6 +707,238 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     if (!edit.drag) return;
     _ctx->history.CommitOp();
     edit.drag = false;
+}
+
+// Grid layout helpers — row 0 is the top row (slots 249..256), row 31
+// the bottom (slots 1..8). The top-right cell (col 7, row 0) is the
+// empty-slot sentinel (index 0); SlotIndexAt clamps any other
+// out-of-range mapping to 0 so wandering drag positions never produce
+// a stray paintable slot.
+static constexpr int kPaletteCols = 8;
+static constexpr int kPaletteRows = 32;
+
+static uint8_t SlotIndexAt(int col, int row) {
+    const int n = (kPaletteRows - 1 - row) * kPaletteCols + col + 1;
+    return n >= 256 ? uint8_t{0} : static_cast<uint8_t>(n);
+}
+
+// Anchor fixup shared by every right-click action: if the user
+// right-clicked a slot that isn't part of the current selection,
+// collapse the selection to just that slot. Mirrors the old ImGui
+// "right-click replaces selection on miss" behavior — the
+// SwiftUI .contextMenu has no onOpen hook, so each action runs the
+// fixup itself before consulting selected_slots.
+- (void)ensurePaletteAnchorInSelection:(NSInteger)anchor {
+    if (anchor <= 0 || anchor >= 256) return;
+    macvoxel::ToolSettings &t = _ctx->tool;
+    const size_t a = static_cast<size_t>(anchor);
+    if (!t.selected_slots.test(a)) {
+        t.selected_slots.reset();
+        t.selected_slots.set(a);
+        t.palette_idx = static_cast<uint8_t>(anchor);
+    }
+}
+
+- (void)selectPaletteRangeFromCol:(NSInteger)c0 row:(NSInteger)r0
+                            toCol:(NSInteger)c1 row:(NSInteger)r1
+                            shift:(BOOL)shift {
+    const int min_c = static_cast<int>(std::min(c0, c1));
+    const int max_c = static_cast<int>(std::max(c0, c1));
+    const int min_r = static_cast<int>(std::min(r0, r1));
+    const int max_r = static_cast<int>(std::max(r0, r1));
+    macvoxel::ToolSettings &t = _ctx->tool;
+    if (!shift) t.selected_slots.reset();
+    for (int r = min_r; r <= max_r; ++r) {
+        for (int c = min_c; c <= max_c; ++c) {
+            const uint8_t i = SlotIndexAt(c, r);
+            if (i == 0) continue;  // empty-corner sentinel
+            if (shift) {
+                t.selected_slots.flip(i);
+            } else {
+                t.selected_slots.set(i);
+            }
+        }
+    }
+    // Active slot follows the drag's end cell, ignoring the empty
+    // corner so palette_idx never becomes 0.
+    const uint8_t end = SlotIndexAt(static_cast<int>(c1),
+                                    static_cast<int>(r1));
+    if (end != 0) {
+        t.palette_idx = end;
+        t.selected_slots.set(end);
+    }
+}
+
+- (BOOL)hasColorClipboard {
+    return _ctx->panel.color_clipboard.has_value ? YES : NO;
+}
+
+- (BOOL)hasVoxelSelection {
+    const macvoxel::Selection &sel = _ctx->selection;
+    return (sel.active() && !sel.empty()) ? YES : NO;
+}
+
+- (NSInteger)effectiveSelectedSlotCountForAnchor:(NSInteger)anchor {
+    if (anchor <= 0 || anchor >= 256) return 0;
+    const macvoxel::ToolSettings &t = _ctx->tool;
+    if (t.selected_slots.test(static_cast<size_t>(anchor))) {
+        return static_cast<NSInteger>(t.selected_slots.count());
+    }
+    // Anchor will replace the selection at action time → effective
+    // count is 1.
+    return 1;
+}
+
+- (void)copyPaletteColorFrom:(NSInteger)slot {
+    if (slot < 0 || slot >= 256) return;
+    _ctx->panel.color_clipboard.color =
+        _ctx->document.palette.Get(static_cast<uint8_t>(slot));
+    _ctx->panel.color_clipboard.has_value = true;
+}
+
+- (void)pastePaletteColorAnchor:(NSInteger)anchor {
+    if (!_ctx->panel.color_clipboard.has_value) return;
+    [self ensurePaletteAnchorInSelection:anchor];
+    const macvoxel::Color c = _ctx->panel.color_clipboard.color;
+    macvoxel::EditHistory &hist = _ctx->history;
+    hist.BeginOp();
+    bool any = false;
+    for (int i = 1; i < 256; ++i) {
+        if (!_ctx->tool.selected_slots.test(i)) continue;
+        const uint8_t slot = static_cast<uint8_t>(i);
+        const macvoxel::Color old_c = _ctx->document.palette.Get(slot);
+        if (!(old_c == c)) {
+            _ctx->document.palette.Set(slot, c);
+            hist.RecordPalette(slot, old_c, c);
+            any = true;
+        }
+    }
+    hist.CommitOp();
+    if (any) _ctx->document.BumpPalette();
+}
+
+- (void)makePaletteGradientAnchor:(NSInteger)anchor {
+    [self ensurePaletteAnchorInSelection:anchor];
+    const std::bitset<256> &sel = _ctx->tool.selected_slots;
+    // Lowest- and highest-index selected slots define the endpoints;
+    // every selected slot in between gets the lerped color at its
+    // index-parametric position. Unselected indices in the gap are
+    // left alone — the selection is the gradient stops.
+    int lo = -1, hi = -1;
+    for (int i = 1; i < 256; ++i) {
+        if (sel.test(i)) {
+            if (lo < 0) lo = i;
+            hi = i;
+        }
+    }
+    if (lo < 0 || hi - lo < 2) return;  // need ≥1 interior slot
+    const macvoxel::Color c0 =
+        _ctx->document.palette.Get(static_cast<uint8_t>(lo));
+    const macvoxel::Color c1 =
+        _ctx->document.palette.Get(static_cast<uint8_t>(hi));
+    const float span = static_cast<float>(hi - lo);
+    macvoxel::EditHistory &hist = _ctx->history;
+    hist.BeginOp();
+    bool any = false;
+    for (int i = lo + 1; i < hi; ++i) {
+        if (!sel.test(i)) continue;
+        const float t = (i - lo) / span;
+        macvoxel::Color nc;
+        nc.r = static_cast<uint8_t>(c0.r + (c1.r - c0.r) * t + 0.5f);
+        nc.g = static_cast<uint8_t>(c0.g + (c1.g - c0.g) * t + 0.5f);
+        nc.b = static_cast<uint8_t>(c0.b + (c1.b - c0.b) * t + 0.5f);
+        nc.a = static_cast<uint8_t>(c0.a + (c1.a - c0.a) * t + 0.5f);
+        const uint8_t slot = static_cast<uint8_t>(i);
+        const macvoxel::Color old_c = _ctx->document.palette.Get(slot);
+        if (!(old_c == nc)) {
+            _ctx->document.palette.Set(slot, nc);
+            hist.RecordPalette(slot, old_c, nc);
+            any = true;
+        }
+    }
+    hist.CommitOp();
+    if (any) _ctx->document.BumpPalette();
+}
+
+- (void)selectVoxelsByColorAnchor:(NSInteger)anchor {
+    [self ensurePaletteAnchorInSelection:anchor];
+    const std::bitset<256> &sel = _ctx->tool.selected_slots;
+    const macvoxel::VoxelGrid &grid = _ctx->document.grid;
+    std::vector<std::array<int32_t, 3>> matched;
+    constexpr uint32_t kCS = macvoxel::VoxelGrid::kChunkSize;
+    for (const auto &kv : grid.chunks()) {
+        const macvoxel::VoxelGrid::Chunk *ch = kv.second.get();
+        if (ch->filled_count == 0) continue;
+        const int32_t base_x = kv.first.x << macvoxel::VoxelGrid::kChunkBits;
+        const int32_t base_y = kv.first.y << macvoxel::VoxelGrid::kChunkBits;
+        const int32_t base_z = kv.first.z << macvoxel::VoxelGrid::kChunkBits;
+        for (uint32_t lz = 0; lz < kCS; ++lz) {
+            for (uint32_t ly = 0; ly < kCS; ++ly) {
+                for (uint32_t lx = 0; lx < kCS; ++lx) {
+                    const uint8_t v = ch->cells[
+                        lx + ly * kCS + lz * kCS * kCS];
+                    if (v == 0 || !sel.test(v)) continue;
+                    matched.push_back({
+                        base_x + static_cast<int32_t>(lx),
+                        base_y + static_cast<int32_t>(ly),
+                        base_z + static_cast<int32_t>(lz)});
+                }
+            }
+        }
+    }
+    _ctx->selection.SetVoxels(std::move(matched));
+}
+
+// Shared painter for the two voxel-paint context-menu items. `choose`
+// returns the palette index to write per voxel; called once per
+// non-empty voxel in the selection.
+template <class Choose>
+static void PaintSelectedVoxels(macvoxel::EditorContext &ctx, Choose choose) {
+    macvoxel::Selection &sel = ctx.selection;
+    if (!sel.active() || sel.empty()) return;
+    macvoxel::Document &doc = ctx.document;
+    macvoxel::EditHistory &hist = ctx.history;
+    hist.BeginOp();
+    bool any = false;
+    for (const auto &v : sel.voxels()) {
+        const uint8_t old = doc.grid.Get(v[0], v[1], v[2]);
+        if (old == 0) continue;  // empty cells aren't "voxels"
+        const uint8_t nv = choose();
+        if (nv == 0 || nv == old) continue;
+        doc.grid.Set(v[0], v[1], v[2], nv);
+        hist.Record(v[0], v[1], v[2], old, nv);
+        any = true;
+    }
+    hist.CommitOp();
+    if (any) doc.BumpGeometry();
+}
+
+- (void)paintSelectedVoxelsWithColorAnchor:(NSInteger)anchor {
+    [self ensurePaletteAnchorInSelection:anchor];
+    // Single-slot path: collect the one selected slot. Bail if the
+    // selection somehow holds 0 or >1 entries — the menu predicate
+    // shouldn't have enabled the item in that case.
+    const std::bitset<256> &sel = _ctx->tool.selected_slots;
+    if (sel.count() != 1) return;
+    uint8_t pick = 0;
+    for (int i = 1; i < 256; ++i) {
+        if (sel.test(i)) { pick = static_cast<uint8_t>(i); break; }
+    }
+    PaintSelectedVoxels(*_ctx, [pick] { return pick; });
+}
+
+- (void)paintSelectedVoxelsWithRandomColorsAnchor:(NSInteger)anchor {
+    [self ensurePaletteAnchorInSelection:anchor];
+    const std::bitset<256> &sel = _ctx->tool.selected_slots;
+    if (sel.count() < 2) return;
+    std::vector<uint8_t> palette_idx;
+    palette_idx.reserve(sel.count());
+    for (int i = 1; i < 256; ++i) {
+        if (sel.test(i)) palette_idx.push_back(static_cast<uint8_t>(i));
+    }
+    std::mt19937 rng{std::random_device{}()};
+    std::uniform_int_distribution<size_t> dist(0, palette_idx.size() - 1);
+    PaintSelectedVoxels(*_ctx, [&] { return palette_idx[dist(rng)]; });
 }
 
 // ---------------------------------------------------------------------------

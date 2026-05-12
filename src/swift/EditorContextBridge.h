@@ -256,6 +256,46 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 - (void)selectPaletteSlot:(NSInteger)index extend:(BOOL)extend
     NS_SWIFT_NAME(selectPaletteSlot(_:extend:));
 
+// Drag-rectangle selection: rect spans grid cols (c0..c1, inclusive)
+// and rows (r0..r1, inclusive). Layout matches the visual grid —
+// row 0 is the top row (slot ~248..256), row 31 is the bottom row
+// (slots 1..8). Mirrors the old ImGui drag-select: shift=NO replaces
+// the selection with the rect; shift=YES toggles each cell in the
+// rect. The active slot (palette_idx) follows the rect's end corner.
+- (void)selectPaletteRangeFromCol:(NSInteger)c0 row:(NSInteger)r0
+                            toCol:(NSInteger)c1 row:(NSInteger)r1
+                            shift:(BOOL)shift
+    NS_SWIFT_NAME(selectPaletteRange(fromCol:row:toCol:row:shift:));
+
+// Context-menu predicates. `effectiveSelectedSlotCount(anchor:)`
+// returns the count of slots a menu action would operate on, given
+// the right-clicked anchor: if anchor is in the current selection,
+// the count is the selection size; otherwise the action will run on
+// {anchor} alone (count == 1). Mirrors the old "right-click on
+// unselected slot replaces selection" UX, but defers the actual
+// mutation until the user picks a menu item.
+@property (nonatomic, readonly) BOOL hasColorClipboard;
+@property (nonatomic, readonly) BOOL hasVoxelSelection;
+- (NSInteger)effectiveSelectedSlotCountForAnchor:(NSInteger)anchor
+    NS_SWIFT_NAME(effectiveSelectedSlotCount(anchor:));
+
+// Context-menu actions. Each takes the right-click anchor slot.
+// Before acting, replaces selection with {anchor} if anchor isn't
+// already in the selection. Each action's undo step is a single
+// EditHistory op.
+- (void)copyPaletteColorFrom:(NSInteger)slot
+    NS_SWIFT_NAME(copyPaletteColor(from:));
+- (void)pastePaletteColorAnchor:(NSInteger)anchor
+    NS_SWIFT_NAME(pastePaletteColor(anchor:));
+- (void)makePaletteGradientAnchor:(NSInteger)anchor
+    NS_SWIFT_NAME(makePaletteGradient(anchor:));
+- (void)selectVoxelsByColorAnchor:(NSInteger)anchor
+    NS_SWIFT_NAME(selectVoxelsByColor(anchor:));
+- (void)paintSelectedVoxelsWithColorAnchor:(NSInteger)anchor
+    NS_SWIFT_NAME(paintSelectedVoxelsWithColor(anchor:));
+- (void)paintSelectedVoxelsWithRandomColorsAnchor:(NSInteger)anchor
+    NS_SWIFT_NAME(paintSelectedVoxelsWithRandomColors(anchor:));
+
 // Direct color-edit op recording. Begin/Apply/Commit pattern coalesces
 // a ColorPicker drag into one Cmd-Z step.
 - (void)beginPaletteEdit;
