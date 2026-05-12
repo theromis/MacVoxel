@@ -19,9 +19,6 @@ the pre-port reference; don't restart work there unless you mean to.
 
 Deferred polish, not yet implemented:
 
-- Palette drag-rectangle multi-select. Single-click + shift-toggle work.
-- Palette context menu (Copy/Paste color, Make gradient, Select voxels
-  by color, Paint voxels).
 - Brush-size quick-keys (`[` / `]`). Tool / mode letter keys
   (V / L / B / F / M / T / R / G) are wired in `MetalScene` keyDown.
 - Drag-drop a `.vox` onto the running window (cold-launch via Finder
@@ -69,9 +66,11 @@ src/
 ├── PanelState.h           Drag-coalescing state still used by the
 │                          SwiftUI panels — `palette_color_edit`
 │                          (ColorPicker coalesce), `material_edit`
-│                          (per-slot Material pre snapshot). The old
-│                          ImGui-only fields (palette_drag, color
-│                          clipboard, save_render_clicked) are dormant.
+│                          (per-slot Material pre snapshot),
+│                          `color_clipboard` (palette Copy/Paste color).
+│                          The old ImGui-only fields (`palette_drag`,
+│                          `palette_context_slot`, `save_render_clicked`,
+│                          `show_imgui_demo`) are dormant.
 ├── RenderState.h          `RenderSettings` + `RenderProgress`.
 ├── EditHistory.{h,cpp}    Stroke-grained undo/redo, single-op
 │                          transactions, per-cell / per-palette-slot
@@ -487,13 +486,12 @@ Invariants:
 - `ToolState.h` defines `ToolSettings` (not `ToolState`); `RenderState.h`
   defines `RenderSettings` + `RenderProgress`. The file names date from
   before a rename pass kept git history attached to the original files.
-- `PanelState.h` still defines several drag-coalescing structs even
-  though the SwiftUI panels only use two of them (`palette_color_edit`
-  and `material_edit`). The unused fields (`palette_drag`,
-  `palette_context_slot`, `color_clipboard`, `save_render_clicked`,
-  `show_imgui_demo`) are dormant — left in place because the SwiftUI
-  palette polish (drag-rect multi-select, context menu) will probably
-  reuse some of them.
+- `PanelState.h` still defines a couple of drag-coalescing structs the
+  SwiftUI panels never touch (`palette_drag`, `palette_context_slot`,
+  `save_render_clicked`, `show_imgui_demo`) — relics from the ImGui
+  panels, dormant but cheap to keep. Drag-rect state lives in the
+  PalettePanel's SwiftUI `@State` and the right-click anchor is passed
+  per-action, so the C++ side doesn't need to hold either.
 - `main.mm` is intentionally tiny — argv check + Swift entry call. The
   Swift `App` runs `App.main()` from `MainEntry.swift`'s
   `@_cdecl("MacVoxelRunApp")` rather than via `@main`. Keeps `main.mm`'s

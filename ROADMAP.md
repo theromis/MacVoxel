@@ -83,9 +83,19 @@ Effort labels are rough: **S** ≈ a few hours, **M** ≈ a day, **L** ≈ multi
   from ImGui. All seven panels rewritten in SwiftUI. `third_party/imgui`
   submodule + `src/ui/*` + `AppDelegate.{h,mm}` + `VoxelView.{h,mm}`
   deleted. Binary shrank 4.6 MB → 2.6 MB. Deferred to follow-up:
-  palette drag-rect multi-select + context menu, Material editor's
-  drag-select coverage, tool quick-keys, drag-drop onto window,
-  theme parity vs the old `ui/Theme.cpp`.
+  Material editor's drag-select coverage, tool quick-keys, drag-drop
+  onto window, theme parity vs the old `ui/Theme.cpp`.
+- **Palette drag-rect multi-select + context menu (2026-05).** Ported
+  the deferred Phase 11 / 11.5 palette UX onto the SwiftUI panel: a
+  parent `DragGesture(min:0)` that maps cursor → (col,row) via the
+  grid's 16-pt pitch and commits the rect through a new
+  `selectPaletteRange` bridge method; per-swatch `.contextMenu` for the
+  six items (Copy / Paste color, Select voxels by color, Paint solid /
+  Paint random, Make gradient). Since SwiftUI's `.contextMenu` has no
+  menu-open hook, each action takes the right-clicked anchor and the
+  bridge runs the "anchor replaces selection if not already in it"
+  fixup at action-click time; menu enable predicates use
+  `effectiveSelectedSlotCount(anchor:)` to model that post-fixup view.
 
 ## Phase 12.5+ — RNG-driven generator kinds + user shader path
 
@@ -203,11 +213,8 @@ phase boundary, not a side change.
   fix it. **Any** operation that can be handled on the GPU should be.
 
 - **Post-port polish backlog.** Carried over from the SwiftUI port:
-  palette drag-rectangle multi-select; palette context menu
-  (Copy/Paste color, Make gradient, Select voxels by color, Paint
-  voxels); tool quick-keys (1–0 + `[` / `]`); drag-drop `.vox` onto
-  the running window; theme parity vs the old `ui/Theme.cpp`'s
-  pro-app dark.
+  tool quick-keys (1–0 + `[` / `]`); drag-drop `.vox` onto the running
+  window; theme parity vs the old `ui/Theme.cpp`'s pro-app dark.
 
 - **Wall-anchored Line preview invisible from far cameras.** With
   Phase 13.5's multi-plane empty-endpoint fallback, dragging a Line
@@ -235,8 +242,8 @@ Immediate focus is **bug-squishing the SwiftUI port** — Paul flagged
 this as the priority after taking the port for a spin. Once those are
 cleared, the natural next forks are:
 
-- **Post-port polish** under Known Issues above (palette drag-rect +
-  context menu, tool quick-keys, Open Recent fix).
+- **Post-port polish** under Known Issues above (tool quick-keys,
+  Open Recent fix).
 - **Phase 13.5 (edit-volume foundation)** — faint floor grid + bounded
   volume; lifts the editor out of "infinite empty space" and makes
   empty-space clicks predictable.
