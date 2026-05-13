@@ -51,6 +51,59 @@ struct RenderSettings {
     // the 3 visible faces — the pre-P14.5.A baseline, kept as a toggle
     // so the user can A/B compare on emitter-heavy scenes.
     bool power_weighted_nee = true;
+    // Explicit NEE shadow rays toward emissive voxels. On = standard
+    // direct-lighting NEE for area lights (the path tracer's default).
+    // Off = no shadow rays toward emissives; they're discovered only
+    // when the BSDF random walk happens to terminate on an emissive
+    // surface — MagicaVoxel's "Stochastic Sampling Global Illumination
+    // = OFF" mode. Higher variance with concentrated emitters but
+    // produces a structured, splotchy noise character distinct from the
+    // smooth NEE-on case. Sun NEE is independent of this flag.
+    bool area_light_nee = true;
+    // Magica-style "stochastic OFF" splash bundle, orthogonal to
+    // area-light NEE: when on, BRDF direction sampling uses a tile-
+    // correlated jitter stream (instead of per-pixel PCG), NEE
+    // light-selection / face-sampling randoms ALSO use that stream
+    // (so adjacent pixels in a tile evaluate the same emissive face,
+    // not different ones), and an indirect proportional clamp fires
+    // on emit hits at bounce >= 1 to keep indirect-path variance from
+    // producing fireflies. The hybrid (NEE on + splash_mode on)
+    // reproduces Magica's smooth direct halo + splashy indirect.
+    bool splash_mode = true;
+    // Tuning knob for the proportional clamp on indirect contributions
+    // (both NEE shadow rays and BSDF-walk emit arrivals) when
+    // splash_mode is on. Magica's range is roughly 4..16; 8 is a
+    // sensible starting point. <= 0 disables.
+    float indirect_clamp_L = 8.0f;
+    // Magnitude of the per-frame tile-correlated jitter applied to
+    // shared BRDF direction samples when area-light NEE is off. 0 =
+    // every pixel samples exactly the same BRDF direction per
+    // accumulation sample (cleanest, splashes migrate across samples
+    // only); larger values widen the within-frame "cluster silhouette
+    // projection" effect at the cost of more visible per-pixel
+    // variation. ~0.05 is a moderate target if the user wants visible
+    // cluster shape projection in a single frame.
+    float splash_jitter = 0.0f;
+    // Screen-space correlation scale for tile-jittered noise lookup.
+    // Effective period (one full noise sweep) is
+    // `splash_tile_px * 64` pixels with bilinear filtering — i.e.
+    // `splash_tile_px` controls how slowly the correlated jitter
+    // varies across the screen.
+    int splash_tile_px = 16;
+    // Stochastic threshold-gated bloom — drives Magica's smooth-halo
+    // aesthetic on top of the path-traced splash output. For each
+    // display pixel, a separate bloom pass samples the accumulator at
+    // many log-uniform-radius random offsets and accumulates only
+    // contributions above `bloom_threshold`. Composite is done in the
+    // display pass per Magica's formula in pt_post.glsl: bright bloom
+    // regions replace the noisy splash while dim regions fall through.
+    bool bloom_enabled = true;
+    float bloom_intensity = 0.6f;       // 0..1 — composite mix factor
+    float bloom_threshold = 1.0f;       // linear brightness gate
+    float bloom_clamp = 0.0f;           // per-tap proportional clamp; 0 = off
+    float bloom_radius_log0 = -1.0f;    // log of min sample radius (pixels)
+    float bloom_radius_log1 = 5.0f;     // log of max sample radius (pixels)
+    int bloom_num_samples = 24;         // taps per output pixel per frame
     // Resampled importance sampling (RIS) candidate count for direct
     // lighting NEE. Per pixel per frame, draw this many candidates from
     // the source distribution (power-weighted CDF or uniform), reservoir-

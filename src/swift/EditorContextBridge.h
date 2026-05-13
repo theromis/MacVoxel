@@ -192,6 +192,18 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, assign) BOOL pathTraced;
 @property (nonatomic, assign) BOOL acesTonemap;
 @property (nonatomic, assign) BOOL powerWeightedNEE;
+@property (nonatomic, assign) BOOL areaLightNEE;
+@property (nonatomic, assign) BOOL splashMode;
+@property (nonatomic, assign) float indirectClampL;
+@property (nonatomic, assign) float splashJitter;
+@property (nonatomic, assign) NSInteger splashTilePx;
+
+@property (nonatomic, assign) BOOL bloomEnabled;
+@property (nonatomic, assign) float bloomIntensity;
+@property (nonatomic, assign) float bloomThreshold;
+@property (nonatomic, assign) float bloomRadiusLog0;
+@property (nonatomic, assign) float bloomRadiusLog1;
+@property (nonatomic, assign) NSInteger bloomNumSamples;
 @property (nonatomic, assign) NSInteger neeRisCount;    // 1..32
 
 @property (nonatomic, assign) BOOL atmosphericSky;

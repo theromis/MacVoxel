@@ -478,6 +478,39 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 - (BOOL)powerWeightedNEE { return RS.power_weighted_nee; }
 - (void)setPowerWeightedNEE:(BOOL)v { RS.power_weighted_nee = (v == YES); }
 
+- (BOOL)areaLightNEE { return RS.area_light_nee; }
+- (void)setAreaLightNEE:(BOOL)v { RS.area_light_nee = (v == YES); }
+
+- (BOOL)splashMode { return RS.splash_mode; }
+- (void)setSplashMode:(BOOL)v { RS.splash_mode = (v == YES); }
+
+- (float)indirectClampL { return RS.indirect_clamp_L; }
+- (void)setIndirectClampL:(float)v { RS.indirect_clamp_L = v; }
+
+- (float)splashJitter { return RS.splash_jitter; }
+- (void)setSplashJitter:(float)v { RS.splash_jitter = v; }
+
+- (NSInteger)splashTilePx { return RS.splash_tile_px; }
+- (void)setSplashTilePx:(NSInteger)v { RS.splash_tile_px = static_cast<int>(v); }
+
+- (BOOL)bloomEnabled { return RS.bloom_enabled; }
+- (void)setBloomEnabled:(BOOL)v { RS.bloom_enabled = (v == YES); }
+
+- (float)bloomIntensity { return RS.bloom_intensity; }
+- (void)setBloomIntensity:(float)v { RS.bloom_intensity = v; }
+
+- (float)bloomThreshold { return RS.bloom_threshold; }
+- (void)setBloomThreshold:(float)v { RS.bloom_threshold = v; }
+
+- (float)bloomRadiusLog0 { return RS.bloom_radius_log0; }
+- (void)setBloomRadiusLog0:(float)v { RS.bloom_radius_log0 = v; }
+
+- (float)bloomRadiusLog1 { return RS.bloom_radius_log1; }
+- (void)setBloomRadiusLog1:(float)v { RS.bloom_radius_log1 = v; }
+
+- (NSInteger)bloomNumSamples { return RS.bloom_num_samples; }
+- (void)setBloomNumSamples:(NSInteger)v { RS.bloom_num_samples = static_cast<int>(v); }
+
 - (NSInteger)neeRisCount { return RS.nee_ris_count; }
 - (void)setNeeRisCount:(NSInteger)v { RS.nee_ris_count = static_cast<int>(v); }
 

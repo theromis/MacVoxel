@@ -282,6 +282,50 @@ final class EditorState {
         get { _ = tick; return bridge.powerWeightedNEE }
         set { bridge.powerWeightedNEE = newValue; tick &+= 1 }
     }
+    var areaLightNEE: Bool {
+        get { _ = tick; return bridge.areaLightNEE }
+        set { bridge.areaLightNEE = newValue; tick &+= 1 }
+    }
+    var splashMode: Bool {
+        get { _ = tick; return bridge.splashMode }
+        set { bridge.splashMode = newValue; tick &+= 1 }
+    }
+    var indirectClampL: Float {
+        get { _ = tick; return bridge.indirectClampL }
+        set { bridge.indirectClampL = newValue; tick &+= 1 }
+    }
+    var splashJitter: Float {
+        get { _ = tick; return bridge.splashJitter }
+        set { bridge.splashJitter = newValue; tick &+= 1 }
+    }
+    var splashTilePx: Int {
+        get { _ = tick; return bridge.splashTilePx }
+        set { bridge.splashTilePx = newValue; tick &+= 1 }
+    }
+    var bloomEnabled: Bool {
+        get { _ = tick; return bridge.bloomEnabled }
+        set { bridge.bloomEnabled = newValue; tick &+= 1 }
+    }
+    var bloomIntensity: Float {
+        get { _ = tick; return bridge.bloomIntensity }
+        set { bridge.bloomIntensity = newValue; tick &+= 1 }
+    }
+    var bloomThreshold: Float {
+        get { _ = tick; return bridge.bloomThreshold }
+        set { bridge.bloomThreshold = newValue; tick &+= 1 }
+    }
+    var bloomRadiusLog0: Float {
+        get { _ = tick; return bridge.bloomRadiusLog0 }
+        set { bridge.bloomRadiusLog0 = newValue; tick &+= 1 }
+    }
+    var bloomRadiusLog1: Float {
+        get { _ = tick; return bridge.bloomRadiusLog1 }
+        set { bridge.bloomRadiusLog1 = newValue; tick &+= 1 }
+    }
+    var bloomNumSamples: Int {
+        get { _ = tick; return bridge.bloomNumSamples }
+        set { bridge.bloomNumSamples = newValue; tick &+= 1 }
+    }
     var neeRisCount: Int {
         get { _ = tick; return bridge.neeRisCount }
         set { bridge.neeRisCount = newValue; tick &+= 1 }

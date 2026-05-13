@@ -29,6 +29,21 @@ struct Args {
     int bounces = 5;
     uint32_t seed = 1;
     bool aces = true;
+    bool area_light_nee = true;
+    bool override_splash_jitter = false;
+    float splash_jitter = 0.0f;
+    bool override_splash_tile_px = false;
+    int splash_tile_px = 16;
+    bool override_sky_intensity = false;
+    float sky_intensity = 1.0f;
+    bool override_sun_intensity = false;
+    float sun_intensity = 0.0f;
+    bool override_bloom_intensity = false;
+    float bloom_intensity = 0.6f;
+    bool override_bloom_threshold = false;
+    float bloom_threshold = 1.0f;
+    bool override_bloom_samples = false;
+    int bloom_samples = 24;
     GlassMode glass_mode = GlassMode::Probabilistic;
 };
 
@@ -37,7 +52,9 @@ void PrintUsage() {
         "usage: MacVoxel render --input <file.vox> --output <file.png>\n"
         "                       [--width N] [--height N]\n"
         "                       [--samples N] [--bounces N] [--seed N]\n"
-        "                       [--no-aces]\n"
+        "                       [--no-aces] [--no-area-nee]\n"
+        "                       [--sky-intensity F] [--sun-intensity F]\n"
+        "                       [--splash-jitter F] [--splash-tile-px N]\n"
         "                       [--glass-mode probabilistic|absorption]\n");
 }
 
@@ -75,6 +92,36 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
             out->seed = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
         } else if (eq("--no-aces")) {
             out->aces = false;
+        } else if (eq("--no-area-nee")) {
+            out->area_light_nee = false;
+        } else if (eq("--splash-jitter")) {
+            const char* v = need_val("--splash-jitter"); if (!v) return false;
+            out->splash_jitter = static_cast<float>(std::atof(v));
+            out->override_splash_jitter = true;
+        } else if (eq("--splash-tile-px")) {
+            const char* v = need_val("--splash-tile-px"); if (!v) return false;
+            out->splash_tile_px = std::atoi(v);
+            out->override_splash_tile_px = true;
+        } else if (eq("--sky-intensity")) {
+            const char* v = need_val("--sky-intensity"); if (!v) return false;
+            out->sky_intensity = static_cast<float>(std::atof(v));
+            out->override_sky_intensity = true;
+        } else if (eq("--sun-intensity")) {
+            const char* v = need_val("--sun-intensity"); if (!v) return false;
+            out->sun_intensity = static_cast<float>(std::atof(v));
+            out->override_sun_intensity = true;
+        } else if (eq("--bloom-intensity")) {
+            const char* v = need_val("--bloom-intensity"); if (!v) return false;
+            out->bloom_intensity = static_cast<float>(std::atof(v));
+            out->override_bloom_intensity = true;
+        } else if (eq("--bloom-threshold")) {
+            const char* v = need_val("--bloom-threshold"); if (!v) return false;
+            out->bloom_threshold = static_cast<float>(std::atof(v));
+            out->override_bloom_threshold = true;
+        } else if (eq("--bloom-samples")) {
+            const char* v = need_val("--bloom-samples"); if (!v) return false;
+            out->bloom_samples = std::atoi(v);
+            out->override_bloom_samples = true;
         } else if (eq("--glass-mode")) {
             const char* v = need_val("--glass-mode"); if (!v) return false;
             if (std::strcmp(v, "probabilistic") == 0) {
@@ -164,6 +211,29 @@ int RunCliRender(int argc, const char* argv[]) {
         // The path-trace pass reads glass_mode from ctx.render_settings;
         // the export pass takes aces_tonemap as an explicit parameter.
         ctx.render_settings.aces_tonemap = args.aces;
+        ctx.render_settings.area_light_nee = args.area_light_nee;
+        if (args.override_splash_jitter) {
+            ctx.render_settings.splash_jitter = args.splash_jitter;
+        }
+        if (args.override_splash_tile_px) {
+            ctx.render_settings.splash_tile_px = args.splash_tile_px;
+        }
+        if (args.override_sky_intensity) {
+            ctx.render_settings.sky_intensity = args.sky_intensity;
+        }
+        if (args.override_sun_intensity) {
+            ctx.render_settings.sun_intensity = args.sun_intensity;
+        }
+        if (args.override_bloom_intensity) {
+            ctx.render_settings.bloom_intensity = args.bloom_intensity;
+            ctx.render_settings.bloom_enabled = args.bloom_intensity > 0.0f;
+        }
+        if (args.override_bloom_threshold) {
+            ctx.render_settings.bloom_threshold = args.bloom_threshold;
+        }
+        if (args.override_bloom_samples) {
+            ctx.render_settings.bloom_num_samples = args.bloom_samples;
+        }
         ctx.render_settings.glass_mode = args.glass_mode;
 
         PathTraceRenderer* renderer =
@@ -198,8 +268,14 @@ int RunCliRender(int argc, const char* argv[]) {
         }
 
         NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:args.output]];
+        const float bloom_for_export =
+            (ctx.render_settings.bloom_enabled &&
+             ctx.render_settings.bloom_intensity > 0.0f)
+                ? ctx.render_settings.bloom_intensity
+                : 0.0f;
         if (![renderer exportPNGToURL:url
                           acesTonemap:args.aces ? YES : NO
+                       bloomIntensity:bloom_for_export
                          commandQueue:queue
                                 error:&nerr]) {
             std::fprintf(stderr, "export failed: %s\n",

@@ -41,6 +41,14 @@ struct PathUniforms {
     float sun_cos_half_angle;     // cos(angular_diameter / 2)
     simd::float3 sun_radiance;    // linear-space color × intensity
     float horizon_softness_k;     // exp falloff coeff; 0 = off
+    simd::float4 lobes[8];        // per-bounce shared 2D sample (.xy used)
+    simd::float2 jitter_mult;     // per-frame correlation rotator
+    uint32_t bsdf_correlation;    // 0 = independent PCG, 1 = tile-jitter
+    uint32_t jitter_tile_px;      // tile size in screen pixels
+    float jitter_phase;           // per-sample initial-seed phase shift
+    float _pad_jitter[3];
+    float indirect_clamp_L;       // <=0 disables proportional clamp
+    float _pad_tail[3];           // round up to 16-byte alignment
 };
 // CPU and MSL `constant` PathUniforms must agree byte-for-byte, since
 // we setBytes:length:sizeof(PathUniforms). The simd float3/int3 types
@@ -48,7 +56,7 @@ struct PathUniforms {
 // scalars get an additional 12-byte auto-pad in front of every
 // 16-aligned successor. The trailing sun_* group adds another 64 bytes
 // (two float3+float pairs at 32 bytes each) → 288 total.
-static_assert(sizeof(PathUniforms) == 288, "PathUniforms size mismatch");
+static_assert(sizeof(PathUniforms) == 464, "PathUniforms size mismatch");
 
 // Per-emissive-voxel entry in the next-event-estimation light buffer.
 // Built CPU-side at doc.version change so the shader doesn't have to
@@ -90,6 +98,21 @@ struct DisplayUniforms {
     // identity, when accum size matches drawable size).
     float region_w;
     float region_h;
+    float bloom_intensity;       // 0 = off, 1 = full bloom composite
+    uint32_t bloom_sample_count; // for dividing accumulated bloom buffer
+    float _pad0;
+    float _pad1;
+};
+
+struct BloomUniforms {
+    uint32_t sample_count;
+    int32_t  num_samples;
+    float    threshold;
+    float    clamp_b;
+    float    radius_log0;
+    float    radius_log1;
+    uint32_t frame_seed;
+    float    _pad0;
 };
 
 // MSL source for both pt_fragment (the path-trace pass) and
@@ -103,8 +126,10 @@ struct DisplayUniforms {
     id<MTLDevice> _device;
     MTLPixelFormat _colorFormat;
     id<MTLRenderPipelineState> _pathPipeline;
+    id<MTLRenderPipelineState> _bloomPipeline;
     id<MTLRenderPipelineState> _displayPipeline;
     id<MTLTexture> _accumTexture;
+    id<MTLTexture> _bloomTexture;
     CGSize _accumSize;
 
     id<MTLBuffer> _coarseBuffer;
@@ -113,6 +138,11 @@ struct DisplayUniforms {
     id<MTLBuffer> _materialBuffer;
     id<MTLBuffer> _lightBuffer;
     uint32_t _lightCount;
+    // Small noise texture for the Magica-style tile-correlated jitter
+    // stream. Filled with white noise once at init; the shader reads it
+    // with NEAREST filtering, so 16x16 screen-pixel tiles share their
+    // seed and adjacent pixels' BRDF directions correlate.
+    id<MTLTexture> _jitterNoise;
     // Typed dirty caches — each renderer-side buffer rebuilds only when
     // its category's counter advances. Lights derive from all three, so
     // the light buffer rebuilds whenever any of them changes.
@@ -125,6 +155,7 @@ struct DisplayUniforms {
 
     // Accumulation state.
     uint32_t _sampleCount;
+    uint32_t _bloomSampleCount;
     BOOL _wantsClear;
 
     // Camera-state hash for reset detection.
@@ -133,6 +164,10 @@ struct DisplayUniforms {
     // reset since the two modes produce visually different estimators.
     macvoxel::GlassMode _lastGlassMode;
     bool _lastPowerWeightedNee;
+    bool _lastAreaLightNee;
+    float _lastIndirectClampL;
+    float _lastSplashJitter;
+    int _lastSplashTilePx;
     float _lastSkyIntensity;
     int _lastNeeRisCount;
     bool _lastAtmosphericSky;
@@ -178,6 +213,7 @@ struct DisplayUniforms {
     }
     id<MTLFunction> vfn = [library newFunctionWithName:@"pt_vertex"];
     id<MTLFunction> ptffn = [library newFunctionWithName:@"pt_fragment"];
+    id<MTLFunction> bloomffn = [library newFunctionWithName:@"bloom_fragment"];
     id<MTLFunction> dispffn = [library newFunctionWithName:@"display_fragment"];
 
     // Accumulation pipeline: writes float4 RGBA, additive blend (One/One)
@@ -203,6 +239,32 @@ struct DisplayUniforms {
         }
     }
 
+    // Bloom pipeline: samples the accum texture at log-uniform random
+    // radii per output pixel, threshold-gates above-bright contributions,
+    // writes mean color + mean weight. Additive blending accumulates
+    // estimates across all path-trace samples — bloom converges in
+    // lockstep with the pt accumulator instead of jumping per-frame.
+    {
+        MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+        d.label = @"PathTraceBloom";
+        d.vertexFunction = vfn;
+        d.fragmentFunction = bloomffn;
+        d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA32Float;
+        d.colorAttachments[0].blendingEnabled = YES;
+        d.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        d.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+        d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+        d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+        d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        _bloomPipeline = [_device newRenderPipelineStateWithDescriptor:d error:&error];
+        if (_bloomPipeline == nil) {
+            fprintf(stderr, "MacVoxel: failed to build bloom pipeline: %s\n",
+                    [[error localizedDescription] UTF8String]);
+            return nil;
+        }
+    }
+
     // Display pipeline: samples the accum texture, divides by sample
     // count, writes to MTKView's drawable.
     {
@@ -217,6 +279,37 @@ struct DisplayUniforms {
                     [[error localizedDescription] UTF8String]);
             return nil;
         }
+    }
+
+    {
+        constexpr NSUInteger kNoiseDim = 64;
+        // R32Float so the shader's `seed * 859 + ...` mutation chain
+        // doesn't compound 8-bit quantization into banded tile-edges
+        // in the splash pattern (visible as fragmentation in the
+        // cluster silhouette projection).
+        MTLTextureDescriptor* td = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                          width:kNoiseDim
+                                         height:kNoiseDim
+                                      mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModeManaged;
+        _jitterNoise = [_device newTextureWithDescriptor:td];
+        _jitterNoise.label = @"PathTraceJitterNoise";
+        // White-noise fill — the shader linear-filters between texels,
+        // which smooths tile-to-tile transitions enough that the
+        // texture content's spectral character doesn't matter much.
+        float noise[kNoiseDim * kNoiseDim];
+        uint32_t s = 0xC0FFEE;
+        for (NSUInteger i = 0; i < kNoiseDim * kNoiseDim; ++i) {
+            s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+            noise[i] = static_cast<float>(s) * (1.0f / 4294967296.0f);
+        }
+        MTLRegion region = MTLRegionMake2D(0, 0, kNoiseDim, kNoiseDim);
+        [_jitterNoise replaceRegion:region
+                        mipmapLevel:0
+                          withBytes:noise
+                        bytesPerRow:kNoiseDim * sizeof(float)];
     }
 
     return self;
@@ -482,6 +575,17 @@ struct DisplayUniforms {
     td.storageMode = MTLStorageModePrivate;
     _accumTexture = [_device newTextureWithDescriptor:td];
     _accumTexture.label = @"PTAccum";
+
+    MTLTextureDescriptor* tdb =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+                                                           width:static_cast<NSUInteger>(size.width)
+                                                          height:static_cast<NSUInteger>(size.height)
+                                                       mipmapped:NO];
+    tdb.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    tdb.storageMode = MTLStorageModePrivate;
+    _bloomTexture = [_device newTextureWithDescriptor:tdb];
+    _bloomTexture.label = @"PTBloom";
+
     _accumSize = size;
     _wantsClear = YES;
 }
@@ -538,6 +642,26 @@ struct DisplayUniforms {
     const bool pw_nee = rs.power_weighted_nee;
     if (pw_nee != _lastPowerWeightedNee) {
         _lastPowerWeightedNee = pw_nee;
+        _wantsClear = YES;
+    }
+    const bool area_nee = rs.area_light_nee;
+    if (area_nee != _lastAreaLightNee) {
+        _lastAreaLightNee = area_nee;
+        _wantsClear = YES;
+    }
+    const float clamp_L = rs.indirect_clamp_L;
+    if (clamp_L != _lastIndirectClampL) {
+        _lastIndirectClampL = clamp_L;
+        _wantsClear = YES;
+    }
+    const float splash_j = rs.splash_jitter;
+    if (splash_j != _lastSplashJitter) {
+        _lastSplashJitter = splash_j;
+        _wantsClear = YES;
+    }
+    const int splash_t = rs.splash_tile_px;
+    if (splash_t != _lastSplashTilePx) {
+        _lastSplashTilePx = splash_t;
         _wantsClear = YES;
     }
     const float sky_k = rs.sky_intensity;
@@ -615,7 +739,16 @@ struct DisplayUniforms {
                                                settings:rs];
     }
 
-    // ---------- Pass 2: divide accum by sample count, write to drawable ----
+    // ---------- Pass 2: stochastic threshold-gated bloom over accum -----
+    const bool want_bloom =
+        rs.bloom_enabled && rs.bloom_intensity > 0.0f && _sampleCount > 0u;
+    if (want_bloom) {
+        [self encodeBloomPassIntoCommandBuffer:cmd
+                                      settings:rs
+                                    clearFirst:(_sampleCount == 1u)];
+    }
+
+    // ---------- Pass 3: tonemap + bloom composite into drawable ---------
     {
         MTLRenderPassDescriptor* rpd = view.currentRenderPassDescriptor;
         if (rpd == nil) return;
@@ -641,16 +774,62 @@ struct DisplayUniforms {
                          static_cast<float>(drawable.height);
         du.region_w = ar / ad;
         du.region_h = 1.0f;
+        du.bloom_intensity = want_bloom ? rs.bloom_intensity : 0.0f;
+        du.bloom_sample_count = _bloomSampleCount;
+        du._pad0 = du._pad1 = 0.0f;
 
         [enc setRenderPipelineState:_displayPipeline];
         [enc setCullMode:MTLCullModeNone];
         [enc setFragmentBytes:&du length:sizeof(du) atIndex:0];
         [enc setFragmentTexture:_accumTexture atIndex:0];
+        [enc setFragmentTexture:_bloomTexture atIndex:1];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [enc endEncoding];
     }
 
     ctx->render_progress.sample_count = _sampleCount;
+}
+
+// Encodes the stochastic threshold-gated bloom pass into `cmd`, drawing
+// into _bloomTexture with additive blending. First sample of a fresh
+// accumulator clears the bloom texture; subsequent samples add. Display
+// divides by sample count for the temporal mean.
+- (void)encodeBloomPassIntoCommandBuffer:(id<MTLCommandBuffer>)cmd
+                                settings:(const macvoxel::RenderSettings&)rs
+                              clearFirst:(BOOL)clearFirst {
+    MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+    rpd.colorAttachments[0].texture = _bloomTexture;
+    rpd.colorAttachments[0].loadAction =
+        clearFirst ? MTLLoadActionClear : MTLLoadActionLoad;
+    rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+    rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    if (clearFirst) {
+        _bloomSampleCount = 0u;
+    }
+    ++_bloomSampleCount;
+
+    id<MTLRenderCommandEncoder> enc =
+        [cmd renderCommandEncoderWithDescriptor:rpd];
+    enc.label = @"PathTraceBloom";
+
+    BloomUniforms bu;
+    bu.sample_count = _sampleCount;
+    bu.num_samples = std::max(1, rs.bloom_num_samples);
+    bu.threshold = std::max(0.0f, rs.bloom_threshold);
+    bu.clamp_b = std::max(0.0f, rs.bloom_clamp);
+    bu.radius_log0 = rs.bloom_radius_log0;
+    bu.radius_log1 = std::max(rs.bloom_radius_log0 + 1e-3f,
+                              rs.bloom_radius_log1);
+    bu.frame_seed = _bloomSampleCount * 1664525u + 1013904223u;
+    bu._pad0 = 0.0f;
+
+    [enc setRenderPipelineState:_bloomPipeline];
+    [enc setCullMode:MTLCullModeNone];
+    [enc setFragmentBytes:&bu length:sizeof(bu) atIndex:0];
+    [enc setFragmentTexture:_accumTexture atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [enc endEncoding];
 }
 
 // Encodes one accumulation pass into `cmd`, drawing into _accumTexture.
@@ -695,7 +874,7 @@ struct DisplayUniforms {
     u._pad3 = 0.0f;
     u.frame_seed = frameSeed;
     u.max_bounces = maxBounces;
-    u.light_count = _lightCount;
+    u.light_count = rs.area_light_nee ? _lightCount : 0u;
     u.glass_mode = static_cast<uint32_t>(
         rs.glass_mode);
     u.power_weighted_nee =
@@ -755,6 +934,64 @@ struct DisplayUniforms {
             ? (3.0f / horizon_sin)
             : 0.0f;
     }
+    {
+        // Tile-correlated jitter machinery. Per accumulation sample, fill
+        // `lobes[b]` with a fresh uniform-square 2D point per bounce; the
+        // shader's tile-shared seed (sampled from the noise texture)
+        // perturbs each pixel's sample around this shared base, so
+        // adjacent pixels in a tile sample near-identical BRDF directions
+        // and emissive cluster silhouettes project as coherent shaped
+        // splashes. `jitter_mult` rotates per sample so the per-tile
+        // offset axis doesn't lock in over many samples.
+        uint32_t s = frameSeed * 2654435761u + 0x9E3779B9u;
+        auto next = [&s]() {
+            s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+            return static_cast<float>(s) * (1.0f / 4294967296.0f);
+        };
+        for (int b = 0; b < 8; ++b) {
+            u.lobes[b] = simd::float4{next(), next(), 0.0f, 0.0f};
+        }
+        // Per-frame rotator. Magica's tile-jitter perturbs lobes by
+        // `jitter_mult * scalar_seed`, where seed varies tile-to-tile,
+        // so within a frame the perturbation is a 1D line in u-space
+        // along `jitter_mult`. Across frames the line rotates,
+        // covering the unit square. Magnitude controls how widely
+        // different tiles "view" the emissive cluster — 0 means every
+        // pixel samples the same direction (splash migrates across
+        // samples), small values widen the per-frame splash silhouette.
+        if (rs.splash_mode && rs.splash_jitter > 0.0f) {
+            const float ang =
+                static_cast<float>(_sampleCount) * 1.61803398875f;
+            u.jitter_mult = simd::float2{
+                std::cos(ang) * rs.splash_jitter,
+                std::sin(ang) * rs.splash_jitter,
+            };
+        } else {
+            u.jitter_mult = simd::float2{0.0f, 0.0f};
+        }
+        u.jitter_tile_px = static_cast<uint32_t>(
+            std::max(1, rs.splash_tile_px));
+        // Per-sample phase: derived from the same seed sequence the
+        // lobes use, so it cycles deterministically through [0, 1) and
+        // shifts the entire jitter chain (and thus NEE selection /
+        // BRDF perturbation) by a different amount every sample.
+        u.jitter_phase = next();
+        u._pad_jitter[0] = 0.0f;
+        u._pad_jitter[1] = 0.0f;
+        u._pad_jitter[2] = 0.0f;
+        // Splash bundle (tile-correlated BRDF + clamp) is orthogonal
+        // to NEE — both can be on for the Magica hybrid (smooth direct
+        // halo + splashy indirect with firefly clamp). The clamp value
+        // only applies when splash_mode is on; the shader's per-bounce
+        // gating below decides which contributions actually get clamped.
+        u.bsdf_correlation = rs.splash_mode ? 1u : 0u;
+        u.indirect_clamp_L = rs.splash_mode
+            ? std::max(0.0f, rs.indirect_clamp_L)
+            : 0.0f;
+        u._pad_tail[0] = 0.0f;
+        u._pad_tail[1] = 0.0f;
+        u._pad_tail[2] = 0.0f;
+    }
 
     [enc setRenderPipelineState:_pathPipeline];
     [enc setCullMode:MTLCullModeNone];
@@ -764,6 +1001,7 @@ struct DisplayUniforms {
     [enc setFragmentBuffer:_paletteBuffer offset:0 atIndex:3];
     [enc setFragmentBuffer:_materialBuffer offset:0 atIndex:4];
     [enc setFragmentBuffer:_lightBuffer offset:0 atIndex:5];
+    [enc setFragmentTexture:_jitterNoise atIndex:0];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [enc endEncoding];
     ++_sampleCount;
@@ -822,11 +1060,31 @@ struct DisplayUniforms {
         }
     }
     if (last != nil) [last waitUntilCompleted];
+
+    // Run the bloom pass once per pt sample so its temporal averaging
+    // matches the interactive path's denominator. The pt accumulator is
+    // already fully converged here, but spreading the bloom estimates
+    // across `samples` runs gives the same mean bloom as the live
+    // additive-blend behavior.
+    if (rs.bloom_enabled && rs.bloom_intensity > 0.0f && _sampleCount > 0u) {
+        for (uint32_t i = 0; i < samples; ++i) {
+            @autoreleasepool {
+                id<MTLCommandBuffer> cmd = [queue commandBuffer];
+                cmd.label = @"PathTraceHeadlessBloom";
+                [self encodeBloomPassIntoCommandBuffer:cmd
+                                              settings:rs
+                                            clearFirst:(i == 0)];
+                [cmd commit];
+                [cmd waitUntilCompleted];
+            }
+        }
+    }
     return YES;
 }
 
 - (BOOL)exportPNGToURL:(NSURL*)url
           acesTonemap:(BOOL)acesTonemap
+       bloomIntensity:(float)bloomIntensity
           commandQueue:(id<MTLCommandQueue>)queue
                  error:(NSError**)outError {
     if (_accumTexture == nil || _displayPipeline == nil) {
@@ -880,10 +1138,14 @@ struct DisplayUniforms {
     // Export target matches the accum exactly — no letterbox.
     du.region_w = 1.0f;
     du.region_h = 1.0f;
+    du.bloom_intensity = std::max(0.0f, bloomIntensity);
+    du.bloom_sample_count = _bloomSampleCount;
+    du._pad0 = du._pad1 = 0.0f;
     [enc setRenderPipelineState:_displayPipeline];
     [enc setCullMode:MTLCullModeNone];
     [enc setFragmentBytes:&du length:sizeof(du) atIndex:0];
     [enc setFragmentTexture:_accumTexture atIndex:0];
+    [enc setFragmentTexture:_bloomTexture atIndex:1];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [enc endEncoding];
 

@@ -10,11 +10,68 @@ struct LightPanel: View {
             row(label: "Bounces") {
                 IntSliderRow(value: $state.maxBounces, range: 1...8)
             }
+            Toggle("Area-light NEE", isOn: $state.areaLightNEE)
+                .help("Explicit shadow rays toward emissive voxels. On = smooth direct illumination from emitters at any sample count. Compose with Splash mode for Magica's stochastic-OFF hybrid.")
             Toggle("Power-weighted NEE", isOn: $state.powerWeightedNEE)
                 .help("Pick direct-light samples weighted by per-light power. Off = uniform.")
+                .disabled(!state.areaLightNEE)
             row(label: "RIS samples") {
                 IntSliderRow(value: $state.neeRisCount, range: 1...32)
             }
+            .disabled(!state.areaLightNEE)
+
+            sectionHeader("Splash mode (indirect)")
+            Toggle("Splash mode", isOn: $state.splashMode)
+                .help("Tile-correlated BRDF directions + tile-correlated NEE light selection + proportional indirect clamp. Reproduces Magica's stochastic-OFF aesthetic. Composes with Area-light NEE: NEE on + Splash on = smooth direct halo + splashy indirect (Magica's full hybrid).")
+            row(label: "Splash clamp") {
+                FloatSliderRow(value: $state.indirectClampL, range: 0...32,
+                               format: "%.1f")
+            }
+            .disabled(!state.splashMode)
+            .help("Proportional clamp on indirect emissive contributions (NEE + BSDF-walk) at bounce >= 1. 0 = off; 4..16 is Magica's range.")
+            row(label: "Splash jitter") {
+                FloatSliderRow(value: $state.splashJitter, range: 0...0.2,
+                               format: "%.3f")
+            }
+            .disabled(!state.splashMode)
+            .help("Per-frame BRDF-direction perturbation magnitude. 0 = every pixel samples the same direction per sample (cleanest, marches across samples). Larger = visible cluster silhouette projection in a single frame.")
+            row(label: "Splash scale") {
+                IntSliderRow(value: $state.splashTilePx, range: 1...64)
+            }
+            .disabled(!state.splashMode)
+            .help("Correlation scale (pixels). One full noise sweep per `scale × 64` screen pixels. Only has visible effect when Splash jitter > 0.")
+
+            sectionHeader("Bloom (splash → halo)")
+            Toggle("Enable bloom", isOn: $state.bloomEnabled)
+                .help("Magica-style stochastic threshold-gated bloom. Smears bright pt-output pixels into smooth halos. Independent of bounce count — works at low sample counts.")
+            row(label: "Intensity") {
+                FloatSliderRow(value: $state.bloomIntensity, range: 0...1,
+                               format: "%.2f")
+            }
+            .disabled(!state.bloomEnabled)
+            row(label: "Threshold") {
+                FloatSliderRow(value: $state.bloomThreshold, range: 0...8,
+                               format: "%.2f")
+            }
+            .disabled(!state.bloomEnabled)
+            .help("Linear-space brightness gate. Only pt-pixels above this contribute to bloom.")
+            row(label: "Radius min") {
+                FloatSliderRow(value: $state.bloomRadiusLog0, range: -3...4,
+                               format: "%.1f")
+            }
+            .disabled(!state.bloomEnabled)
+            .help("log of minimum bloom sample radius in pixels.")
+            row(label: "Radius max") {
+                FloatSliderRow(value: $state.bloomRadiusLog1, range: 0...8,
+                               format: "%.1f")
+            }
+            .disabled(!state.bloomEnabled)
+            .help("log of maximum bloom sample radius. exp(7) ≈ 1100px.")
+            row(label: "Samples") {
+                IntSliderRow(value: $state.bloomNumSamples, range: 1...96)
+            }
+            .disabled(!state.bloomEnabled)
+            .help("Taps per output pixel per frame. More = less noisy halo, slower.")
 
             sectionHeader("Sky")
             Toggle("Atmospheric sky", isOn: $state.atmosphericSky)
