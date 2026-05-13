@@ -23,17 +23,46 @@ struct PathUniforms {
     float    sun_cos_half_angle;  // cos(angular_diameter / 2)
     float3   sun_radiance;        // linear color × intensity
     float    horizon_softness_k;  // exp falloff coeff; 0 = no softening
-    // Tile-correlated BRDF-direction sampling (MagicaVoxel-style
-    // "stochastic-OFF" splash aesthetic). Per sample-index, the CPU
-    // fills `lobes[b].xy` with a uniform-square 2D point that *every*
-    // pixel uses as the base of its bounce-`b` BRDF direction sample;
-    // pixels then perturb it by `jitter_mult * seed`, where `seed`
-    // comes from a small (~64×64) nearest-filtered noise texture, so
-    // 16×16-pixel tiles share their RNG. Adjacent pixels in a tile
-    // sample nearly the same direction, projecting the emissive
-    // cluster's silhouette onto receiving surfaces as a shaped splash.
-    // When `bsdf_correlation == 0`, the shader falls back to the
-    // independent per-pixel PCG path (unbiased reference).
+    // Tile-correlated BRDF-direction sampling — the heart of the
+    // MagicaVoxel-style splash aesthetic. Per accumulation sample the
+    // CPU fills `lobes[b].xy` with a uniform-square 2D point that
+    // *every* pixel uses as the base of its bounce-`b` BRDF direction
+    // sample; pixels then perturb it by `jitter_mult * seed`, where
+    // `seed` is bilinearly sampled from a small (~64×64) noise texture
+    // covering `jitter_tile_px * 64` screen pixels — so neighbouring
+    // pixels see *smoothly-interpolated* seeds and sample nearly the
+    // same direction. Adjacent pixels' bounces hit nearly the same
+    // point on the same emissive cluster, projecting the cluster's
+    // silhouette onto the receiving surface as a coherent splash
+    // rather than scattering into single-pixel fireflies.
+    //
+    // The decompiled MagicaVoxel path tracer uses a comparable but
+    // not identical setup — nearest-filtered tex_rand, giving hard-
+    // edged 16-pixel tile blocks. We chose bilinear to avoid visible
+    // tile boundaries; both produce the same projected-silhouette
+    // effect, just with different micro-texture.
+    //
+    // `bsdf_correlation == 0` falls back to independent per-pixel PCG
+    // (unbiased reference path; MagicaVoxel has no equivalent — its
+    // jitter is always tile-correlated). The shader's mode matrix:
+    //
+    //   bsdf_correlation, light_count > 0  -> "hybrid"  (NEE+BSDF+MIS,
+    //                                          correlated noise, clamp).
+    //                                          Closest renderer match
+    //                                          for MV with SS-GI ON.
+    //   bsdf_correlation, light_count == 0 -> "MV-strict" (no area NEE;
+    //                                          BSDF discovery + clamp;
+    //                                          correlated noise).
+    //                                          Closest renderer match
+    //                                          for MV with SS-GI OFF.
+    //   no bsdf_correlation, light_count>0 -> "textbook MC" (unbiased,
+    //                                          uncorrelated reference).
+    //   no bsdf_correlation, light_count==0-> "textbook MC, BSDF-only"
+    //                                          (very noisy reference).
+    //
+    // Sun NEE is independent of `light_count` and always active when
+    // `sun_radiance > 0` (matches MagicaVoxel's OPT_SUN being
+    // orthogonal to OPT_AREA).
     float4   lobes[8];              // .xy used; .zw reserved
     float2   jitter_mult;
     uint     bsdf_correlation;      // 0 = full PCG, 1 = tile-jitter
@@ -48,11 +77,14 @@ struct PathUniforms {
     float    _pad_jitter0;
     float    _pad_jitter1;
     float    _pad_jitter2;
-    // Magica's `clamp_L`: when an indirect BRDF sample lands on an
-    // emissive voxel and area-light NEE is off (`light_count == 0`),
-    // clamp the per-sample contribution proportionally (hue-preserving)
-    // to bound spike-noise. <= 0 disables. Mirrors the
-    // `clamp_scale(WL, clamp_L)` branch in Magica's `eval_light_area`.
+    // Proportional clamp ceiling on indirect-bounce contributions —
+    // both NEE shadow rays at b >= 1 (via nee_clamped) and BSDF-walk
+    // arrivals at emissive voxels (via the inline clamp in the no-
+    // NEE-competitor branch). Hue-preserving (see clamp_scale below).
+    // <= 0 disables. Mirrors MagicaVoxel's `clamp_scale(WL, clamp_L)`
+    // in EVAL_LIGHT_DEF / SAMPLE_LIGHT_DEF, gated on the equivalent
+    // `bounce > 1` (first-surface NEE is unclamped, every subsequent
+    // indirect contribution is clamped).
     float    indirect_clamp_L;
     float    _pad_tail0;
     float    _pad_tail1;
@@ -73,8 +105,20 @@ struct DisplayUniforms {
     float region_h;
     float bloom_intensity;       // 0 = no bloom, 1 = full Magica-style mix
     uint  bloom_sample_count;    // for averaging accumulated bloom buffer
+    // Temporal-EMA weight applied in `ema_compose_fragment`:
+    //   1.0 = no blend (this frame's tonemapped value passes through
+    //                   unchanged; behaviour identical to no EMA).
+    //   0.0 < w < 1.0  = mix(history, this_frame, w). Smaller w =
+    //                    heavier smoothing / slower response to new
+    //                    samples. CPU computes per-frame as
+    //                    max(1/(sample_count+1), ema_floor) where
+    //                    ema_floor ∈ [0, 1] is the user's smoothing knob.
+    //   0.0 = freeze (history retained, no update). Useful for
+    //         intentionally freezing the displayed image.
+    // Mirrors MagicaVoxel's `weight` parameter in pt_post.glsl, where
+    // it controls the same mix(tex_last, dst, weight) blend.
+    float ema_weight;
     float _pad0;
-    float _pad1;
 };
 
 // Stochastic threshold-gated bloom (Magica-style). Per output pixel,
@@ -143,13 +187,19 @@ float2 rand2(thread uint& s) {
     return float2(r1, r2);
 }
 
-// Tile-correlated BRDF-direction sample, Magica-style. `seed` is a
-// per-pixel float read from a small noise texture (16×16-pixel tiles
-// share values under nearest filtering) that mutates each call; mixed
-// against `jitter_mult` it perturbs the per-frame `lobes[b]` uniform.
-// Adjacent pixels in a tile see near-identical (r1, r2) → near-identical
-// sampled directions → emissive cluster silhouettes project as coherent
-// shaped splashes rather than scattered fireflies.
+// Tile-correlated BRDF-direction sample, MagicaVoxel-style. `seed` is a
+// per-pixel float read bilinearly from a small noise texture; it mutates
+// each call, and combined with `jitter_mult` it perturbs the per-frame
+// `lobes[b]` uniform that's shared by every pixel. Adjacent pixels see
+// near-identical (r1, r2) → near-identical sampled directions →
+// emissive cluster silhouettes project as coherent shaped splashes
+// rather than scattered fireflies.
+//
+// Per-bounce stepping (`seed = fract(seed * 859 + 1/5.93)`) mirrors
+// MagicaVoxel's `jitter2()` recurrence verbatim. The deterministic
+// stride `lobes[b]` is uniform across pixels, the rotation `seed *
+// jitter_mult` is per-pixel — same Cranley-Patterson shape as the MV
+// captured shader.
 float2 jitter2(constant PathUniforms& u, uint b, thread float& seed) {
     seed = fract(seed * 859.0 + 1.0 / 5.93);
     return fract(u.lobes[b].xy + u.jitter_mult * seed);
@@ -166,12 +216,18 @@ float2 dir_sample(constant PathUniforms& u, uint b,
     return rand2(rng);
 }
 
-// Tile-correlated scalar random for NEE light/face selection: mutates
-// the per-pixel jitter seed and returns it directly. Adjacent tile
-// pixels share `seed`, so they pick the same emissive face and evaluate
-// the same NEE sample — Magica's frame-uniform area-light behavior
-// approximated via the tile-jitter chain. Falls back to per-pixel PCG
-// when bsdf_correlation is off.
+// Tile-correlated scalar random for NEE selection randoms (light index,
+// face axis, in-face position, RIS reservoir, sun cone). Mutates the
+// per-pixel jitter seed and returns it directly: adjacent tile pixels
+// share `seed`, so they pick the same emissive face and evaluate the
+// same NEE sample. This is *not* a literal MagicaVoxel mechanism — MV
+// with SS-GI off has no area NEE at all (OPT_AREA undefined), and MV
+// with SS-GI on uses tile-correlated jitter for its NEE samples
+// inherently, not as a separate opt-in. We adopt the correlated-NEE
+// shape as a stylistic choice for our "splash + area_NEE on" hybrid:
+// kills the per-pixel NEE fireflies that uncorrelated NEE would
+// otherwise produce when combined with correlated BSDF directions.
+// Falls back to per-pixel PCG when bsdf_correlation is off.
 float pickrand1(constant PathUniforms& u,
                 thread uint& rng, thread float& seed) {
     if (u.bsdf_correlation != 0u) {
@@ -182,23 +238,33 @@ float pickrand1(constant PathUniforms& u,
 }
 
 // Hue-preserving proportional clamp. v's brightest channel maxes at
-// limit; other channels scale by the same ratio so the color stays
+// `limit`; other channels scale by the same ratio so the color stays
 // the same. Used on indirect-bounce emissive contributions (both NEE
-// shadow rays and BSDF-walk emit arrivals) when in splash mode (see
-// FIREFLIES.md).
+// shadow rays and BSDF-walk emit arrivals) when in splash mode.
+// Matches MagicaVoxel's `clamp_scale(v, s)` helper used by its
+// EVAL_LIGHT_DEF / SAMPLE_LIGHT_DEF clamp branches.
 float3 clamp_scale(float3 v, float limit) {
     float m = max(max(v.x, v.y), v.z);
     return v * (limit / max(m, limit));
 }
 
-// Wraps a NEE shadow-ray contribution with Magica's indirect clamp:
-// at b == 0 (camera ray hit) the contribution carries the smooth-halo
-// direct illumination and is left alone; at b >= 1 (second surface
-// interaction or later) variance from the rare-bright-light estimator
-// is what produces fireflies, and the proportional clamp tames it.
-// Matches Magica's `bounce > 1` clamp in SAMPLE_LIGHT_DEF (their
-// bounce counter increments inside the material function, so their
-// bounce=1 is our b=0, bounce=2 is our b=1, etc).
+// Wraps an indirect-contribution accumulation site with the proportional
+// clamp:
+//   • b == 0 (NEE from the first surface the camera ray hit):
+//     unclamped. Carries the smooth-halo direct illumination — this is
+//     what your eye reads as a sunlit wall and clamping it would dim
+//     it visibly.
+//   • b >= 1 (NEE from any subsequent surface interaction, or a BSDF-
+//     walk arrival at an emissive in the MIS branch): clamp the
+//     contribution proportionally to `indirect_clamp_L`. Caps
+//     individual sample spikes that would otherwise read as fireflies,
+//     in exchange for slight energy bias.
+//
+// Matches MagicaVoxel's `bounce > 1` clamp in EVAL_LIGHT_DEF /
+// SAMPLE_LIGHT_DEF. MV's `bounce` is incremented inside its material
+// functions (so its first surface hit reaches NEE with bounce=1, and
+// the clamp condition `bounce > 1` becomes equivalent to our
+// `b >= 1` — both fire from the second surface interaction onward).
 float3 nee_clamped(constant PathUniforms& u, uint b, float3 contrib) {
     if (b >= 1u && u.indirect_clamp_L > 0.0) {
         return clamp_scale(contrib, u.indirect_clamp_L);
@@ -777,9 +843,14 @@ NEELight nee_sample_light(float3 x,
         // Light selection — same source distribution as the non-RIS
         // path. Power-weighted: CDF binary search; uniform: bare rand.
         // Routed through pickrand1 so splash_mode shares the light
-        // pick across tile-neighbor pixels (matches Magica's frame-
-        // uniform area-light selection — adjacent pixels evaluate the
-        // same face per sample, killing the per-pixel-PCG fireflies).
+        // pick across tile-neighbour pixels. Note: this is a stylistic
+        // extension of MagicaVoxel rather than a direct port — MV's
+        // SS-GI-off path doesn't do area-light NEE at all (no OPT_AREA),
+        // and MV's SS-GI-on path uses tile-correlated jitter as its
+        // *only* random source, so there's no analogous opt-in there.
+        // Correlating our area-NEE samples this way damps the
+        // per-pixel-PCG fireflies that would otherwise show up in the
+        // "splash + area_NEE on" hybrid we run by default.
         uint li;
         float prob_li;
         if (u.power_weighted_nee != 0u) {
@@ -1286,22 +1357,38 @@ fragment float4 pt_fragment(
         // Emissive cells are light sources. The BSDF arrival has
         // already moved throughput by the BRDF·cos/pdf factor; we just
         // need to multiply by Le and apply the MIS weight on the BSDF
-        // side. Primary visibility (b=0), delta-like prior bounces, and
-        // the no-NEE case (light_count=0) get full weight.
+        // side.
+        //
+        // Three regimes, gated by what NEE we have available:
+        //
+        //   1. No competing NEE estimator
+        //      (b == 0  OR  prev_is_delta  OR  light_count == 0):
+        //      contribute Le * throughput with full weight (no MIS to
+        //      apply). Clamp at b >= 1 when it's a non-delta BSDF
+        //      arrival into the no-area-NEE regime — this is exactly
+        //      the path MagicaVoxel takes when SS-GI is off and a
+        //      random walk happens to land on an emissive voxel.
+        //
+        //   2. Competing NEE estimator exists (light_count > 0,
+        //      b >= 1, non-delta):
+        //      MIS-weight against the solid-angle pdf NEE would have
+        //      assigned to this direction, then clamp via nee_clamped.
+        //      Matches MagicaVoxel's MIS-weighted EVAL_LIGHT_DEF
+        //      branch when OPT_AREA is on.
         if (mat_type == kMatEmissive && mat.emission > 0.0) {
             float3 Le = albedo * mat.emission;
-            if (b == 0u || prev_is_delta || u.light_count == 0u) {
+            bool no_nee_competitor = (b == 0u) || prev_is_delta
+                                  || (u.light_count == 0u);
+            if (no_nee_competitor) {
                 float3 contrib = throughput * Le;
-                // Magica's `clamp_scale(WL, clamp_L)`: when area-light
-                // NEE can't help (light_count==0) and we arrived via a
-                // non-delta BSDF sample, bound the indirect-bounce
-                // spike proportionally so a single high-pdf hit reads
-                // as a soft shaped splash instead of a single-pixel
-                // firefly. Bounce 0 (primary visibility) and delta
-                // arrivals (post-refraction) keep their raw value.
-                if (b > 0u && !prev_is_delta &&
-                    u.light_count == 0u &&
-                    u.indirect_clamp_L > 0.0) {
+                // Clamp only when there's actually a firefly to suppress:
+                // skip b == 0 (camera-direct view of emitter — must read
+                // unclamped to look correct) and post-refraction delta
+                // arrivals (NEE can't sample those either way; let them
+                // pass through).
+                bool should_clamp = (b >= 1u) && !prev_is_delta
+                                 && (u.indirect_clamp_L > 0.0);
+                if (should_clamp) {
                     contrib = clamp_scale(contrib, u.indirect_clamp_L);
                 }
                 radiance += contrib;
@@ -1550,16 +1637,22 @@ fragment float4 pt_fragment(
     return float4(radiance, 1.0);
 }
 
-// Stochastic threshold-gated bloom — drives Magica's "smooth halo from
-// sparse splashes" aesthetic. For each output pixel, take `num_samples`
-// taps at log-uniform random radii / uniform random angles into the
-// pt-accumulator; threshold-gate each tap so only above-`threshold`
-// (bright) pixels contribute; output mean color in `.rgb` and mean
-// threshold-pass weight in `.a` (consumed by display_fragment's
-// composite). Compared to a fixed-radius Gaussian, the log-uniform
-// radius distribution covers a wide range of distances with few taps
-// and naturally produces the "bright splashes spread into smooth
-// halos around emitters" character.
+// Stochastic threshold-gated bloom — a Magica-style post-process that
+// adds glow on bright pixels. NOTE: this contributes to the final
+// look but is *not* what produces MV's smooth halo on diffuse
+// surfaces (Other Claude verified by disabling MV's bloom — halo
+// survives). The actual halo in MV comes from the BSDF random walk
+// reliably finding nearby emitters and the temporal EMA blend in
+// pt_post.glsl averaging contributions across thousands of samples.
+//
+// For each output pixel, take `num_samples` taps at log-uniform
+// random radii / uniform random angles into the pt-accumulator;
+// threshold-gate each tap so only above-`threshold` (bright) pixels
+// contribute; output mean color in `.rgb` and mean threshold-pass
+// weight in `.a` (consumed by display_fragment's composite).
+// Compared to a fixed-radius Gaussian, the log-uniform radius
+// distribution covers a wide range of distances with few taps and
+// produces a soft glow with natural-looking falloff.
 fragment float4 bloom_fragment(
     VertOut in [[stage_in]],
     constant BloomUniforms& u [[buffer(0)]],
@@ -1602,16 +1695,86 @@ fragment float4 bloom_fragment(
     return float4(L * inv_taps, W * inv_taps);
 }
 
-// ACES filmic tonemap (Narkowicz 2015 fit) — squeezes the linear HDR
-// accumulator into [0, 1] with a soft shoulder so bright emissives roll
-// off instead of clipping to white. Followed by a proper linear → sRGB
-// encode (gamma 2.2 is a rough approximation; the piecewise sRGB curve
-// is what the display actually expects).
-fragment float4 display_fragment(
+// Temporal-EMA compose pass — Magica's `pt_post.glsl mix(tex_last, dst,
+// weight)` pattern. Runs at accumulator resolution (NOT drawable
+// resolution) and writes the tonemapped current frame value into the
+// history texture using hardware alpha-blending for the EMA mix:
+//
+//   pipeline.blendEnabled = YES
+//   sourceFactor      = MTLBlendFactorBlendAlpha       (= blend_color.a)
+//   destinationFactor = MTLBlendFactorOneMinusBlendAlpha (= 1 - blend_color.a)
+//
+// CPU sets blend_color.a = ema_weight via setBlendColor:, so the
+// hardware ROP evaluates
+//   dst' = mix(dst, src, ema_weight)
+//        = dst * (1 - ema_weight) + src * ema_weight
+// where `src` is THIS fragment's output (tonemapped current value)
+// and `dst` is the existing texture content (last frame's blended
+// output). Using hardware blending instead of in-shader sampling of
+// a "previous history" texture: (1) avoids ping-pong texture state and
+// the read-write hazard, (2) makes the EMA chain literally identical
+// across every pixel since there's no risk of confusing which texture
+// is which, and (3) makes the implementation impossible to get wrong
+// at the wiring layer — if EMA isn't visible, the cause is somewhere
+// other than this fragment.
+//
+// CPU also drives loadAction: Clear on the first frame after a reset
+// (so the dst is zero and weight=1 gives dst' = current), Load on
+// every subsequent frame (so we blend into the persisted previous
+// content).
+fragment float4 ema_compose_fragment(
     VertOut in [[stage_in]],
     constant DisplayUniforms& u [[buffer(0)]],
     texture2d<float, access::sample> accum [[texture(0)]],
     texture2d<float, access::sample> bloom [[texture(1)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::nearest);
+    // ndc.xy ∈ [-1, 1] maps 1:1 to the accumulator texture since this
+    // pass renders to the history texture at accum resolution.
+    float2 uv = in.ndc * 0.5 + 0.5;
+    uv.y = 1.0 - uv.y;
+
+    float n = max(1.0, float(u.sample_count));
+    float3 c = max(accum.sample(s, uv).rgb / n, 0.0);
+
+    // Magica-style bloom composite: bright neighborhood reads gathered
+    // into the bloom texture get blended in. Where bloom weight `b.a`
+    // is high (lots of nearby pixels above threshold), the original
+    // splash gets faded out and replaced by the smoothed bloom
+    // contribution; where `b.a` is zero, original is preserved. The
+    // intensity slider lerps between "no bloom" and "full Magica look".
+    if (u.bloom_intensity > 0.0) {
+        float bn = max(1.0, float(u.bloom_sample_count));
+        float4 b = bloom.sample(s, uv) / bn;
+        float3 blended = b.rgb + c * max(1.0 - b.a, 0.0);
+        c = mix(c, blended, u.bloom_intensity);
+    }
+
+    if (u.aces_tonemap != 0u) {
+        const float a = 2.51, b = 0.03, c1 = 2.43, d = 0.59, e = 0.14;
+        c = saturate((c * (a * c + b)) / (c * (c1 * c + d) + e));
+        c = select(12.92 * c,
+                   1.055 * pow(c, 1.0 / 2.4) - 0.055,
+                   c > 0.0031308);
+    } else {
+        c = pow(c, 1.0 / 2.2);
+    }
+
+    // Output the tonemapped current value. Hardware blend factors at
+    // pass write time do the EMA mix with whatever's in the render
+    // target (the previous frame's blended output). Alpha = 1 lets us
+    // use BlendAlpha as the blend factor name.
+    return float4(c, 1.0);
+}
+
+// Display pass — samples the EMA-composed history texture and writes
+// to the drawable with letterbox/region clipping. The actual tonemap
+// + bloom + EMA blend has already happened in ema_compose_fragment;
+// this pass is now just a resolution-mapping copy.
+fragment float4 display_fragment(
+    VertOut in [[stage_in]],
+    constant DisplayUniforms& u [[buffer(0)]],
+    texture2d<float, access::sample> composed [[texture(0)]])
 {
     // Linear so the display pass blends sensibly when the accumulator
     // is rendered at a different resolution than the drawable
@@ -1619,7 +1782,27 @@ fragment float4 display_fragment(
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     // Map drawable NDC [-1, 1] to a centered region of size
     // (region_w, region_h) — pixels outside it are letterbox / pillarbox
-    // bars. Inside, scale to [0, 1] for the accum sample.
+    // bars. Inside, scale to [0, 1] for the composed sample.
+    float2 ndc = in.ndc;
+    if (abs(ndc.x) > u.region_w || abs(ndc.y) > u.region_h) {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+    float2 uv = float2(ndc.x / u.region_w, ndc.y / u.region_h) * 0.5 + 0.5;
+    uv.y = 1.0 - uv.y;
+    float3 c = composed.sample(s, uv).rgb;
+    return float4(c, 1.0);
+}
+
+// Legacy display fragment kept for the headless export path —
+// composes from accum+bloom directly (no EMA history), so single-shot
+// exports are deterministic and don't need ping-pong texture state.
+fragment float4 display_fragment_direct(
+    VertOut in [[stage_in]],
+    constant DisplayUniforms& u [[buffer(0)]],
+    texture2d<float, access::sample> accum [[texture(0)]],
+    texture2d<float, access::sample> bloom [[texture(1)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
     float2 ndc = in.ndc;
     if (abs(ndc.x) > u.region_w || abs(ndc.y) > u.region_h) {
         return float4(0.0, 0.0, 0.0, 1.0);
@@ -1630,12 +1813,6 @@ fragment float4 display_fragment(
     float n = max(1.0, float(u.sample_count));
     float3 c = max(v.rgb / n, 0.0);
 
-    // Magica-style bloom composite: bright neighborhood reads gathered
-    // into the bloom texture get blended in. Where bloom weight `b.a`
-    // is high (lots of nearby pixels above threshold), the original
-    // splash gets faded out and replaced by the smoothed bloom
-    // contribution; where `b.a` is zero, original is preserved. The
-    // intensity slider lerps between "no bloom" and "full Magica look".
     if (u.bloom_intensity > 0.0) {
         float bn = max(1.0, float(u.bloom_sample_count));
         float4 b = bloom.sample(s, uv) / bn;

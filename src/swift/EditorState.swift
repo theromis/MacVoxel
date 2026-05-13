@@ -302,6 +302,10 @@ final class EditorState {
         get { _ = tick; return bridge.splashTilePx }
         set { bridge.splashTilePx = newValue; tick &+= 1 }
     }
+    var emaFloor: Float {
+        get { _ = tick; return bridge.emaFloor }
+        set { bridge.emaFloor = newValue; tick &+= 1 }
+    }
     var bloomEnabled: Bool {
         get { _ = tick; return bridge.bloomEnabled }
         set { bridge.bloomEnabled = newValue; tick &+= 1 }

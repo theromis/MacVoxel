@@ -22,7 +22,7 @@ struct LightPanel: View {
 
             sectionHeader("Splash mode (indirect)")
             Toggle("Splash mode", isOn: $state.splashMode)
-                .help("Tile-correlated BRDF directions + tile-correlated NEE light selection + proportional indirect clamp. Reproduces Magica's stochastic-OFF aesthetic. Composes with Area-light NEE: NEE on + Splash on = smooth direct halo + splashy indirect (Magica's full hybrid).")
+                .help("Tile-correlated BRDF directions + tile-correlated NEE light selection + proportional indirect clamp. Composes with Area-light NEE: Splash + NEE on ≈ MV's SS-GI ON (smooth + correlated). Splash on + NEE off ≈ MV's SS-GI OFF (shaped indirect splashes, no smooth halo).")
             row(label: "Splash clamp") {
                 FloatSliderRow(value: $state.indirectClampL, range: 0...32,
                                format: "%.1f")
@@ -40,6 +40,11 @@ struct LightPanel: View {
             }
             .disabled(!state.splashMode)
             .help("Correlation scale (pixels). One full noise sweep per `scale × 64` screen pixels. Only has visible effect when Splash jitter > 0.")
+            row(label: "Temporal smooth") {
+                FloatSliderRow(value: $state.emaFloor, range: 0...1,
+                               format: "%.3f")
+            }
+            .help("Temporal-EMA blend weight on the displayed image — the `weight` in MagicaVoxel's pt_post.glsl mix(tex_last, dst, weight). Smaller = more smoothing.  0 = none (each frame's running mean displayed raw — splash popping visible).  0.05 ≈ 20-frame trail (heavy smoothing, sticky response to lighting changes).  0.5 = 2-frame trail (light smoothing).  1.0 = no smoothing (equivalent to 0).")
 
             sectionHeader("Bloom (splash → halo)")
             Toggle("Enable bloom", isOn: $state.bloomEnabled)

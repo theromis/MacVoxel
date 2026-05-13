@@ -493,6 +493,9 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 - (NSInteger)splashTilePx { return RS.splash_tile_px; }
 - (void)setSplashTilePx:(NSInteger)v { RS.splash_tile_px = static_cast<int>(v); }
 
+- (float)emaFloor { return RS.ema_floor; }
+- (void)setEmaFloor:(float)v { RS.ema_floor = v; }
+
 - (BOOL)bloomEnabled { return RS.bloom_enabled; }
 - (void)setBloomEnabled:(BOOL)v { RS.bloom_enabled = (v == YES); }
 

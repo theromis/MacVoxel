@@ -60,15 +60,25 @@ struct RenderSettings {
     // produces a structured, splotchy noise character distinct from the
     // smooth NEE-on case. Sun NEE is independent of this flag.
     bool area_light_nee = true;
-    // Magica-style "stochastic OFF" splash bundle, orthogonal to
-    // area-light NEE: when on, BRDF direction sampling uses a tile-
-    // correlated jitter stream (instead of per-pixel PCG), NEE
-    // light-selection / face-sampling randoms ALSO use that stream
-    // (so adjacent pixels in a tile evaluate the same emissive face,
-    // not different ones), and an indirect proportional clamp fires
-    // on emit hits at bounce >= 1 to keep indirect-path variance from
-    // producing fireflies. The hybrid (NEE on + splash_mode on)
-    // reproduces Magica's smooth direct halo + splashy indirect.
+    // Magica-style "splash bundle" — orthogonal to area-light NEE.
+    // When on: BRDF direction sampling uses a tile-correlated jitter
+    // stream (instead of per-pixel PCG); NEE light-selection / face-
+    // sampling randoms ALSO use that stream (so adjacent pixels in a
+    // tile evaluate the same emissive face, not different ones); and
+    // an indirect proportional clamp fires on emit hits at bounce >= 1
+    // to keep indirect-path variance from producing fireflies.
+    //
+    // Maps to MagicaVoxel's two SS-GI modes via `area_light_nee`:
+    //   splash_mode + area_light_nee ON  → MV's SS-GI ON
+    //     (NEE + MIS + correlated noise + clamp).
+    //   splash_mode + area_light_nee OFF → MV's SS-GI OFF
+    //     (no area NEE; BSDF discovery only; correlated noise + clamp).
+    //
+    // splash_mode ON + area_light_nee ON is our default — it's the
+    // smoother of the two and produces the look most people associate
+    // with MV's rendering, even though strictly speaking it matches
+    // MV's SS-GI ON, not OFF. Flip area_light_nee off to see the
+    // explicit MV SS-GI OFF "shaped splashes / no smooth halo" look.
     bool splash_mode = true;
     // Tuning knob for the proportional clamp on indirect contributions
     // (both NEE shadow rays and BSDF-walk emit arrivals) when
@@ -90,6 +100,32 @@ struct RenderSettings {
     // `splash_tile_px` controls how slowly the correlated jitter
     // varies across the screen.
     int splash_tile_px = 16;
+    // Temporal-EMA blend weight for the display compose pass.
+    // Mirrors MagicaVoxel's `weight` parameter in pt_post.glsl —
+    // their `mix(tex_last, dst, weight)` blend is what we're emulating
+    // here. The compose fragment evaluates
+    //   displayed_now = mix(displayed_prev, current_mean, weight).
+    //
+    // Smaller weight = heavier smoothing (longer trail):
+    //   0.0  → no smoothing — display = current_mean each frame, raw,
+    //          identical to the pre-EMA behavior. Per-frame splash
+    //          popping is visible.
+    //   0.05 → ≈ 20-frame trailing average. Strongly suppresses
+    //          per-sample variance from frame 2 onward; the
+    //          displayed image visibly lags lighting changes for
+    //          ~20 frames before catching up.
+    //   0.5  → ≈ 2-frame trailing average. Light smoothing.
+    //   1.0  → full weight on the current frame, history discarded —
+    //          equivalent to 0.0.
+    //
+    // First frame after a reset (camera move, scene edit) always uses
+    // weight 1.0 internally since there's no history to blend against.
+    //
+    // Trade-off: any value other than 0 or 1 introduces a small bias —
+    // the displayed image lags the true running mean — but kills the
+    // per-frame variance that makes splash mode look "noisy". This is
+    // the noise floor Other Claude was reporting against MV.
+    float ema_floor = 0.05f;
     // Stochastic threshold-gated bloom — drives Magica's smooth-halo
     // aesthetic on top of the path-traced splash output. For each
     // display pixel, a separate bloom pass samples the accumulator at

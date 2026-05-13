@@ -197,6 +197,9 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, assign) float indirectClampL;
 @property (nonatomic, assign) float splashJitter;
 @property (nonatomic, assign) NSInteger splashTilePx;
+// Temporal-EMA smoothing floor (0..1). 0 disables; ~0.05 gives a
+// ~20-frame trailing smooth on top of the per-sample running mean.
+@property (nonatomic, assign) float emaFloor;
 
 @property (nonatomic, assign) BOOL bloomEnabled;
 @property (nonatomic, assign) float bloomIntensity;

@@ -100,8 +100,12 @@ struct DisplayUniforms {
     float region_h;
     float bloom_intensity;       // 0 = off, 1 = full bloom composite
     uint32_t bloom_sample_count; // for dividing accumulated bloom buffer
+    // Temporal-EMA blend weight applied by ema_compose_fragment.
+    //   1.0  → no blend (current frame passes through).
+    //   <1.0 → mix(history, current, w). Smaller = heavier smoothing.
+    // Computed CPU-side as max(1/(sample_count+1), ema_floor).
+    float ema_weight;
     float _pad0;
-    float _pad1;
 };
 
 struct BloomUniforms {
@@ -128,8 +132,31 @@ struct BloomUniforms {
     id<MTLRenderPipelineState> _pathPipeline;
     id<MTLRenderPipelineState> _bloomPipeline;
     id<MTLRenderPipelineState> _displayPipeline;
+    // Direct (accum+bloom) display pipeline kept for the headless export
+    // path — that path is one-shot and doesn't need the EMA's
+    // ping-pong texture state.
+    id<MTLRenderPipelineState> _displayDirectPipeline;
+    // Temporal-EMA compose pipeline: reads accum + bloom + previous
+    // history, writes the blended tonemapped value to the new history
+    // texture. The display pipeline then samples that history into
+    // the drawable. Mirrors MagicaVoxel's pt_post.glsl mix pattern.
+    id<MTLRenderPipelineState> _emaComposePipeline;
     id<MTLTexture> _accumTexture;
     id<MTLTexture> _bloomTexture;
+    // Temporal-EMA history texture. The compose pass renders into this
+    // with hardware alpha-blending using blend_color.a = ema_weight as
+    // the source factor, so the texture content evolves as
+    //   history' = history * (1 - ema_weight) + current * ema_weight.
+    // Single texture; no ping-pong. Accum-sized, RGBA16Float for enough
+    // precision in tonemapped color space.
+    //
+    // `_emaHistoryValid` flips to NO whenever the accumulator resets;
+    // the next compose pass uses loadAction=Clear (so dst=0) and
+    // blendColor.a=1 (so result=current). After that pass, the
+    // history is valid and ongoing frames use loadAction=Load + the
+    // user's ema_floor weight.
+    id<MTLTexture> _emaHistory;
+    BOOL _emaHistoryValid;
     CGSize _accumSize;
 
     id<MTLBuffer> _coarseBuffer;
@@ -214,7 +241,9 @@ struct BloomUniforms {
     id<MTLFunction> vfn = [library newFunctionWithName:@"pt_vertex"];
     id<MTLFunction> ptffn = [library newFunctionWithName:@"pt_fragment"];
     id<MTLFunction> bloomffn = [library newFunctionWithName:@"bloom_fragment"];
+    id<MTLFunction> emaffn = [library newFunctionWithName:@"ema_compose_fragment"];
     id<MTLFunction> dispffn = [library newFunctionWithName:@"display_fragment"];
+    id<MTLFunction> dispdirffn = [library newFunctionWithName:@"display_fragment_direct"];
 
     // Accumulation pipeline: writes float4 RGBA, additive blend (One/One)
     // so each frame's contribution adds into the accum texture.
@@ -265,8 +294,44 @@ struct BloomUniforms {
         }
     }
 
-    // Display pipeline: samples the accum texture, divides by sample
-    // count, writes to MTKView's drawable.
+    // EMA compose pipeline: writes the tonemapped current value to the
+    // history texture with hardware alpha-blending driven by
+    // setBlendColorRed:green:blue:alpha:.  Source factor reads
+    // blend_color.a (= ema_weight), destination factor reads
+    // 1 - blend_color.a — so the ROP evaluates
+    //   dst' = mix(dst, src, ema_weight)
+    // which is exactly Magica's pt_post.glsl mix(tex_last, dst, weight).
+    // Using hardware blend instead of in-shader sampling of a previous-
+    // frame texture eliminates the ping-pong logic, the read/write
+    // hazard, and the "did the history texture actually persist" failure
+    // mode that the old shader-based version had.
+    {
+        MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+        d.label = @"PathTraceEMACompose";
+        d.vertexFunction = vfn;
+        d.fragmentFunction = emaffn;
+        d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        d.colorAttachments[0].blendingEnabled = YES;
+        d.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        d.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+        d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorBlendAlpha;
+        d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorBlendAlpha;
+        d.colorAttachments[0].destinationRGBBlendFactor =
+            MTLBlendFactorOneMinusBlendAlpha;
+        d.colorAttachments[0].destinationAlphaBlendFactor =
+            MTLBlendFactorOneMinusBlendAlpha;
+        _emaComposePipeline =
+            [_device newRenderPipelineStateWithDescriptor:d error:&error];
+        if (_emaComposePipeline == nil) {
+            fprintf(stderr, "MacVoxel: failed to build EMA compose pipeline: %s\n",
+                    [[error localizedDescription] UTF8String]);
+            return nil;
+        }
+    }
+
+    // Display pipeline: samples the EMA-composed history texture (the
+    // tonemapped frame from the just-run compose pass), writes to the
+    // MTKView's drawable with letterbox/region clipping.
     {
         MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
         d.label = @"PathTraceDisplay";
@@ -276,6 +341,26 @@ struct BloomUniforms {
         _displayPipeline = [_device newRenderPipelineStateWithDescriptor:d error:&error];
         if (_displayPipeline == nil) {
             fprintf(stderr, "MacVoxel: failed to build display pipeline: %s\n",
+                    [[error localizedDescription] UTF8String]);
+            return nil;
+        }
+    }
+
+    // Direct display pipeline: composes from accum+bloom in one shot,
+    // bypassing the EMA history. Used by exportPNGToURL since headless
+    // / one-shot exports don't have a sensible "previous frame" to
+    // blend with — they need a deterministic snapshot of the current
+    // accumulator.
+    {
+        MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+        d.label = @"PathTraceDisplayDirect";
+        d.vertexFunction = vfn;
+        d.fragmentFunction = dispdirffn;
+        d.colorAttachments[0].pixelFormat = colorFormat;
+        _displayDirectPipeline =
+            [_device newRenderPipelineStateWithDescriptor:d error:&error];
+        if (_displayDirectPipeline == nil) {
+            fprintf(stderr, "MacVoxel: failed to build direct-display pipeline: %s\n",
                     [[error localizedDescription] UTF8String]);
             return nil;
         }
@@ -586,6 +671,22 @@ struct BloomUniforms {
     _bloomTexture = [_device newTextureWithDescriptor:tdb];
     _bloomTexture.label = @"PTBloom";
 
+    // EMA history texture: same dimensions as accum, RGBA16Float for
+    // enough precision to hold tonemapped+blended values across many
+    // EMA frames without banding. Render target + shader-read since
+    // the compose pass writes it (hardware blend) and the display pass
+    // samples it.
+    MTLTextureDescriptor* tdh =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                           width:static_cast<NSUInteger>(size.width)
+                                                          height:static_cast<NSUInteger>(size.height)
+                                                       mipmapped:NO];
+    tdh.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    tdh.storageMode = MTLStorageModePrivate;
+    _emaHistory = [_device newTextureWithDescriptor:tdh];
+    _emaHistory.label = @"PTEMAHistory";
+    _emaHistoryValid = NO;
+
     _accumSize = size;
     _wantsClear = YES;
 }
@@ -709,6 +810,11 @@ struct BloomUniforms {
     if (_wantsClear) {
         _sampleCount = 0;
         _wantsClear = NO;
+        // EMA history is stale once the accumulator resets — start
+        // fresh so the first post-reset frame doesn't blend with
+        // pre-reset pixels (which would produce a "fade-from-old"
+        // ghost).
+        _emaHistoryValid = NO;
     }
 
     if (_coarseBuffer == nil || _poolBuffer == nil ||
@@ -749,43 +855,116 @@ struct BloomUniforms {
     }
 
     // ---------- Pass 3: tonemap + bloom composite into drawable ---------
+    // Two-pass display: an EMA compose pass that runs at accum size and
+    // bakes tonemapped+bloom+temporal-blend into the new history
+    // texture, then a tiny display pass that copies that history into
+    // the drawable with letterbox/region clipping.
+
+    // Per-frame uniforms used by both passes (display ignores the
+    // tonemap/bloom fields).
+    DisplayUniforms du;
+    du.sample_count = _sampleCount;
+    du.aces_tonemap = rs.aces_tonemap ? 1u : 0u;
+    // Always fill the viewport vertically so the path-trace display
+    // matches the raycast preview's framing (vertical FOV is fixed,
+    // so vertical extent is identical regardless of accum aspect).
+    // If the path-trace aspect is wider than the drawable, ndc.x
+    // outside [-1, 1] never fires the display fragment's discard —
+    // ndc.x / region_w stays sub-unit and we sample only the center
+    // crop of the accum. If narrower, region_w < 1 and we get
+    // pillarbox bars on the sides.
+    const float ar = static_cast<float>(_accumSize.width) /
+                     static_cast<float>(_accumSize.height);
+    const float ad = static_cast<float>(drawable.width) /
+                     static_cast<float>(drawable.height);
+    du.region_w = ar / ad;
+    du.region_h = 1.0f;
+    du.bloom_intensity = want_bloom ? rs.bloom_intensity : 0.0f;
+    du.bloom_sample_count = _bloomSampleCount;
+    // Temporal-EMA weight per MagicaVoxel's pt_post.glsl `mix(tex_last,
+    // dst, weight)` shape. The compose fragment computes
+    // `display = mix(history, current_mean, weight)`.
+    //
+    // We treat `rs.ema_floor` as the steady-state blend weight: small
+    // values = heavy smoothing (longer trail), 1.0 = no smoothing
+    // (current frame passes through unchanged). 0 also means no
+    // smoothing — we force `weight = 1.0` so the compose pass is a
+    // no-op rather than displaying a zeroed history.
+    //
+    // Earlier draft computed `weight = max(1/N, floor)` reasoning that
+    // 1/N preserves the unbiased running mean during early
+    // accumulation. That gave the slider zero visible effect for the
+    // first ~1/floor frames because weight stayed at 1/N regardless of
+    // the user setting; by the time the floor kicked in the underlying
+    // running mean had already settled. Using `weight = floor`
+    // directly from frame 2 onwards introduces a small bias (the
+    // estimator now lags the true running mean) but makes the slider
+    // actually do something at every accumulation stage.
+    //
+    // First frame after a clear is always weight 1.0 — there's no
+    // history to blend against.
+    const float ema_floor = std::clamp(rs.ema_floor, 0.0f, 1.0f);
+    float ema_weight = ema_floor;
+    if (!_emaHistoryValid || ema_floor <= 0.0f) ema_weight = 1.0f;
+    du.ema_weight = ema_weight;
+    du._pad0 = 0.0f;
+
+    // Pass A — EMA compose: write the tonemapped current frame into
+    // the history texture. The pipeline state has hardware alpha-
+    // blending enabled (BlendAlpha / OneMinusBlendAlpha) and
+    // setBlendColor:alpha: drives the EMA weight, so the ROP evaluates
+    //   dst' = mix(dst, src, ema_weight)
+    // automatically without any shader-side history sampling.
+    //
+    // First frame after a reset: history texture content is stale.
+    // We loadAction=Clear (so dst=0) and force blend_color.a=1.0
+    // (so result = current with no contribution from dst). After this
+    // pass, the history is valid; subsequent frames loadAction=Load
+    // (so dst = previous frame's blended output) and use the user's
+    // ema_floor as the blend alpha.
     {
-        MTLRenderPassDescriptor* rpd = view.currentRenderPassDescriptor;
-        if (rpd == nil) return;
+        MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+        rpd.colorAttachments[0].texture = _emaHistory;
+        rpd.colorAttachments[0].loadAction = _emaHistoryValid
+            ? MTLLoadActionLoad
+            : MTLLoadActionClear;
+        rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+        rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
         id<MTLRenderCommandEncoder> enc =
             [cmd renderCommandEncoderWithDescriptor:rpd];
-        enc.label = @"PathTraceDisplay";
-
-        DisplayUniforms du;
-        du.sample_count = _sampleCount;
-        du.aces_tonemap =
-            rs.aces_tonemap ? 1u : 0u;
-        // Always fill the viewport vertically so the path-trace display
-        // matches the raycast preview's framing (vertical FOV is fixed,
-        // so vertical extent is identical regardless of accum aspect).
-        // If the path-trace aspect is wider than the drawable, ndc.x
-        // outside [-1, 1] never fires the display fragment's discard —
-        // ndc.x / region_w stays sub-unit and we sample only the center
-        // crop of the accum. If narrower, region_w < 1 and we get
-        // pillarbox bars on the sides.
-        const float ar = static_cast<float>(_accumSize.width) /
-                         static_cast<float>(_accumSize.height);
-        const float ad = static_cast<float>(drawable.width) /
-                         static_cast<float>(drawable.height);
-        du.region_w = ar / ad;
-        du.region_h = 1.0f;
-        du.bloom_intensity = want_bloom ? rs.bloom_intensity : 0.0f;
-        du.bloom_sample_count = _bloomSampleCount;
-        du._pad0 = du._pad1 = 0.0f;
-
-        [enc setRenderPipelineState:_displayPipeline];
+        enc.label = @"PathTraceEMACompose";
+        [enc setRenderPipelineState:_emaComposePipeline];
         [enc setCullMode:MTLCullModeNone];
+        // Hardware-blend factor for the EMA mix. With history invalid
+        // (just-cleared dst) we want full src so the first frame after
+        // a reset displays the unblended current value.
+        const float blend_a = _emaHistoryValid ? ema_weight : 1.0f;
+        [enc setBlendColorRed:0.0 green:0.0 blue:0.0 alpha:blend_a];
         [enc setFragmentBytes:&du length:sizeof(du) atIndex:0];
         [enc setFragmentTexture:_accumTexture atIndex:0];
         [enc setFragmentTexture:_bloomTexture atIndex:1];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [enc endEncoding];
     }
+
+    // Pass B — display: sample the just-written history texture into
+    // the drawable with letterbox/region clipping.
+    {
+        MTLRenderPassDescriptor* rpd = view.currentRenderPassDescriptor;
+        if (rpd == nil) return;
+        id<MTLRenderCommandEncoder> enc =
+            [cmd renderCommandEncoderWithDescriptor:rpd];
+        enc.label = @"PathTraceDisplay";
+        [enc setRenderPipelineState:_displayPipeline];
+        [enc setCullMode:MTLCullModeNone];
+        [enc setFragmentBytes:&du length:sizeof(du) atIndex:0];
+        [enc setFragmentTexture:_emaHistory atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [enc endEncoding];
+    }
+
+    // History is now valid and will be loaded next frame.
+    _emaHistoryValid = YES;
 
     ctx->render_progress.sample_count = _sampleCount;
 }
@@ -1140,8 +1319,14 @@ struct BloomUniforms {
     du.region_h = 1.0f;
     du.bloom_intensity = std::max(0.0f, bloomIntensity);
     du.bloom_sample_count = _bloomSampleCount;
-    du._pad0 = du._pad1 = 0.0f;
-    [enc setRenderPipelineState:_displayPipeline];
+    du.ema_weight = 1.0f;   // export is one-shot; no history to blend
+    du._pad0 = 0.0f;
+    // Export uses the direct pipeline (accum + bloom → tonemap →
+    // drawable) — bypasses the EMA history entirely so the saved PNG
+    // is a deterministic snapshot of the current accumulator state,
+    // independent of which ping-pong texture was the "current" one
+    // when the user hit export.
+    [enc setRenderPipelineState:_displayDirectPipeline];
     [enc setCullMode:MTLCullModeNone];
     [enc setFragmentBytes:&du length:sizeof(du) atIndex:0];
     [enc setFragmentTexture:_accumTexture atIndex:0];
