@@ -4,7 +4,14 @@ struct MacVoxelApp: App {
     @State private var state = EditorState()
 
     var body: some Scene {
-        WindowGroup {
+        // Single-document app: `Window` enforces one window, so a
+        // Finder "Open With" routes `.onOpenURL` into the existing
+        // window's `state` (replacing the current document) rather
+        // than spawning a second window with its own EditorState.
+        // The data model assumes one in-flight render at a time;
+        // letting WindowGroup spin up a second window had two
+        // path-tracers fighting over the same UI.
+        Window("MacVoxel", id: "main") {
             ContentView()
                 .environment(state)
                 .navigationTitle(state.documentTitle)
