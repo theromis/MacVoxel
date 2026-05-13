@@ -46,38 +46,6 @@ struct LightPanel: View {
             }
             .help("Temporal-EMA blend weight on the displayed image — the `weight` in MagicaVoxel's pt_post.glsl mix(tex_last, dst, weight). Smaller = more smoothing.  0 = none (each frame's running mean displayed raw — splash popping visible).  0.05 ≈ 20-frame trail (heavy smoothing, sticky response to lighting changes).  0.5 = 2-frame trail (light smoothing).  1.0 = no smoothing (equivalent to 0).")
 
-            sectionHeader("Bloom (splash → halo)")
-            Toggle("Enable bloom", isOn: $state.bloomEnabled)
-                .help("Magica-style stochastic threshold-gated bloom. Smears bright pt-output pixels into smooth halos. Independent of bounce count — works at low sample counts.")
-            row(label: "Intensity") {
-                FloatSliderRow(value: $state.bloomIntensity, range: 0...1,
-                               format: "%.2f")
-            }
-            .disabled(!state.bloomEnabled)
-            row(label: "Threshold") {
-                FloatSliderRow(value: $state.bloomThreshold, range: 0...8,
-                               format: "%.2f")
-            }
-            .disabled(!state.bloomEnabled)
-            .help("Linear-space brightness gate. Only pt-pixels above this contribute to bloom.")
-            row(label: "Radius min") {
-                FloatSliderRow(value: $state.bloomRadiusLog0, range: -3...4,
-                               format: "%.1f")
-            }
-            .disabled(!state.bloomEnabled)
-            .help("log of minimum bloom sample radius in pixels.")
-            row(label: "Radius max") {
-                FloatSliderRow(value: $state.bloomRadiusLog1, range: 0...8,
-                               format: "%.1f")
-            }
-            .disabled(!state.bloomEnabled)
-            .help("log of maximum bloom sample radius. exp(7) ≈ 1100px.")
-            row(label: "Samples") {
-                IntSliderRow(value: $state.bloomNumSamples, range: 1...96)
-            }
-            .disabled(!state.bloomEnabled)
-            .help("Taps per output pixel per frame. More = less noisy halo, slower.")
-
             sectionHeader("Sky")
             Toggle("Atmospheric sky", isOn: $state.atmosphericSky)
                 .help("Nishita scattering. Off = flat sky_intensity tint.")

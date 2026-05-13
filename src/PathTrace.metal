@@ -103,8 +103,6 @@ struct DisplayUniforms {
     uint  aces_tonemap;
     float region_w;
     float region_h;
-    float bloom_intensity;       // 0 = no bloom, 1 = full Magica-style mix
-    uint  bloom_sample_count;    // for averaging accumulated bloom buffer
     // Temporal-EMA weight applied in `ema_compose_fragment`:
     //   1.0 = no blend (this frame's tonemapped value passes through
     //                   unchanged; behaviour identical to no EMA).
@@ -118,23 +116,6 @@ struct DisplayUniforms {
     // Mirrors MagicaVoxel's `weight` parameter in pt_post.glsl, where
     // it controls the same mix(tex_last, dst, weight) blend.
     float ema_weight;
-    float _pad0;
-};
-
-// Stochastic threshold-gated bloom (Magica-style). Per output pixel,
-// gather a small number of accumulator-texture reads at log-uniform
-// random offsets; only contributions whose brightest channel exceeds
-// `threshold` accumulate. Output `.rgb` is mean contribution; `.a` is
-// mean threshold-pass weight (Magica's `c.w`, used in the composite).
-struct BloomUniforms {
-    uint  sample_count;       // pt-accumulator sample count for normalization
-    int   num_samples;        // bloom taps per output pixel
-    float threshold;          // linear brightness above which a tap contributes
-    float clamp_b;            // per-tap proportional clamp; <= 0 disables
-    float radius_log0;        // exp(log0) = min sample radius in pixels
-    float radius_log1;        // exp(log1) = max sample radius in pixels
-    uint  frame_seed;         // RNG seed (camera/setting hash)
-    float _pad0;
 };
 
 struct Chunk { uint8_t cells[4096]; };
@@ -1637,64 +1618,6 @@ fragment float4 pt_fragment(
     return float4(radiance, 1.0);
 }
 
-// Stochastic threshold-gated bloom — a Magica-style post-process that
-// adds glow on bright pixels. NOTE: this contributes to the final
-// look but is *not* what produces MV's smooth halo on diffuse
-// surfaces (Other Claude verified by disabling MV's bloom — halo
-// survives). The actual halo in MV comes from the BSDF random walk
-// reliably finding nearby emitters and the temporal EMA blend in
-// pt_post.glsl averaging contributions across thousands of samples.
-//
-// For each output pixel, take `num_samples` taps at log-uniform
-// random radii / uniform random angles into the pt-accumulator;
-// threshold-gate each tap so only above-`threshold` (bright) pixels
-// contribute; output mean color in `.rgb` and mean threshold-pass
-// weight in `.a` (consumed by display_fragment's composite).
-// Compared to a fixed-radius Gaussian, the log-uniform radius
-// distribution covers a wide range of distances with few taps and
-// produces a soft glow with natural-looking falloff.
-fragment float4 bloom_fragment(
-    VertOut in [[stage_in]],
-    constant BloomUniforms& u [[buffer(0)]],
-    texture2d<float, access::sample> accum [[texture(0)]])
-{
-    uint2 pix = uint2(in.position.xy);
-    uint rng = (pix.x * 1973u) ^ (pix.y * 9277u) ^ (u.frame_seed * 26699u);
-    pcg(rng); pcg(rng);
-
-    const float n = max(1.0, float(u.sample_count));
-    const int taps = max(1, u.num_samples);
-    constexpr sampler s(coord::pixel,
-                        filter::linear,
-                        address::clamp_to_edge);
-
-    float3 L = float3(0.0);
-    float  W = 0.0;
-    for (int i = 0; i < taps; ++i) {
-        float r1 = rand1(rng);
-        float r2 = rand1(rng);
-        float radius = exp(mix(u.radius_log0, u.radius_log1, r2));
-        float angle = 6.2831853 * r1;
-        float2 offset = float2(cos(angle), sin(angle)) * radius;
-        float2 sample_px = float2(pix) + offset + 0.5;
-
-        float4 raw = accum.sample(s, sample_px);
-        float3 c = max(raw.rgb / n, 0.0);
-
-        float maxc = max(c.x, max(c.y, c.z));
-        float w = step(u.threshold, maxc);
-
-        if (u.clamp_b > 0.0) {
-            c = clamp_scale(c, u.clamp_b);
-        }
-        L += c * w;
-        W += w;
-    }
-
-    float inv_taps = 1.0 / float(taps);
-    return float4(L * inv_taps, W * inv_taps);
-}
-
 // Temporal-EMA compose pass — Magica's `pt_post.glsl mix(tex_last, dst,
 // weight)` pattern. Runs at accumulator resolution (NOT drawable
 // resolution) and writes the tonemapped current frame value into the
@@ -1725,8 +1648,7 @@ fragment float4 bloom_fragment(
 fragment float4 ema_compose_fragment(
     VertOut in [[stage_in]],
     constant DisplayUniforms& u [[buffer(0)]],
-    texture2d<float, access::sample> accum [[texture(0)]],
-    texture2d<float, access::sample> bloom [[texture(1)]])
+    texture2d<float, access::sample> accum [[texture(0)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::nearest);
     // ndc.xy ∈ [-1, 1] maps 1:1 to the accumulator texture since this
@@ -1736,19 +1658,6 @@ fragment float4 ema_compose_fragment(
 
     float n = max(1.0, float(u.sample_count));
     float3 c = max(accum.sample(s, uv).rgb / n, 0.0);
-
-    // Magica-style bloom composite: bright neighborhood reads gathered
-    // into the bloom texture get blended in. Where bloom weight `b.a`
-    // is high (lots of nearby pixels above threshold), the original
-    // splash gets faded out and replaced by the smoothed bloom
-    // contribution; where `b.a` is zero, original is preserved. The
-    // intensity slider lerps between "no bloom" and "full Magica look".
-    if (u.bloom_intensity > 0.0) {
-        float bn = max(1.0, float(u.bloom_sample_count));
-        float4 b = bloom.sample(s, uv) / bn;
-        float3 blended = b.rgb + c * max(1.0 - b.a, 0.0);
-        c = mix(c, blended, u.bloom_intensity);
-    }
 
     if (u.aces_tonemap != 0u) {
         const float a = 2.51, b = 0.03, c1 = 2.43, d = 0.59, e = 0.14;
@@ -1769,8 +1678,8 @@ fragment float4 ema_compose_fragment(
 
 // Display pass — samples the EMA-composed history texture and writes
 // to the drawable with letterbox/region clipping. The actual tonemap
-// + bloom + EMA blend has already happened in ema_compose_fragment;
-// this pass is now just a resolution-mapping copy.
+// + EMA blend has already happened in ema_compose_fragment; this pass
+// is now just a resolution-mapping copy.
 fragment float4 display_fragment(
     VertOut in [[stage_in]],
     constant DisplayUniforms& u [[buffer(0)]],
@@ -1793,14 +1702,13 @@ fragment float4 display_fragment(
     return float4(c, 1.0);
 }
 
-// Legacy display fragment kept for the headless export path —
-// composes from accum+bloom directly (no EMA history), so single-shot
-// exports are deterministic and don't need ping-pong texture state.
+// Display fragment used by the headless export path — composes from the
+// accumulator directly (no EMA history), so single-shot exports are
+// deterministic and don't need ping-pong texture state.
 fragment float4 display_fragment_direct(
     VertOut in [[stage_in]],
     constant DisplayUniforms& u [[buffer(0)]],
-    texture2d<float, access::sample> accum [[texture(0)]],
-    texture2d<float, access::sample> bloom [[texture(1)]])
+    texture2d<float, access::sample> accum [[texture(0)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     float2 ndc = in.ndc;
@@ -1812,13 +1720,6 @@ fragment float4 display_fragment_direct(
     float4 v = accum.sample(s, uv);
     float n = max(1.0, float(u.sample_count));
     float3 c = max(v.rgb / n, 0.0);
-
-    if (u.bloom_intensity > 0.0) {
-        float bn = max(1.0, float(u.bloom_sample_count));
-        float4 b = bloom.sample(s, uv) / bn;
-        float3 blended = b.rgb + c * max(1.0 - b.a, 0.0);
-        c = mix(c, blended, u.bloom_intensity);
-    }
 
     if (u.aces_tonemap != 0u) {
         const float a = 2.51, b = 0.03, c1 = 2.43, d = 0.59, e = 0.14;

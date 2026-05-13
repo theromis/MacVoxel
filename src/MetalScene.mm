@@ -175,14 +175,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         return NO;
     }
     const BOOL aces = _ctx->render_settings.aces_tonemap ? YES : NO;
-    const float bloom =
-        (_ctx->render_settings.bloom_enabled &&
-         _ctx->render_settings.bloom_intensity > 0.0f)
-            ? _ctx->render_settings.bloom_intensity
-            : 0.0f;
     return [_pathTraceRenderer exportPNGToURL:url
                                   acesTonemap:aces
-                               bloomIntensity:bloom
                                  commandQueue:_commandQueue
                                         error:error];
 }

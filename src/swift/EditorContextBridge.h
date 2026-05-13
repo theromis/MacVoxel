@@ -201,12 +201,6 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 // ~20-frame trailing smooth on top of the per-sample running mean.
 @property (nonatomic, assign) float emaFloor;
 
-@property (nonatomic, assign) BOOL bloomEnabled;
-@property (nonatomic, assign) float bloomIntensity;
-@property (nonatomic, assign) float bloomThreshold;
-@property (nonatomic, assign) float bloomRadiusLog0;
-@property (nonatomic, assign) float bloomRadiusLog1;
-@property (nonatomic, assign) NSInteger bloomNumSamples;
 @property (nonatomic, assign) NSInteger neeRisCount;    // 1..32
 
 @property (nonatomic, assign) BOOL atmosphericSky;

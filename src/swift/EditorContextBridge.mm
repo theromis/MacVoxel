@@ -496,24 +496,6 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 - (float)emaFloor { return RS.ema_floor; }
 - (void)setEmaFloor:(float)v { RS.ema_floor = v; }
 
-- (BOOL)bloomEnabled { return RS.bloom_enabled; }
-- (void)setBloomEnabled:(BOOL)v { RS.bloom_enabled = (v == YES); }
-
-- (float)bloomIntensity { return RS.bloom_intensity; }
-- (void)setBloomIntensity:(float)v { RS.bloom_intensity = v; }
-
-- (float)bloomThreshold { return RS.bloom_threshold; }
-- (void)setBloomThreshold:(float)v { RS.bloom_threshold = v; }
-
-- (float)bloomRadiusLog0 { return RS.bloom_radius_log0; }
-- (void)setBloomRadiusLog0:(float)v { RS.bloom_radius_log0 = v; }
-
-- (float)bloomRadiusLog1 { return RS.bloom_radius_log1; }
-- (void)setBloomRadiusLog1:(float)v { RS.bloom_radius_log1 = v; }
-
-- (NSInteger)bloomNumSamples { return RS.bloom_num_samples; }
-- (void)setBloomNumSamples:(NSInteger)v { RS.bloom_num_samples = static_cast<int>(v); }
-
 - (NSInteger)neeRisCount { return RS.nee_ris_count; }
 - (void)setNeeRisCount:(NSInteger)v { RS.nee_ris_count = static_cast<int>(v); }
 

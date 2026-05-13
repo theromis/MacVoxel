@@ -64,7 +64,6 @@ namespace macvoxel { class Camera; }
 // on failure, *outError carries an explanation.
 - (BOOL)exportPNGToURL:(NSURL*)url
           acesTonemap:(BOOL)acesTonemap
-       bloomIntensity:(float)bloomIntensity
           commandQueue:(id<MTLCommandQueue>)queue
                  error:(NSError**)outError;
 

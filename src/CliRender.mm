@@ -39,12 +39,6 @@ struct Args {
     float sky_intensity = 1.0f;
     bool override_sun_intensity = false;
     float sun_intensity = 0.0f;
-    bool override_bloom_intensity = false;
-    float bloom_intensity = 0.6f;
-    bool override_bloom_threshold = false;
-    float bloom_threshold = 1.0f;
-    bool override_bloom_samples = false;
-    int bloom_samples = 24;
     bool override_clamp_L = false;
     float clamp_L = 8.0f;
     GlassMode glass_mode = GlassMode::Probabilistic;
@@ -116,18 +110,6 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
             const char* v = need_val("--sun-intensity"); if (!v) return false;
             out->sun_intensity = static_cast<float>(std::atof(v));
             out->override_sun_intensity = true;
-        } else if (eq("--bloom-intensity")) {
-            const char* v = need_val("--bloom-intensity"); if (!v) return false;
-            out->bloom_intensity = static_cast<float>(std::atof(v));
-            out->override_bloom_intensity = true;
-        } else if (eq("--bloom-threshold")) {
-            const char* v = need_val("--bloom-threshold"); if (!v) return false;
-            out->bloom_threshold = static_cast<float>(std::atof(v));
-            out->override_bloom_threshold = true;
-        } else if (eq("--bloom-samples")) {
-            const char* v = need_val("--bloom-samples"); if (!v) return false;
-            out->bloom_samples = std::atoi(v);
-            out->override_bloom_samples = true;
         } else if (eq("--clamp-L")) {
             const char* v = need_val("--clamp-L"); if (!v) return false;
             out->clamp_L = static_cast<float>(std::atof(v));
@@ -235,16 +217,6 @@ int RunCliRender(int argc, const char* argv[]) {
         if (args.override_sun_intensity) {
             ctx.render_settings.sun_intensity = args.sun_intensity;
         }
-        if (args.override_bloom_intensity) {
-            ctx.render_settings.bloom_intensity = args.bloom_intensity;
-            ctx.render_settings.bloom_enabled = args.bloom_intensity > 0.0f;
-        }
-        if (args.override_bloom_threshold) {
-            ctx.render_settings.bloom_threshold = args.bloom_threshold;
-        }
-        if (args.override_bloom_samples) {
-            ctx.render_settings.bloom_num_samples = args.bloom_samples;
-        }
         if (args.override_clamp_L) {
             ctx.render_settings.indirect_clamp_L = args.clamp_L;
         }
@@ -282,14 +254,8 @@ int RunCliRender(int argc, const char* argv[]) {
         }
 
         NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:args.output]];
-        const float bloom_for_export =
-            (ctx.render_settings.bloom_enabled &&
-             ctx.render_settings.bloom_intensity > 0.0f)
-                ? ctx.render_settings.bloom_intensity
-                : 0.0f;
         if (![renderer exportPNGToURL:url
                           acesTonemap:args.aces ? YES : NO
-                       bloomIntensity:bloom_for_export
                          commandQueue:queue
                                 error:&nerr]) {
             std::fprintf(stderr, "export failed: %s\n",

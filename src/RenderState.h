@@ -129,20 +129,6 @@ struct RenderSettings {
     // per-frame variance that makes splash mode look "noisy". This is
     // the noise floor Other Claude was reporting against MV.
     float ema_floor = 0.05f;
-    // Stochastic threshold-gated bloom — drives Magica's smooth-halo
-    // aesthetic on top of the path-traced splash output. For each
-    // display pixel, a separate bloom pass samples the accumulator at
-    // many log-uniform-radius random offsets and accumulates only
-    // contributions above `bloom_threshold`. Composite is done in the
-    // display pass per Magica's formula in pt_post.glsl: bright bloom
-    // regions replace the noisy splash while dim regions fall through.
-    bool bloom_enabled = true;
-    float bloom_intensity = 0.6f;       // 0..1 — composite mix factor
-    float bloom_threshold = 1.0f;       // linear brightness gate
-    float bloom_clamp = 0.0f;           // per-tap proportional clamp; 0 = off
-    float bloom_radius_log0 = -1.0f;    // log of min sample radius (pixels)
-    float bloom_radius_log1 = 5.0f;     // log of max sample radius (pixels)
-    int bloom_num_samples = 24;         // taps per output pixel per frame
     // Resampled importance sampling (RIS) candidate count for direct
     // lighting NEE. Per pixel per frame, draw this many candidates from
     // the source distribution (power-weighted CDF or uniform), reservoir-
