@@ -1158,15 +1158,16 @@ struct BloomUniforms {
         u._pad_jitter[0] = 0.0f;
         u._pad_jitter[1] = 0.0f;
         u._pad_jitter[2] = 0.0f;
-        // Splash bundle (tile-correlated BRDF + clamp) is orthogonal
-        // to NEE — both can be on for the Magica hybrid (smooth direct
-        // halo + splashy indirect with firefly clamp). The clamp value
-        // only applies when splash_mode is on; the shader's per-bounce
-        // gating below decides which contributions actually get clamped.
+        // splash_mode controls only the tile-correlated jitter chain.
+        // The proportional clamp on indirect-bounce emitter
+        // contributions is independent: in scenes with sharp specular
+        // materials a single diffuse→specular→emitter caustic path
+        // produces a per-sample contribution that dominates the average,
+        // and MIS can't suppress it (the BSDF lobe is essentially
+        // delta-aligned with the emitter). The clamp tames those
+        // single-pixel spikes in both splash and reference modes.
         u.bsdf_correlation = rs.splash_mode ? 1u : 0u;
-        u.indirect_clamp_L = rs.splash_mode
-            ? std::max(0.0f, rs.indirect_clamp_L)
-            : 0.0f;
+        u.indirect_clamp_L = std::max(0.0f, rs.indirect_clamp_L);
         u._pad_tail[0] = 0.0f;
         u._pad_tail[1] = 0.0f;
         u._pad_tail[2] = 0.0f;

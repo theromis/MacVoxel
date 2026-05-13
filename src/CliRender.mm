@@ -30,6 +30,7 @@ struct Args {
     uint32_t seed = 1;
     bool aces = true;
     bool area_light_nee = true;
+    bool splash_mode = false;
     bool override_splash_jitter = false;
     float splash_jitter = 0.0f;
     bool override_splash_tile_px = false;
@@ -44,6 +45,8 @@ struct Args {
     float bloom_threshold = 1.0f;
     bool override_bloom_samples = false;
     int bloom_samples = 24;
+    bool override_clamp_L = false;
+    float clamp_L = 8.0f;
     GlassMode glass_mode = GlassMode::Probabilistic;
 };
 
@@ -54,7 +57,8 @@ void PrintUsage() {
         "                       [--samples N] [--bounces N] [--seed N]\n"
         "                       [--no-aces] [--no-area-nee]\n"
         "                       [--sky-intensity F] [--sun-intensity F]\n"
-        "                       [--splash-jitter F] [--splash-tile-px N]\n"
+        "                       [--splash-mode] [--splash-jitter F]\n"
+        "                       [--splash-tile-px N] [--clamp-L F]\n"
         "                       [--glass-mode probabilistic|absorption]\n");
 }
 
@@ -94,6 +98,8 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
             out->aces = false;
         } else if (eq("--no-area-nee")) {
             out->area_light_nee = false;
+        } else if (eq("--splash-mode")) {
+            out->splash_mode = true;
         } else if (eq("--splash-jitter")) {
             const char* v = need_val("--splash-jitter"); if (!v) return false;
             out->splash_jitter = static_cast<float>(std::atof(v));
@@ -122,6 +128,10 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
             const char* v = need_val("--bloom-samples"); if (!v) return false;
             out->bloom_samples = std::atoi(v);
             out->override_bloom_samples = true;
+        } else if (eq("--clamp-L")) {
+            const char* v = need_val("--clamp-L"); if (!v) return false;
+            out->clamp_L = static_cast<float>(std::atof(v));
+            out->override_clamp_L = true;
         } else if (eq("--glass-mode")) {
             const char* v = need_val("--glass-mode"); if (!v) return false;
             if (std::strcmp(v, "probabilistic") == 0) {
@@ -212,6 +222,7 @@ int RunCliRender(int argc, const char* argv[]) {
         // the export pass takes aces_tonemap as an explicit parameter.
         ctx.render_settings.aces_tonemap = args.aces;
         ctx.render_settings.area_light_nee = args.area_light_nee;
+        ctx.render_settings.splash_mode = args.splash_mode;
         if (args.override_splash_jitter) {
             ctx.render_settings.splash_jitter = args.splash_jitter;
         }
@@ -233,6 +244,9 @@ int RunCliRender(int argc, const char* argv[]) {
         }
         if (args.override_bloom_samples) {
             ctx.render_settings.bloom_num_samples = args.bloom_samples;
+        }
+        if (args.override_clamp_L) {
+            ctx.render_settings.indirect_clamp_L = args.clamp_L;
         }
         ctx.render_settings.glass_mode = args.glass_mode;
 

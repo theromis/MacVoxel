@@ -64,15 +64,13 @@ struct RenderSettings {
     // When on: BRDF direction sampling uses a tile-correlated jitter
     // stream (instead of per-pixel PCG); NEE light-selection / face-
     // sampling randoms ALSO use that stream (so adjacent pixels in a
-    // tile evaluate the same emissive face, not different ones); and
-    // an indirect proportional clamp fires on emit hits at bounce >= 1
-    // to keep indirect-path variance from producing fireflies.
+    // tile evaluate the same emissive face, not different ones).
     //
     // Maps to MagicaVoxel's two SS-GI modes via `area_light_nee`:
     //   splash_mode + area_light_nee ON  → MV's SS-GI ON
-    //     (NEE + MIS + correlated noise + clamp).
+    //     (NEE + MIS + correlated noise).
     //   splash_mode + area_light_nee OFF → MV's SS-GI OFF
-    //     (no area NEE; BSDF discovery only; correlated noise + clamp).
+    //     (no area NEE; BSDF discovery only; correlated noise).
     //
     // splash_mode ON + area_light_nee ON is our default — it's the
     // smoother of the two and produces the look most people associate
@@ -80,10 +78,15 @@ struct RenderSettings {
     // MV's SS-GI ON, not OFF. Flip area_light_nee off to see the
     // explicit MV SS-GI OFF "shaped splashes / no smooth halo" look.
     bool splash_mode = true;
-    // Tuning knob for the proportional clamp on indirect contributions
-    // (both NEE shadow rays and BSDF-walk emit arrivals) when
-    // splash_mode is on. Magica's range is roughly 4..16; 8 is a
-    // sensible starting point. <= 0 disables.
+    // Proportional clamp on indirect emitter contributions (both NEE
+    // shadow rays at b >= 1 and BSDF-walk arrivals at emissive
+    // voxels). Independent of splash_mode: in scenes with sharp
+    // specular materials a single diffuse→specular→emitter caustic
+    // path produces a per-sample contribution that dominates the
+    // average, and MIS can't suppress it (the BSDF lobe is essentially
+    // delta-aligned with the emitter). Clamping caps those spikes in
+    // exchange for slight energy bias. Magica's range is roughly
+    // 4..16; 8 is a sensible starting point. <= 0 disables.
     float indirect_clamp_L = 8.0f;
     // Magnitude of the per-frame tile-correlated jitter applied to
     // shared BRDF direction samples when area-light NEE is off. 0 =
