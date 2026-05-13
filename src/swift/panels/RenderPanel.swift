@@ -6,7 +6,15 @@ struct RenderPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader("Mode")
-            Toggle("Path traced", isOn: $state.pathTraced)
+            Picker("Mode", selection: Binding(
+                get: { state.pathTraced },
+                set: { state.pathTraced = $0 }
+            )) {
+                Text("Edit").tag(false)
+                Text("Render").tag(true)
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
 
             if state.pathTraced {
                 Toggle("ACES tonemap", isOn: $state.acesTonemap)

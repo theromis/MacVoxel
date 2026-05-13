@@ -41,9 +41,9 @@ struct RenderSettings {
     // render_height) and the display pass scales to the drawable —
     // which is exactly what the user wants for "render this scene at
     // 3840 × 2160" regardless of window size.
-    bool resolution_match_window = true;
-    int render_width = 1920;
-    int render_height = 1080;
+    bool resolution_match_window = false;
+    int render_width = 960;
+    int render_height = 800;
     GlassMode glass_mode = GlassMode::Probabilistic;
     // Direct-lighting NEE distribution. On = pick lights from a CDF
     // weighted by per-light power (default; the shipped behavior).
@@ -77,7 +77,7 @@ struct RenderSettings {
     // with MV's rendering, even though strictly speaking it matches
     // MV's SS-GI ON, not OFF. Flip area_light_nee off to see the
     // explicit MV SS-GI OFF "shaped splashes / no smooth halo" look.
-    bool splash_mode = true;
+    bool splash_mode = false;
     // Proportional clamp on indirect emitter contributions (both NEE
     // shadow rays at b >= 1 and BSDF-walk arrivals at emissive
     // voxels). Independent of splash_mode: in scenes with sharp
