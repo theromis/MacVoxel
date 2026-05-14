@@ -733,16 +733,23 @@ inline float nee_target_pdf_solid(float3 le, float cos_x)
 
 // Solid-angle pdf NEE would have assigned to the BSDF-sampled
 // direction that arrived at this emissive voxel — used as the "other"
-// pdf when MIS-weighting the BSDF-sampled emitter arrival. With RIS,
-// the "true" pdf is M · target / W_sum (depends on W_sum, which we'd
-// have to re-run RIS to know). The standard approximation is to use
-// `target_pdf` directly: at large M the effective pdf converges to
-// (target / ∫target), which is proportional to target — and MIS power
-// heuristic is scale-invariant in pdf ratios, so the un-normalized
-// target works.
+// pdf when MIS-weighting the BSDF-sampled emitter arrival.
+//
+// Must match nee_sample_light's source pdf so the two MIS weights sum
+// to 1. Using the RIS *target* (Le_lum · cos_x) here was wrong: the
+// target is a resampling weight, not a pdf in solid-angle units, and
+// for bright emitters it dwarfs the BSDF pdf, crushing BSDF-arrival
+// contributions to ~0. The visible symptom was an AO-like dark band on
+// diffuse surfaces adjacent to emissive voxels — geometry where NEE
+// can't sample the visible faces (NdL ≤ 0 from the receiver's
+// hemisphere), so only BSDF random walks find the emitter, and those
+// then got MIS-zeroed. Now we return the same `prob_li · (1/3) · dist²/
+// cos_y` Magica returns — symmetric MIS weights, no missing energy.
 float nee_pdf_solid_for_arrival(constant PathUniforms& u,
                                 device const GpuLight* lights,
                                 int3 hit_cell,
+                                float3 hit_point,
+                                float3 prev_point,
                                 float3 n_x_prev,
                                 float3 omega,
                                 float3 n_y)
@@ -751,9 +758,16 @@ float nee_pdf_solid_for_arrival(constant PathUniforms& u,
     float cos_y = dot(n_y, -omega);
     float cos_x = dot(n_x_prev, omega);
     if (cos_x <= 0.0 || cos_y <= 0.0) return 0.0;
+    float3 d = hit_point - prev_point;
+    float dist2 = dot(d, d);
+    if (dist2 < 1e-8) return 0.0;
     for (uint i = 0u; i < u.light_count; ++i) {
         if (all(int3(lights[i].pos.xyz) == hit_cell)) {
-            return nee_target_pdf_solid(lights[i].le.xyz, cos_x);
+            float prob_li = (u.power_weighted_nee != 0u)
+                ? lights[i].le.w
+                : (1.0 / float(u.light_count));
+            if (prob_li <= 0.0) return 0.0;
+            return prob_li * (1.0 / 3.0) * dist2 / cos_y;
         }
     }
     return 0.0;
@@ -1381,8 +1395,8 @@ fragment float4 pt_fragment(
                 else if (h.axis == 1) n_y.y = float(h.sign);
                 else if (h.axis == 2) n_y.z = float(h.sign);
                 float pdf_light = nee_pdf_solid_for_arrival(
-                    u, lights, h.cell_coord, prev_normal,
-                    ray_dir, n_y);
+                    u, lights, h.cell_coord, h.point, ray_origin,
+                    prev_normal, ray_dir, n_y);
                 float w_bsdf = mis_power(prev_bsdf_pdf, pdf_light);
                 radiance += nee_clamped(u, b, throughput * Le * w_bsdf);
             }
