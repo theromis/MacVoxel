@@ -120,7 +120,7 @@ uint64_t HashRenderSettings(const macvoxel::RenderSettings& rs) {
         rs.max_bounces, rs.max_samples,
         static_cast<uint8_t>(rs.glass_mode),
         static_cast<uint8_t>(rs.aces_tonemap ? 1 : 0),
-        static_cast<uint8_t>(rs.magica_stochastic_gi ? 1 : 0),
+        static_cast<uint8_t>(rs.stochastic_gi ? 1 : 0),
         0,
         rs.sky_intensity,
         rs.sun_elevation_deg, rs.sun_azimuth_deg,
@@ -586,7 +586,7 @@ DfBake BakeDistanceField(const macvoxel::Document& doc) {
     u->frame_seed = baseSeed + _sampleCount + 1u;
     u->max_bounces = static_cast<uint32_t>(std::max(1, rs.max_bounces));
     u->light_count = _lightCount;
-    u->stochastic_gi = rs.magica_stochastic_gi ? 1u : 0u;
+    u->stochastic_gi = rs.stochastic_gi ? 1u : 0u;
     u->glass_mode = static_cast<uint32_t>(rs.glass_mode);
     u->aces_tonemap = rs.aces_tonemap ? 1u : 0u;
     u->indirect_clamp_L = rs.indirect_clamp_L;

@@ -201,15 +201,12 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, assign) NSInteger maxSamples;     // 1..N
 @property (nonatomic, assign) BridgeRenderMode renderMode;
 @property (nonatomic, assign) BOOL acesTonemap;
-// Magica-only "Stochastic Sampling GI" (= OPT_AREA). Has no effect in
-// the .edit / .render modes — read by MagicaRenderer only.
-@property (nonatomic, assign) BOOL magicaStochasticGI;
+// MagicaVoxel's "Stochastic Sampling GI" toggle (= OPT_AREA). On =
+// area-light NEE active in both Render and Magica path tracers; off
+// = emissives discovered only by BSDF random walk.
+@property (nonatomic, assign) BOOL stochasticGI;
 @property (nonatomic, assign) BOOL powerWeightedNEE;
-@property (nonatomic, assign) BOOL areaLightNEE;
-@property (nonatomic, assign) BOOL splashMode;
 @property (nonatomic, assign) float indirectClampL;
-@property (nonatomic, assign) float splashJitter;
-@property (nonatomic, assign) NSInteger splashTilePx;
 // Temporal-EMA smoothing floor (0..1). 0 disables; ~0.05 gives a
 // ~20-frame trailing smooth on top of the per-sample running mean.
 @property (nonatomic, assign) float emaFloor;

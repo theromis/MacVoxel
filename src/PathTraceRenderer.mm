@@ -42,11 +42,9 @@ struct PathUniforms {
     simd::float3 sun_radiance;    // linear-space color × intensity
     float horizon_softness_k;     // exp falloff coeff; 0 = off
     simd::float4 lobes[8];        // per-bounce shared 2D sample (.xy used)
-    simd::float2 jitter_mult;     // per-frame correlation rotator
-    uint32_t bsdf_correlation;    // 0 = independent PCG, 1 = tile-jitter
-    uint32_t jitter_tile_px;      // tile size in screen pixels
-    float jitter_phase;           // per-sample initial-seed phase shift
-    float _pad_jitter[3];
+    simd::float2 jitter_mult;     // irrational rotator on the corr seed
+    uint32_t bsdf_correlation;    // 0 = PCG reference, 1 = correlated
+    uint32_t _pad_corr;
     float indirect_clamp_L;       // <=0 disables proportional clamp
     float _pad_tail[3];           // round up to 16-byte alignment
 };
@@ -54,9 +52,8 @@ struct PathUniforms {
 // we setBytes:length:sizeof(PathUniforms). The simd float3/int3 types
 // are 16-byte slots on both sides (3-of-4 used) so the explicit `_padN`
 // scalars get an additional 12-byte auto-pad in front of every
-// 16-aligned successor. The trailing sun_* group adds another 64 bytes
-// (two float3+float pairs at 32 bytes each) → 288 total.
-static_assert(sizeof(PathUniforms) == 464, "PathUniforms size mismatch");
+// 16-aligned successor.
+static_assert(sizeof(PathUniforms) == 448, "PathUniforms size mismatch");
 
 // Per-emissive-voxel entry in the next-event-estimation light buffer.
 // Built CPU-side at doc.version change so the shader doesn't have to
@@ -176,8 +173,6 @@ struct DisplayUniforms {
     bool _lastPowerWeightedNee;
     bool _lastAreaLightNee;
     float _lastIndirectClampL;
-    float _lastSplashJitter;
-    int _lastSplashTilePx;
     float _lastSkyIntensity;
     int _lastNeeRisCount;
     bool _lastAtmosphericSky;
@@ -691,7 +686,7 @@ struct DisplayUniforms {
         _lastPowerWeightedNee = pw_nee;
         _wantsClear = YES;
     }
-    const bool area_nee = rs.area_light_nee;
+    const bool area_nee = rs.stochastic_gi;
     if (area_nee != _lastAreaLightNee) {
         _lastAreaLightNee = area_nee;
         _wantsClear = YES;
@@ -699,16 +694,6 @@ struct DisplayUniforms {
     const float clamp_L = rs.indirect_clamp_L;
     if (clamp_L != _lastIndirectClampL) {
         _lastIndirectClampL = clamp_L;
-        _wantsClear = YES;
-    }
-    const float splash_j = rs.splash_jitter;
-    if (splash_j != _lastSplashJitter) {
-        _lastSplashJitter = splash_j;
-        _wantsClear = YES;
-    }
-    const int splash_t = rs.splash_tile_px;
-    if (splash_t != _lastSplashTilePx) {
-        _lastSplashTilePx = splash_t;
         _wantsClear = YES;
     }
     const float sky_k = rs.sky_intensity;
@@ -944,7 +929,7 @@ struct DisplayUniforms {
     u._pad3 = 0.0f;
     u.frame_seed = frameSeed;
     u.max_bounces = maxBounces;
-    u.light_count = rs.area_light_nee ? _lightCount : 0u;
+    u.light_count = rs.stochastic_gi ? _lightCount : 0u;
     u.glass_mode = static_cast<uint32_t>(
         rs.glass_mode);
     u.power_weighted_nee =
@@ -1005,14 +990,11 @@ struct DisplayUniforms {
             : 0.0f;
     }
     {
-        // Tile-correlated jitter machinery. Per accumulation sample, fill
-        // `lobes[b]` with a fresh uniform-square 2D point per bounce; the
-        // shader's tile-shared seed (sampled from the noise texture)
-        // perturbs each pixel's sample around this shared base, so
-        // adjacent pixels in a tile sample near-identical BRDF directions
-        // and emissive cluster silhouettes project as coherent shaped
-        // splashes. `jitter_mult` rotates per sample so the per-tile
-        // offset axis doesn't lock in over many samples.
+        // Per-(sample, bounce) BSDF-direction stride. Same seed sequence
+        // every pixel uses; the per-pixel `corr` perturbation lives in
+        // the shader. Across samples `frameSeed` advances so each pixel
+        // sees a different stride per bounce and the chosen BRDF
+        // direction drifts across the cluster's solid angle.
         uint32_t s = frameSeed * 2654435761u + 0x9E3779B9u;
         auto next = [&s]() {
             s ^= s << 13; s ^= s >> 17; s ^= s << 5;
@@ -1021,43 +1003,25 @@ struct DisplayUniforms {
         for (int b = 0; b < 8; ++b) {
             u.lobes[b] = simd::float4{next(), next(), 0.0f, 0.0f};
         }
-        // Per-frame rotator. Magica's tile-jitter perturbs lobes by
-        // `jitter_mult * scalar_seed`, where seed varies tile-to-tile,
-        // so within a frame the perturbation is a 1D line in u-space
-        // along `jitter_mult`. Across frames the line rotates,
-        // covering the unit square. Magnitude controls how widely
-        // different tiles "view" the emissive cluster — 0 means every
-        // pixel samples the same direction (splash migrates across
-        // samples), small values widen the per-frame splash silhouette.
-        if (rs.splash_mode && rs.splash_jitter > 0.0f) {
-            const float ang =
-                static_cast<float>(_sampleCount) * 1.61803398875f;
-            u.jitter_mult = simd::float2{
-                std::cos(ang) * rs.splash_jitter,
-                std::sin(ang) * rs.splash_jitter,
-            };
-        } else {
-            u.jitter_mult = simd::float2{0.0f, 0.0f};
-        }
-        u.jitter_tile_px = static_cast<uint32_t>(
-            std::max(1, rs.splash_tile_px));
-        // Per-sample phase: derived from the same seed sequence the
-        // lobes use, so it cycles deterministically through [0, 1) and
-        // shifts the entire jitter chain (and thus NEE selection /
-        // BRDF perturbation) by a different amount every sample.
-        u.jitter_phase = next();
-        u._pad_jitter[0] = 0.0f;
-        u._pad_jitter[1] = 0.0f;
-        u._pad_jitter[2] = 0.0f;
-        // splash_mode controls only the tile-correlated jitter chain.
-        // The proportional clamp on indirect-bounce emitter
-        // contributions is independent: in scenes with sharp specular
-        // materials a single diffuse→specular→emitter caustic path
-        // produces a per-sample contribution that dominates the average,
-        // and MIS can't suppress it (the BSDF lobe is essentially
-        // delta-aligned with the emitter). The clamp tames those
-        // single-pixel spikes in both splash and reference modes.
-        u.bsdf_correlation = rs.splash_mode ? 1u : 0u;
+        // Irrational rotator on `corr`. Constant per frame — per-sample
+        // drift is driven by `frame_seed` flowing into every stride
+        // generator inside the shader, not by changing the rotator.
+        // Values are MagicaVoxel's choice; magnitude ≈ 0.94 gives wide
+        // per-pixel deviation so neighbour pixels in a noise texel
+        // collapse to nearly the same sample, while pixels two texels
+        // away decorrelate.
+        u.jitter_mult = simd::float2{0.7548777f, 0.5698403f};
+        // Reference mode disables the correlated stream entirely (every
+        // call site falls back to per-pixel PCG). CLI-only escape hatch;
+        // the UI always runs with bsdf_correlation = 1.
+        u.bsdf_correlation = rs.path_trace_reference ? 0u : 1u;
+        u._pad_corr = 0u;
+        // Proportional clamp on indirect-bounce emitter contributions:
+        // in scenes with sharp specular materials a single
+        // diffuse→specular→emitter caustic path produces a per-sample
+        // contribution that dominates the average, and MIS can't
+        // suppress it (the BSDF lobe is essentially delta-aligned with
+        // the emitter). The clamp tames those single-pixel spikes.
         u.indirect_clamp_L = std::max(0.0f, rs.indirect_clamp_L);
         u._pad_tail[0] = 0.0f;
         u._pad_tail[1] = 0.0f;

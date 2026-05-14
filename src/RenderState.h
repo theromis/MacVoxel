@@ -62,58 +62,31 @@ struct RenderSettings {
     // the 3 visible faces — the pre-P14.5.A baseline, kept as a toggle
     // so the user can A/B compare on emitter-heavy scenes.
     bool power_weighted_nee = true;
-    // Explicit NEE shadow rays toward emissive voxels. On = standard
-    // direct-lighting NEE for area lights (the path tracer's default).
-    // Off = no shadow rays toward emissives; they're discovered only
-    // when the BSDF random walk happens to terminate on an emissive
-    // surface — MagicaVoxel's "Stochastic Sampling Global Illumination
-    // = OFF" mode. Higher variance with concentrated emitters but
-    // produces a structured, splotchy noise character distinct from the
-    // smooth NEE-on case. Sun NEE is independent of this flag.
-    bool area_light_nee = true;
-    // Magica-style "splash bundle" — orthogonal to area-light NEE.
-    // When on: BRDF direction sampling uses a tile-correlated jitter
-    // stream (instead of per-pixel PCG); NEE light-selection / face-
-    // sampling randoms ALSO use that stream (so adjacent pixels in a
-    // tile evaluate the same emissive face, not different ones).
-    //
-    // Maps to MagicaVoxel's two SS-GI modes via `area_light_nee`:
-    //   splash_mode + area_light_nee ON  → MV's SS-GI ON
-    //     (NEE + MIS + correlated noise).
-    //   splash_mode + area_light_nee OFF → MV's SS-GI OFF
-    //     (no area NEE; BSDF discovery only; correlated noise).
-    //
-    // splash_mode ON + area_light_nee ON is our default — it's the
-    // smoother of the two and produces the look most people associate
-    // with MV's rendering, even though strictly speaking it matches
-    // MV's SS-GI ON, not OFF. Flip area_light_nee off to see the
-    // explicit MV SS-GI OFF "shaped splashes / no smooth halo" look.
-    bool splash_mode = false;
+    // MagicaVoxel's "Stochastic Sampling GI" toggle (= OPT_AREA in
+    // their shader). On = explicit area-light NEE with MIS on every
+    // surface hit. Off = no shadow rays toward emissive voxels; they
+    // get discovered only when the BSDF random walk happens to land
+    // on one. Higher variance with concentrated emitters but produces
+    // the structured "splotchy" SS-GI-off noise character. Sun NEE is
+    // independent of this flag. Both Render and Magica renderers read
+    // it.
+    bool stochastic_gi = true;
+    // CLI-only escape hatch: when true, the Render renderer falls
+    // back to fully per-pixel PCG sampling (the unbiased textbook MC
+    // path) instead of the MagicaVoxel-style tile-correlated stream.
+    // The UI never sets this; it's only meaningful for headless
+    // diffs that want a ground-truth reference image.
+    bool path_trace_reference = false;
     // Proportional clamp on indirect emitter contributions (both NEE
     // shadow rays at b >= 1 and BSDF-walk arrivals at emissive
-    // voxels). Independent of splash_mode: in scenes with sharp
-    // specular materials a single diffuse→specular→emitter caustic
-    // path produces a per-sample contribution that dominates the
-    // average, and MIS can't suppress it (the BSDF lobe is essentially
-    // delta-aligned with the emitter). Clamping caps those spikes in
-    // exchange for slight energy bias. Magica's range is roughly
-    // 4..16; 8 is a sensible starting point. <= 0 disables.
+    // voxels). In scenes with sharp specular materials a single
+    // diffuse→specular→emitter caustic path produces a per-sample
+    // contribution that dominates the average, and MIS can't suppress
+    // it (the BSDF lobe is essentially delta-aligned with the
+    // emitter). Clamping caps those spikes in exchange for slight
+    // energy bias. Magica's range is roughly 4..16; 8 is a sensible
+    // starting point. <= 0 disables.
     float indirect_clamp_L = 8.0f;
-    // Magnitude of the per-frame tile-correlated jitter applied to
-    // shared BRDF direction samples when area-light NEE is off. 0 =
-    // every pixel samples exactly the same BRDF direction per
-    // accumulation sample (cleanest, splashes migrate across samples
-    // only); larger values widen the within-frame "cluster silhouette
-    // projection" effect at the cost of more visible per-pixel
-    // variation. ~0.05 is a moderate target if the user wants visible
-    // cluster shape projection in a single frame.
-    float splash_jitter = 0.0f;
-    // Screen-space correlation scale for tile-jittered noise lookup.
-    // Effective period (one full noise sweep) is
-    // `splash_tile_px * 64` pixels with bilinear filtering — i.e.
-    // `splash_tile_px` controls how slowly the correlated jitter
-    // varies across the screen.
-    int splash_tile_px = 16;
     // Temporal-EMA blend weight for the display compose pass.
     // Mirrors MagicaVoxel's `weight` parameter in pt_post.glsl —
     // their `mix(tex_last, dst, weight)` blend is what we're emulating
@@ -182,13 +155,6 @@ struct RenderSettings {
     // When off, falls back to the constant `sky_color × sky_intensity`
     // tint.
     bool atmospheric_sky = false;
-    // Magica-only: "Stochastic Sampling GI" toggle (= Magica's OPT_AREA
-    // flag). When on, the Magica path tracer fires explicit area-light
-    // NEE rays with MIS at every bounce. When off, emissive voxels are
-    // discovered only by random BSDF walks — higher variance, distinct
-    // "stochastic OFF" splotchy aesthetic. Doesn't affect the existing
-    // Render path; that has its own area_light_nee field above.
-    bool magica_stochastic_gi = true;
     // Aerial-perspective fade applied to grazing-angle primary rays
     // that hit the virtual ground plane: blends in the limit-direction
     // sky color so the floor doesn't meet the sky as a hard line.

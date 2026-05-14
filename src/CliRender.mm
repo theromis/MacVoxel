@@ -32,12 +32,8 @@ struct Args {
     int bounces = 5;
     uint32_t seed = 1;
     bool aces = true;
-    bool area_light_nee = true;
-    bool splash_mode = false;
-    bool override_splash_jitter = false;
-    float splash_jitter = 0.0f;
-    bool override_splash_tile_px = false;
-    int splash_tile_px = 16;
+    bool stochastic_gi = true;
+    bool reference = false;  // --reference: PCG-only unbiased path
     bool override_sky_intensity = false;
     float sky_intensity = 1.0f;
     bool override_sun_intensity = false;
@@ -46,8 +42,6 @@ struct Args {
     float clamp_L = 8.0f;
     GlassMode glass_mode = GlassMode::Probabilistic;
     Engine engine = Engine::Render;
-    bool override_magica_gi = false;
-    bool magica_stochastic_gi = true;
 };
 
 void PrintUsage() {
@@ -55,10 +49,10 @@ void PrintUsage() {
         "usage: MacVoxel render --input <file.vox> --output <file.png>\n"
         "                       [--width N] [--height N]\n"
         "                       [--samples N] [--bounces N] [--seed N]\n"
-        "                       [--no-aces] [--no-area-nee]\n"
+        "                       [--no-aces] [--no-stochastic-gi]\n"
+        "                       [--reference]\n"
         "                       [--sky-intensity F] [--sun-intensity F]\n"
-        "                       [--splash-mode] [--splash-jitter F]\n"
-        "                       [--splash-tile-px N] [--clamp-L F]\n"
+        "                       [--clamp-L F]\n"
         "                       [--glass-mode probabilistic|absorption]\n"
         "                       [--engine render|magica]\n");
 }
@@ -97,18 +91,11 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
             out->seed = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
         } else if (eq("--no-aces")) {
             out->aces = false;
-        } else if (eq("--no-area-nee")) {
-            out->area_light_nee = false;
-        } else if (eq("--splash-mode")) {
-            out->splash_mode = true;
-        } else if (eq("--splash-jitter")) {
-            const char* v = need_val("--splash-jitter"); if (!v) return false;
-            out->splash_jitter = static_cast<float>(std::atof(v));
-            out->override_splash_jitter = true;
-        } else if (eq("--splash-tile-px")) {
-            const char* v = need_val("--splash-tile-px"); if (!v) return false;
-            out->splash_tile_px = std::atoi(v);
-            out->override_splash_tile_px = true;
+        } else if (eq("--no-stochastic-gi") || eq("--no-area-nee")) {
+            // --no-area-nee accepted as a transitional alias.
+            out->stochastic_gi = false;
+        } else if (eq("--reference")) {
+            out->reference = true;
         } else if (eq("--sky-intensity")) {
             const char* v = need_val("--sky-intensity"); if (!v) return false;
             out->sky_intensity = static_cast<float>(std::atof(v));
@@ -143,12 +130,6 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
                     "--engine must be 'render' or 'magica'\n");
                 return false;
             }
-        } else if (eq("--magica-gi")) {
-            const char* v = need_val("--magica-gi"); if (!v) return false;
-            out->override_magica_gi = true;
-            if (std::strcmp(v, "on") == 0)  out->magica_stochastic_gi = true;
-            else if (std::strcmp(v, "off") == 0) out->magica_stochastic_gi = false;
-            else { std::fprintf(stderr, "--magica-gi must be 'on' or 'off'\n"); return false; }
         } else if (eq("-h") || eq("--help")) {
             PrintUsage();
             return false;
@@ -227,14 +208,8 @@ int RunCliRender(int argc, const char* argv[]) {
         // The path-trace pass reads glass_mode from ctx.render_settings;
         // the export pass takes aces_tonemap as an explicit parameter.
         ctx.render_settings.aces_tonemap = args.aces;
-        ctx.render_settings.area_light_nee = args.area_light_nee;
-        ctx.render_settings.splash_mode = args.splash_mode;
-        if (args.override_splash_jitter) {
-            ctx.render_settings.splash_jitter = args.splash_jitter;
-        }
-        if (args.override_splash_tile_px) {
-            ctx.render_settings.splash_tile_px = args.splash_tile_px;
-        }
+        ctx.render_settings.stochastic_gi = args.stochastic_gi;
+        ctx.render_settings.path_trace_reference = args.reference;
         if (args.override_sky_intensity) {
             ctx.render_settings.sky_intensity = args.sky_intensity;
         }
@@ -245,9 +220,6 @@ int RunCliRender(int argc, const char* argv[]) {
             ctx.render_settings.indirect_clamp_L = args.clamp_L;
         }
         ctx.render_settings.glass_mode = args.glass_mode;
-        if (args.override_magica_gi) {
-            ctx.render_settings.magica_stochastic_gi = args.magica_stochastic_gi;
-        }
 
         const CGSize size = CGSizeMake(static_cast<CGFloat>(args.width),
                                        static_cast<CGFloat>(args.height));

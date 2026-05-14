@@ -23,60 +23,31 @@ struct PathUniforms {
     float    sun_cos_half_angle;  // cos(angular_diameter / 2)
     float3   sun_radiance;        // linear color × intensity
     float    horizon_softness_k;  // exp falloff coeff; 0 = no softening
-    // Tile-correlated BRDF-direction sampling — the heart of the
-    // MagicaVoxel-style splash aesthetic. Per accumulation sample the
-    // CPU fills `lobes[b].xy` with a uniform-square 2D point that
-    // *every* pixel uses as the base of its bounce-`b` BRDF direction
-    // sample; pixels then perturb it by `jitter_mult * seed`, where
-    // `seed` is bilinearly sampled from a small (~64×64) noise texture
-    // covering `jitter_tile_px * 64` screen pixels — so neighbouring
-    // pixels see *smoothly-interpolated* seeds and sample nearly the
-    // same direction. Adjacent pixels' bounces hit nearly the same
-    // point on the same emissive cluster, projecting the cluster's
-    // silhouette onto the receiving surface as a coherent splash
-    // rather than scattering into single-pixel fireflies.
+    // Sampling stream selector. Tile-correlated mode (the default;
+    // matches MagicaVoxel's path tracer) routes every path-decision
+    // random — BSDF directions, NEE light/face/point picks, sun cone,
+    // RR survival, glass Fresnel coin flips — through a single
+    // per-pixel `corr` seed sampled once from a small noise texture
+    // and advanced by `fract(corr * 859 + 1/5.93)` per call. Adjacent
+    // pixels in a screen-area-of-one-noise-texel sample near-identical
+    // sequences, so emissive cluster silhouettes project as coherent
+    // shaped splashes rather than scattering into single-pixel
+    // fireflies. AA sub-pixel jitter stays on the decorrelated PCG
+    // stream regardless.
     //
-    // The decompiled MagicaVoxel path tracer uses a comparable but
-    // not identical setup — nearest-filtered tex_rand, giving hard-
-    // edged 16-pixel tile blocks. We chose bilinear to avoid visible
-    // tile boundaries; both produce the same projected-silhouette
-    // effect, just with different micro-texture.
+    // `bsdf_correlation == 0` is the reference path: every site falls
+    // back to PCG, producing unbiased textbook MC. Exposed only via
+    // CLI `--reference`; the UI always sets this to 1 so the editor's
+    // Render mode matches Magica's aesthetic by default.
     //
-    // `bsdf_correlation == 0` falls back to independent per-pixel PCG
-    // (unbiased reference path; MagicaVoxel has no equivalent — its
-    // jitter is always tile-correlated). The shader's mode matrix:
-    //
-    //   bsdf_correlation, light_count > 0  -> "hybrid"  (NEE+BSDF+MIS,
-    //                                          correlated noise, clamp).
-    //                                          Closest renderer match
-    //                                          for MV with SS-GI ON.
-    //   bsdf_correlation, light_count == 0 -> "MV-strict" (no area NEE;
-    //                                          BSDF discovery + clamp;
-    //                                          correlated noise).
-    //                                          Closest renderer match
-    //                                          for MV with SS-GI OFF.
-    //   no bsdf_correlation, light_count>0 -> "textbook MC" (unbiased,
-    //                                          uncorrelated reference).
-    //   no bsdf_correlation, light_count==0-> "textbook MC, BSDF-only"
-    //                                          (very noisy reference).
-    //
-    // Sun NEE is independent of `light_count` and always active when
-    // `sun_radiance > 0` (matches MagicaVoxel's OPT_SUN being
-    // orthogonal to OPT_AREA).
+    // `lobes[b]` is the per-(frame, bounce) shared 2D stride for BSDF
+    // direction samples; `jitter_mult` is the irrational rotator
+    // applied to `corr` before adding it to a stride. Other call sites
+    // generate their strides inline via `stride1/2(frame_seed, b, site)`.
     float4   lobes[8];              // .xy used; .zw reserved
     float2   jitter_mult;
-    uint     bsdf_correlation;      // 0 = full PCG, 1 = tile-jitter
-    uint     jitter_tile_px;        // tile size in screen pixels
-    // Per-sample phase shift added to the initial jitter seed so the
-    // tile-correlated jitter chain produces a different sequence of
-    // NEE light picks / direction samples per accumulation sample —
-    // without this the chain is initialised from tex_rand[pix] only,
-    // which is constant across samples, so NEE contributions are
-    // identical every sample and variance never reduces.
-    float    jitter_phase;
-    float    _pad_jitter0;
-    float    _pad_jitter1;
-    float    _pad_jitter2;
+    uint     bsdf_correlation;      // 0 = PCG reference, 1 = correlated
+    uint     _pad_corr;
     // Proportional clamp ceiling on indirect-bounce contributions —
     // both NEE shadow rays at b >= 1 (via nee_clamped) and BSDF-walk
     // arrivals at emissive voxels (via the inline clamp in the no-
@@ -158,6 +129,13 @@ uint pcg(thread uint& s) {
     uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
     return (w >> 22u) ^ w;
 }
+// Stateless variant used to derive a per-(frame, bounce, site) stride
+// for the correlated stream. Same internals as `pcg`, no thread state.
+uint pcg_hash(uint x) {
+    x = x * 747796405u + 2891336453u;
+    uint w = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+    return (w >> 22u) ^ w;
+}
 float rand1(thread uint& s) {
     return float(pcg(s)) * (1.0 / 4294967296.0);
 }
@@ -168,54 +146,73 @@ float2 rand2(thread uint& s) {
     return float2(r1, r2);
 }
 
-// Tile-correlated BRDF-direction sample, MagicaVoxel-style. `seed` is a
-// per-pixel float read bilinearly from a small noise texture; it mutates
-// each call, and combined with `jitter_mult` it perturbs the per-frame
-// `lobes[b]` uniform that's shared by every pixel. Adjacent pixels see
-// near-identical (r1, r2) → near-identical sampled directions →
-// emissive cluster silhouettes project as coherent shaped splashes
-// rather than scattered fireflies.
-//
-// Per-bounce stepping (`seed = fract(seed * 859 + 1/5.93)`) mirrors
-// MagicaVoxel's `jitter2()` recurrence verbatim. The deterministic
-// stride `lobes[b]` is uniform across pixels, the rotation `seed *
-// jitter_mult` is per-pixel — same Cranley-Patterson shape as the MV
-// captured shader.
-float2 jitter2(constant PathUniforms& u, uint b, thread float& seed) {
-    seed = fract(seed * 859.0 + 1.0 / 5.93);
-    return fract(u.lobes[b].xy + u.jitter_mult * seed);
+float u_to_unit(uint k) {
+    return float(k & 0xFFFFFFu) * (1.0 / float(0x1000000));
 }
 
-// Picks between the tile-correlated jitter stream and the per-pixel PCG
-// stream based on the `bsdf_correlation` flag. Callers pass the current
-// bounce index; we clamp it into the lobes[] array's range.
+// Per-(frame, bounce, site) stride for the correlated stream. Distinct
+// site ids inside one bounce hash to uncorrelated strides, so adjacent
+// NEE call sites don't alias onto the same sample axis. `frame_seed`
+// changes every accumulation sample, so successive samples drift the
+// chosen direction / light / face across the cluster's solid angle —
+// the mechanism that lets variance reduce over time even though every
+// pixel's `corr` seed is fixed across samples.
+float stride1(uint frame_seed, uint b, uint site) {
+    return u_to_unit(pcg_hash((frame_seed * 13u + b) * 17u + site));
+}
+float2 stride2(uint frame_seed, uint b, uint site) {
+    uint k = pcg_hash((frame_seed * 13u + b) * 17u + site);
+    return float2(u_to_unit(k), u_to_unit(pcg_hash(k ^ 0x9E3779B9u)));
+}
+
+// Correlated samples — MagicaVoxel's `jitter1`/`jitter2` recurrence.
+// `corr` is the per-pixel seed initialised once from the noise texture;
+// each call advances it, so successive calls inside one path produce
+// uncorrelated samples for that pixel while adjacent pixels in a
+// noise-texel-sized tile see the same chain (= same BSDF dirs, same
+// NEE picks, same RR outcome).
+float corr1(thread float& corr, float stride, float mult) {
+    corr = fract(corr * 859.0 + 1.0 / 5.93);
+    return fract(stride + mult * corr);
+}
+float2 corr2(thread float& corr, float2 stride, float2 mult) {
+    corr = fract(corr * 859.0 + 1.0 / 5.93);
+    return fract(stride + mult * corr);
+}
+
+// BSDF direction sample. Stride is the per-bounce shared `lobes[b]`
+// (uniform across pixels), per-pixel perturbation comes from `corr`.
+// At bsdf_correlation == 0 (CLI reference mode) falls back to PCG so
+// adjacent pixels sample independently — the textbook MC reference.
 float2 dir_sample(constant PathUniforms& u, uint b,
-                  thread uint& rng, thread float& seed) {
+                  thread uint& rng, thread float& corr) {
     if (u.bsdf_correlation != 0u) {
-        return jitter2(u, min(b, 7u), seed);
+        return corr2(corr, u.lobes[min(b, 7u)].xy, u.jitter_mult);
     }
     return rand2(rng);
 }
 
-// Tile-correlated scalar random for NEE selection randoms (light index,
-// face axis, in-face position, RIS reservoir, sun cone). Mutates the
-// per-pixel jitter seed and returns it directly: adjacent tile pixels
-// share `seed`, so they pick the same emissive face and evaluate the
-// same NEE sample. This is *not* a literal MagicaVoxel mechanism — MV
-// with SS-GI off has no area NEE at all (OPT_AREA undefined), and MV
-// with SS-GI on uses tile-correlated jitter for its NEE samples
-// inherently, not as a separate opt-in. We adopt the correlated-NEE
-// shape as a stylistic choice for our "splash + area_NEE on" hybrid:
-// kills the per-pixel NEE fireflies that uncorrelated NEE would
-// otherwise produce when combined with correlated BSDF directions.
-// Falls back to per-pixel PCG when bsdf_correlation is off.
-float pickrand1(constant PathUniforms& u,
-                thread uint& rng, thread float& seed) {
+// Scalar pick — NEE light index, face axis, RIS reservoir coin, RR,
+// glass Fresnel coin, metal vs diffuse coin, etc. The `site` index is
+// the call-site discriminator; using distinct values per call site
+// inside one bounce keeps the strides decorrelated.
+float pickrand1(constant PathUniforms& u, uint b, uint site,
+                thread uint& rng, thread float& corr) {
     if (u.bsdf_correlation != 0u) {
-        seed = fract(seed * 859.0 + 1.0 / 5.93);
-        return seed;
+        return corr1(corr, stride1(u.frame_seed, b, site), u.jitter_mult.x);
     }
     return rand1(rng);
+}
+
+// 2D pick — used for in-face NEE point and sun cone. Single call,
+// single seed advance — keeps the two dimensions decorrelated via the
+// stride hash rather than two sequential corr1 advances.
+float2 pickrand2(constant PathUniforms& u, uint b, uint site,
+                 thread uint& rng, thread float& corr) {
+    if (u.bsdf_correlation != 0u) {
+        return corr2(corr, stride2(u.frame_seed, b, site), u.jitter_mult);
+    }
+    return rand2(rng);
 }
 
 // Hue-preserving proportional clamp. v's brightest channel maxes at
@@ -790,6 +787,7 @@ struct NEELight {
 // MIS / radiance contribution as before.
 NEELight nee_sample_light(float3 x,
                           float3 n_x,
+                          uint b,
                           constant PathUniforms& u,
                           device const GpuLight* lights,
                           device const uint* coarse_grid,
@@ -835,7 +833,7 @@ NEELight nee_sample_light(float3 x,
         uint li;
         float prob_li;
         if (u.power_weighted_nee != 0u) {
-            float u_rand = pickrand1(u, rng, jitter_seed);
+            float u_rand = pickrand1(u, b, 2u, rng, jitter_seed);
             uint lo = 0u;
             uint hi = u.light_count;
             while (lo < hi) {
@@ -846,7 +844,7 @@ NEELight nee_sample_light(float3 x,
             li = min(lo, u.light_count - 1u);
             prob_li = lights[li].le.w;
         } else {
-            li = uint(pickrand1(u, rng, jitter_seed) * float(u.light_count));
+            li = uint(pickrand1(u, b, 2u, rng, jitter_seed) * float(u.light_count));
             if (li >= u.light_count) li = u.light_count - 1u;
             prob_li = 1.0 / float(u.light_count);
         }
@@ -857,15 +855,16 @@ NEELight nee_sample_light(float3 x,
         float3 corner = L.pos.xyz;
         float3 center = corner + 0.5;
         float3 to_x = x - center;
-        int axis = int(pickrand1(u, rng, jitter_seed) * 3.0);
+        int axis = int(pickrand1(u, b, 3u, rng, jitter_seed) * 3.0);
         if (axis > 2) axis = 2;
         float coord_axis = (axis == 0) ? to_x.x
                          : (axis == 1) ? to_x.y : to_x.z;
         float face_sign = coord_axis >= 0.0 ? 1.0 : -1.0;
         float3 n_y = float3(0.0);
         float3 y = corner;
-        float u1 = pickrand1(u, rng, jitter_seed);
-        float u2 = pickrand1(u, rng, jitter_seed);
+        float2 face_uv = pickrand2(u, b, 4u, rng, jitter_seed);
+        float u1 = face_uv.x;
+        float u2 = face_uv.y;
         if (axis == 0) {
             n_y.x = face_sign;
             y.x += face_sign > 0.0 ? 1.0 : 0.0;
@@ -900,7 +899,7 @@ NEELight nee_sample_light(float3 x,
         float w_i = target / source_pdf_solid;
 
         w_sum += w_i;
-        if (pickrand1(u, rng, jitter_seed) * w_sum < w_i) {
+        if (pickrand1(u, b, 5u, rng, jitter_seed) * w_sum < w_i) {
             chosen_omega  = omega;
             chosen_le     = L.le.xyz;
             chosen_cos_x  = cos_x;
@@ -944,6 +943,7 @@ NEELight nee_sample_light(float3 x,
 // floor" when the cone dips below the horizon.
 NEELight nee_sample_sun(float3 x,
                         float3 n_x,
+                        uint b,
                         constant PathUniforms& u,
                         device const uint* coarse_grid,
                         device const Chunk* chunk_pool,
@@ -964,8 +964,9 @@ NEELight nee_sample_sun(float3 x,
 
     // Uniform-on-cone direction sample: pick cos_theta in
     // [cos_half, 1], azimuth uniform around the sun's local Z.
-    float u1 = pickrand1(u, rng, jitter_seed);
-    float u2 = pickrand1(u, rng, jitter_seed);
+    float2 sun_uv = pickrand2(u, b, 1u, rng, jitter_seed);
+    float u1 = sun_uv.x;
+    float u2 = sun_uv.y;
     float cos_theta = mix(u.sun_cos_half_angle, 1.0, u1);
     float sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
     float phi = 6.2831853 * u2;
@@ -1068,22 +1069,26 @@ fragment float4 pt_fragment(
     uint rng = (pix.x * 1973u) ^ (pix.y * 9277u) ^ (u.frame_seed * 26699u);
     pcg(rng); pcg(rng);  // mix the seed
 
-    // Per-pixel scalar seed for the tile-correlated jitter stream.
-    // Bilinear-filtered noise lookup with normalized UVs: adjacent
-    // pixels see smoothly-interpolated seeds rather than hard tile-
-    // shared values, so there's no visible 16-pixel grid structure
-    // bleeding into the splash pattern. The `jitter_tile_px` knob sets
-    // the *correlation scale* (one full noise sweep per
-    // `tile_px * noise_size` screen pixels), but with linear filtering
-    // the variation is continuous across the screen.
-    uint tile_px = max(u.jitter_tile_px, 1u);
+    // Per-pixel scalar seed for the correlated stream. Bilinear-filtered
+    // noise lookup — adjacent pixels see smoothly-interpolated seeds, so
+    // there's no visible grid structure bleeding into the splash pattern
+    // while pixels within one screen-area-of-one-noise-texel still share
+    // a near-identical sample chain. The 16× scale stretches the 64×64
+    // noise texture across ≈1024 screen pixels — wider than the typical
+    // emissive cluster on screen, so each tile gets a different "view"
+    // into the cluster's solid angle.
+    //
+    // Per-sample variation comes from `u.frame_seed` being mixed into
+    // every stride generator (`stride1/2`), not from a per-sample phase
+    // on this seed — so `corr` is constant across samples for a given
+    // pixel, and the strides drift the chosen direction / light / face
+    // sample-to-sample.
     constexpr sampler tile_sampler(coord::normalized,
                                    filter::linear,
                                    address::repeat);
     float2 noise_uv = (float2(pix) + 0.5f) /
-        (float(tile_px) * float(tex_rand.get_width()));
-    float jitter_seed =
-        fract(tex_rand.sample(tile_sampler, noise_uv).r + u.jitter_phase);
+        (16.0f * float(tex_rand.get_width()));
+    float jitter_seed = tex_rand.sample(tile_sampler, noise_uv).r;
 
     // Stochastic anti-aliasing: jitter the NDC point inside the pixel.
     // dfdx/dfdy of NDC give us the pixel's size in NDC space, so the
@@ -1204,7 +1209,7 @@ fragment float4 pt_fragment(
             float r0_in = (em.ior - 1.0) / (em.ior + 1.0);
             r0_in *= r0_in;
             float fresnel_in = r0_in + (1.0 - r0_in) * pow(1.0 - cos_i, 5.0);
-            if (k < 0.0 || rand1(rng) < fresnel_in) {
+            if (k < 0.0 || pickrand1(u, b, 8u, rng, jitter_seed) < fresnel_in) {
                 // Total internal reflection or Fresnel-sampled internal
                 // bounce — start a new Beer-Lambert segment from here.
                 ray_origin = h.point + n * 1e-3;
@@ -1222,7 +1227,7 @@ fragment float4 pt_fragment(
             if (b >= kMinBouncesBeforeRR) {
                 float p = max(throughput.r, max(throughput.g, throughput.b));
                 p = clamp(p, 0.05, 0.95);
-                if (rand1(rng) > p) break;
+                if (pickrand1(u, b, 6u, rng, jitter_seed) > p) break;
                 throughput /= p;
             }
             continue;
@@ -1280,14 +1285,11 @@ fragment float4 pt_fragment(
                         }
                     }
                     {
-                        NEELight nee = nee_sample_light(
-                            g_point, kGroundNormal, u, lights,
+                        NEELight nee = nee_sample_light(g_point, kGroundNormal, b, u, lights,
                             coarse_grid, chunk_pool, rng, jitter_seed);
                         radiance += nee_clamped(u, b, throughput *
                             nee_diffuse_mis(nee, kGroundAlbedo, kGroundNormal));
-                        NEELight nee_s = nee_sample_sun(
-                            g_point, kGroundNormal, u,
-                            coarse_grid, chunk_pool, rng, jitter_seed);
+                        NEELight nee_s = nee_sample_sun(g_point, kGroundNormal, b, u, coarse_grid, chunk_pool, rng, jitter_seed);
                         radiance += nee_clamped(u, b, throughput *
                             nee_diffuse_mis(nee_s, kGroundAlbedo, kGroundNormal));
                     }
@@ -1407,17 +1409,14 @@ fragment float4 pt_fragment(
             // whichever is locally lower-variance.
             ray_origin = h.point + normal * 1e-3;
             float3 omega_o = -ray_dir;
-            if (rand1(rng) < clamp(mat.metallic, 0.0, 1.0)) {
+            if (pickrand1(u, b, 9u, rng, jitter_seed) < clamp(mat.metallic, 0.0, 1.0)) {
                 float r = clamp(mat.roughness, 0.0, 1.0);
                 {
-                    NEELight nee = nee_sample_light(
-                        h.point, normal, u, lights,
+                    NEELight nee = nee_sample_light(h.point, normal, b, u, lights,
                         coarse_grid, chunk_pool, rng, jitter_seed);
                     radiance += nee_clamped(u, b, throughput *
                         nee_ggx_mis(nee, omega_o, normal, albedo, r));
-                    NEELight nee_s = nee_sample_sun(
-                        h.point, normal, u,
-                        coarse_grid, chunk_pool, rng, jitter_seed);
+                    NEELight nee_s = nee_sample_sun(h.point, normal, b, u, coarse_grid, chunk_pool, rng, jitter_seed);
                     radiance += nee_clamped(u, b, throughput *
                         nee_ggx_mis(nee_s, omega_o, normal, albedo, r));
                 }
@@ -1428,14 +1427,11 @@ fragment float4 pt_fragment(
                 prev_is_delta = (prev_bsdf_pdf <= 0.0);
             } else {
                 {
-                    NEELight nee = nee_sample_light(
-                        h.point, normal, u, lights,
+                    NEELight nee = nee_sample_light(h.point, normal, b, u, lights,
                         coarse_grid, chunk_pool, rng, jitter_seed);
                     radiance += nee_clamped(u, b, throughput *
                         nee_diffuse_mis(nee, albedo, normal));
-                    NEELight nee_s = nee_sample_sun(
-                        h.point, normal, u,
-                        coarse_grid, chunk_pool, rng, jitter_seed);
+                    NEELight nee_s = nee_sample_sun(h.point, normal, b, u, coarse_grid, chunk_pool, rng, jitter_seed);
                     radiance += nee_clamped(u, b, throughput *
                         nee_diffuse_mis(nee_s, albedo, normal));
                 }
@@ -1475,20 +1471,17 @@ fragment float4 pt_fragment(
             float fresnel = r0 + (1.0 - r0) * pow(1.0 - cos_i, 5.0);
             float trans = clamp(mat.transparency, 0.0, 1.0);
             float3 f0_glass = float3(r0);
-            if (rand1(rng) < fresnel) {
+            if (pickrand1(u, b, 7u, rng, jitter_seed) < fresnel) {
                 // Fresnel reflect lobe — MIS-weighted NEE against the
                 // GGX VNDF sampler. At low roughness the BSDF wins and
                 // captures crisp mirror-of-light contributions; at high
                 // roughness NEE wins and direct-samples emitters.
                 {
-                    NEELight nee = nee_sample_light(
-                        h.point, normal, u, lights,
+                    NEELight nee = nee_sample_light(h.point, normal, b, u, lights,
                         coarse_grid, chunk_pool, rng, jitter_seed);
                     radiance += nee_clamped(u, b, throughput *
                         nee_ggx_mis(nee, omega_o, normal, f0_glass, rough));
-                    NEELight nee_s = nee_sample_sun(
-                        h.point, normal, u,
-                        coarse_grid, chunk_pool, rng, jitter_seed);
+                    NEELight nee_s = nee_sample_sun(h.point, normal, b, u, coarse_grid, chunk_pool, rng, jitter_seed);
                     radiance += nee_clamped(u, b, throughput *
                         nee_ggx_mis(nee_s, omega_o, normal, f0_glass, rough));
                 }
@@ -1501,7 +1494,7 @@ fragment float4 pt_fragment(
                 // Absorption mode; with probability = transparency in
                 // Probabilistic mode) or falls back to diffuse.
                 bool refract_path = (u.glass_mode == 1u) ||
-                                    (rand1(rng) < trans);
+                                    (pickrand1(u, b, 10u, rng, jitter_seed) < trans);
                 if (refract_path) {
                     float eta = 1.0 / mat.ior;  // air -> glass
                     float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
@@ -1509,15 +1502,12 @@ fragment float4 pt_fragment(
                         // TIR — same reflect geometry as the Fresnel
                         // reflect branch; same MIS-weighted NEE.
                         {
-                            NEELight nee = nee_sample_light(
-                                h.point, normal, u, lights,
+                            NEELight nee = nee_sample_light(h.point, normal, b, u, lights,
                                 coarse_grid, chunk_pool, rng, jitter_seed);
                             radiance += nee_clamped(u, b, throughput *
                                 nee_ggx_mis(nee, omega_o, normal,
                                             f0_glass, rough));
-                            NEELight nee_s = nee_sample_sun(
-                                h.point, normal, u,
-                                coarse_grid, chunk_pool, rng, jitter_seed);
+                            NEELight nee_s = nee_sample_sun(h.point, normal, b, u, coarse_grid, chunk_pool, rng, jitter_seed);
                             radiance += nee_clamped(u, b, throughput *
                                 nee_ggx_mis(nee_s, omega_o, normal,
                                             f0_glass, rough));
@@ -1550,14 +1540,11 @@ fragment float4 pt_fragment(
                 } else {
                     // Diffuse fallback — Probabilistic mode only.
                     {
-                        NEELight nee = nee_sample_light(
-                            h.point, normal, u, lights,
+                        NEELight nee = nee_sample_light(h.point, normal, b, u, lights,
                             coarse_grid, chunk_pool, rng, jitter_seed);
                         radiance += throughput *
                             nee_diffuse_mis(nee, albedo, normal);
-                        NEELight nee_s = nee_sample_sun(
-                            h.point, normal, u,
-                            coarse_grid, chunk_pool, rng, jitter_seed);
+                        NEELight nee_s = nee_sample_sun(h.point, normal, b, u, coarse_grid, chunk_pool, rng, jitter_seed);
                         radiance += throughput *
                             nee_diffuse_mis(nee_s, albedo, normal);
                     }
@@ -1572,13 +1559,12 @@ fragment float4 pt_fragment(
         } else {
             // Diffuse default.
             {
-                NEELight nee = nee_sample_light(h.point, normal, u, lights,
+                NEELight nee = nee_sample_light(h.point, normal, b, u, lights,
                                                 coarse_grid, chunk_pool,
                                                 rng, jitter_seed);
                 radiance += nee_clamped(u, b, throughput *
                                         nee_diffuse_mis(nee, albedo, normal));
-                NEELight nee_s = nee_sample_sun(h.point, normal, u,
-                                                coarse_grid, chunk_pool,
+                NEELight nee_s = nee_sample_sun(h.point, normal, b, u, coarse_grid, chunk_pool,
                                                 rng, jitter_seed);
                 radiance += nee_clamped(u, b, throughput *
                                         nee_diffuse_mis(nee_s, albedo, normal));
@@ -1601,17 +1587,13 @@ fragment float4 pt_fragment(
         // paths with probability (1 - p) where p is the maximum component
         // of throughput; survivors get their throughput boosted by 1/p
         // so the estimator stays unbiased. Lets bounce_max go higher
-        // without the cost growing linearly.
-        //
-        // Skip when bsdf_correlation is on: RR's per-pixel coinflip
-        // breaks tile coherence at bounce >= 2, killing splashes that
-        // would otherwise show light reflected off a *diffuse* surface
-        // onto another surface. We're already biased via the indirect
-        // clamp in this mode, so RR isn't earning its variance reduction.
-        if (b >= kMinBouncesBeforeRR && u.bsdf_correlation == 0u) {
+        // without the cost growing linearly. Routed through pickrand1 so
+        // adjacent pixels in a tile terminate together (correlated mode);
+        // reference mode uses raw PCG per pixel.
+        if (b >= kMinBouncesBeforeRR) {
             float p = max(throughput.r, max(throughput.g, throughput.b));
             p = clamp(p, 0.05, 0.95);
-            if (rand1(rng) > p) break;
+            if (pickrand1(u, b, 6u, rng, jitter_seed) > p) break;
             throughput /= p;
         }
     }

@@ -10,41 +10,23 @@ struct LightPanel: View {
             row(label: "Bounces") {
                 IntSliderRow(value: $state.maxBounces, range: 1...8)
             }
-            Toggle("Area-light NEE", isOn: $state.areaLightNEE)
-                .help("Explicit shadow rays toward emissive voxels. On = smooth direct illumination from emitters at any sample count. Compose with Splash mode for Magica's stochastic-OFF hybrid.")
             Toggle("Power-weighted NEE", isOn: $state.powerWeightedNEE)
                 .help("Pick direct-light samples weighted by per-light power. Off = uniform.")
-                .disabled(!state.areaLightNEE)
+                .disabled(!state.stochasticGI)
             row(label: "RIS samples") {
                 IntSliderRow(value: $state.neeRisCount, range: 1...32)
             }
-            .disabled(!state.areaLightNEE)
-
-            sectionHeader("Splash mode (indirect)")
-            Toggle("Splash mode", isOn: $state.splashMode)
-                .help("Tile-correlated BRDF directions + tile-correlated NEE light selection + proportional indirect clamp. Composes with Area-light NEE: Splash + NEE on ≈ MV's SS-GI ON (smooth + correlated). Splash on + NEE off ≈ MV's SS-GI OFF (shaped indirect splashes, no smooth halo).")
-            row(label: "Splash clamp") {
+            .disabled(!state.stochasticGI)
+            row(label: "Indirect clamp") {
                 FloatSliderRow(value: $state.indirectClampL, range: 0...32,
                                format: "%.1f")
             }
-            .disabled(!state.splashMode)
             .help("Proportional clamp on indirect emissive contributions (NEE + BSDF-walk) at bounce >= 1. 0 = off; 4..16 is Magica's range.")
-            row(label: "Splash jitter") {
-                FloatSliderRow(value: $state.splashJitter, range: 0...0.2,
-                               format: "%.3f")
-            }
-            .disabled(!state.splashMode)
-            .help("Per-frame BRDF-direction perturbation magnitude. 0 = every pixel samples the same direction per sample (cleanest, marches across samples). Larger = visible cluster silhouette projection in a single frame.")
-            row(label: "Splash scale") {
-                IntSliderRow(value: $state.splashTilePx, range: 1...64)
-            }
-            .disabled(!state.splashMode)
-            .help("Correlation scale (pixels). One full noise sweep per `scale × 64` screen pixels. Only has visible effect when Splash jitter > 0.")
             row(label: "Temporal smooth") {
                 FloatSliderRow(value: $state.emaFloor, range: 0...1,
                                format: "%.3f")
             }
-            .help("Temporal-EMA blend weight on the displayed image — the `weight` in MagicaVoxel's pt_post.glsl mix(tex_last, dst, weight). Smaller = more smoothing.  0 = none (each frame's running mean displayed raw — splash popping visible).  0.05 ≈ 20-frame trail (heavy smoothing, sticky response to lighting changes).  0.5 = 2-frame trail (light smoothing).  1.0 = no smoothing (equivalent to 0).")
+            .help("Temporal-EMA blend weight on the displayed image — the `weight` in MagicaVoxel's pt_post.glsl mix(tex_last, dst, weight). Smaller = more smoothing.  0 = none.  0.05 ≈ 20-frame trail.  0.5 = 2-frame trail.  1.0 = no smoothing (= 0).")
 
             sectionHeader("Sky")
             Toggle("Atmospheric sky", isOn: $state.atmosphericSky)

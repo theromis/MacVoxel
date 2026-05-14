@@ -476,8 +476,8 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     RS.mode = static_cast<macvoxel::RenderMode>(v);
 }
 
-- (BOOL)magicaStochasticGI { return RS.magica_stochastic_gi; }
-- (void)setMagicaStochasticGI:(BOOL)v { RS.magica_stochastic_gi = (v == YES); }
+- (BOOL)stochasticGI { return RS.stochastic_gi; }
+- (void)setStochasticGI:(BOOL)v { RS.stochastic_gi = (v == YES); }
 
 - (BOOL)acesTonemap { return RS.aces_tonemap; }
 - (void)setAcesTonemap:(BOOL)v { RS.aces_tonemap = (v == YES); }
@@ -485,20 +485,8 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 - (BOOL)powerWeightedNEE { return RS.power_weighted_nee; }
 - (void)setPowerWeightedNEE:(BOOL)v { RS.power_weighted_nee = (v == YES); }
 
-- (BOOL)areaLightNEE { return RS.area_light_nee; }
-- (void)setAreaLightNEE:(BOOL)v { RS.area_light_nee = (v == YES); }
-
-- (BOOL)splashMode { return RS.splash_mode; }
-- (void)setSplashMode:(BOOL)v { RS.splash_mode = (v == YES); }
-
 - (float)indirectClampL { return RS.indirect_clamp_L; }
 - (void)setIndirectClampL:(float)v { RS.indirect_clamp_L = v; }
-
-- (float)splashJitter { return RS.splash_jitter; }
-- (void)setSplashJitter:(float)v { RS.splash_jitter = v; }
-
-- (NSInteger)splashTilePx { return RS.splash_tile_px; }
-- (void)setSplashTilePx:(NSInteger)v { RS.splash_tile_px = static_cast<int>(v); }
 
 - (float)emaFloor { return RS.ema_floor; }
 - (void)setEmaFloor:(float)v { RS.ema_floor = v; }

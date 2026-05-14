@@ -274,9 +274,9 @@ final class EditorState {
         get { _ = tick; return bridge.renderMode }
         set { bridge.renderMode = newValue; tick &+= 1 }
     }
-    var magicaStochasticGI: Bool {
-        get { _ = tick; return bridge.magicaStochasticGI }
-        set { bridge.magicaStochasticGI = newValue; tick &+= 1 }
+    var stochasticGI: Bool {
+        get { _ = tick; return bridge.stochasticGI }
+        set { bridge.stochasticGI = newValue; tick &+= 1 }
     }
     var acesTonemap: Bool {
         get { _ = tick; return bridge.acesTonemap }
@@ -286,25 +286,9 @@ final class EditorState {
         get { _ = tick; return bridge.powerWeightedNEE }
         set { bridge.powerWeightedNEE = newValue; tick &+= 1 }
     }
-    var areaLightNEE: Bool {
-        get { _ = tick; return bridge.areaLightNEE }
-        set { bridge.areaLightNEE = newValue; tick &+= 1 }
-    }
-    var splashMode: Bool {
-        get { _ = tick; return bridge.splashMode }
-        set { bridge.splashMode = newValue; tick &+= 1 }
-    }
     var indirectClampL: Float {
         get { _ = tick; return bridge.indirectClampL }
         set { bridge.indirectClampL = newValue; tick &+= 1 }
-    }
-    var splashJitter: Float {
-        get { _ = tick; return bridge.splashJitter }
-        set { bridge.splashJitter = newValue; tick &+= 1 }
-    }
-    var splashTilePx: Int {
-        get { _ = tick; return bridge.splashTilePx }
-        set { bridge.splashTilePx = newValue; tick &+= 1 }
     }
     var emaFloor: Float {
         get { _ = tick; return bridge.emaFloor }
