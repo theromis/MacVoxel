@@ -317,13 +317,17 @@ static float2 ray_aabb_clip(float3 o, float3 d, float3 lo, float3 hi) {
     return float2(tin, tout);
 }
 
-// Trace from o (grid-space) along d (unit, grid-space). Returns the
-// first cell with id != 0 within the grid AABB. Empty cells advance by
-// max(skip, 1) along the slowest-axis step, gating on the per-cell
-// baked skip distance.
+// Trace from o (grid-space) along d (unit, grid-space). Medium-aware:
+// cells whose palette ID matches `medium` are treated as "still inside
+// the same medium" and skipped (a run of glass voxels reads as one
+// medium); the DDA stops at the first cell whose ID differs from the
+// medium — which is the air↔glass / glass↔solid / glass↔air boundary,
+// and what the bounce loop needs to compute Beer-Lambert + Fresnel at.
+// For medium == 0 (air) the rule collapses to the usual "skip empty,
+// hit on solid".
 static Hit ray_vs_world(constant MagicaUniforms& u,
                         texture3d<uint, access::read> tex_df,
-                        float3 o, float3 d) {
+                        float3 o, float3 d, uint medium) {
     Hit h; h.hit = false; h.t = 0.0; h.id = 0u; h.axis = 0; h.side = 1.0;
     h.cell = int3(0);
     float3 lo = float3(u.grid_min);
@@ -357,7 +361,7 @@ static Hit ray_vs_world(constant MagicaUniforms& u,
         uint2 sample = tex_df.read(uint3(uint(rel.x), uint(rel.y), uint(rel.z))).rg;
         uint id = sample.x;
         uint skip = max(sample.y, 1u);
-        if (id != 0u) {
+        if (id != medium) {
             h.hit = true; h.t = t; h.id = id; h.cell = cell;
             return h;
         }
@@ -394,10 +398,12 @@ static Hit ray_vs_world(constant MagicaUniforms& u,
     return h;
 }
 
-// Shadow ray: returns true if no opaque blocker exists between o and
-// o + d * max_t. Uses the same DDA but exits as soon as any id != 0 is
-// hit. Glass blockers count as opaque shadowers in v1 — refining this
-// to allow glass transmission is a follow-up.
+// Shadow ray: returns true if any non-air cell exists between o and
+// o + d * max_t. Always tested against medium=0 (air) so glass voxels
+// act as opaque shadowers — NEE through glass would need a separate
+// path that accumulates Beer-Lambert and tunnels through medium runs.
+// Deferred to v2; the v1 cost is that diffuse surfaces submerged in
+// glass can't receive direct NEE.
 static bool ray_shadowed(constant MagicaUniforms& u,
                          texture3d<uint, access::read> tex_df,
                          float3 o, float3 d, float max_t) {
@@ -521,10 +527,40 @@ fragment float4 magica_fragment(
     float prev_brdf_pdf = 0.0;       // for MIS on next event
     bool prev_was_specular = true;   // first hit's emission counted directly
 
+    // Current medium the ray is travelling through. medium == 0 = air,
+    // medium != 0 = palette ID of the glass / SSS / etc. voxel. The
+    // bounce loop applies Beer-Lambert over each segment using
+    // `medium_albedo` and switches medium on transmission interfaces.
+    uint   medium = 0u;
+    float3 medium_albedo = float3(1.0);
+    float  medium_ior = 1.0;
+    float  medium_roughness = 0.0;  // air has no roughness
+
     for (uint bounce = 0u; bounce < u.max_bounces; ++bounce) {
-        Hit h = ray_vs_world(u, tex_df, o, d);
-        float t_ground = intersect_ground(o, d);
+        Hit h = ray_vs_world(u, tex_df, o, d, medium);
+        // Virtual ground plane only exists in air — inside a glass
+        // medium the only floor is the glass itself.
+        float t_ground = (medium == 0u) ? intersect_ground(o, d) : -1.0;
         bool ground_wins = (t_ground > 0.0) && (!h.hit || t_ground < h.t);
+
+        // Apply Beer-Lambert for the segment just traversed through
+        // the current medium. Mirrors Magica's `beer(K, d) = pow(K, d)`
+        // — `medium_albedo` is the linear-space color the medium tints
+        // light by per unit voxel distance.
+        if (medium != 0u) {
+            float seg;
+            if (ground_wins)     seg = t_ground;
+            else if (h.hit)      seg = h.t;
+            else {
+                // Ray escaped the AABB while still inside a medium.
+                // Use the AABB exit distance.
+                float3 lo = float3(u.grid_min);
+                float3 hi = lo + float3(u.grid_dim);
+                seg = max(ray_aabb_clip(o, d, lo, hi).y, 0.0);
+            }
+            throughput *= pow(max(medium_albedo, float3(1e-4)),
+                              float3(seg));
+        }
 
         if (!h.hit && !ground_wins) {
             // Sky miss. Sun NEE has already accounted for direct-sun on
@@ -546,9 +582,6 @@ fragment float4 magica_fragment(
             hit_p = o + d * t_ground;
             N = kGroundN;
             albedo = kGroundAlbedo;
-            // Ground is a hard-coded matte diffuse with no transparency
-            // / emission / metallic. Synthesised inline rather than
-            // burning a palette slot.
             m.type = float(MT_DIFFUSE);
             m.roughness = 1.0;
             m.metallic = 0.0;
@@ -557,6 +590,23 @@ fragment float4 magica_fragment(
             m.ior = 1.0;
             m._pad0 = m._pad1 = 0.0;
             mtype = MT_DIFFUSE;
+        } else if (h.id == 0u) {
+            // The DDA found an air cell while we're inside a medium —
+            // a medium-exit boundary. Synthesise an "air" material so
+            // the glass dispatch below handles the Fresnel reflect /
+            // refract at the boundary uniformly.
+            hit_p = o + d * h.t;
+            N = float3(0);
+            N[h.axis] = -h.side;
+            albedo = float3(1.0);
+            m.type = float(MT_GLASS);
+            m.roughness = 0.0;
+            m.metallic = 0.0;
+            m.emission = 0.0;
+            m.transparency = 1.0;
+            m.ior = 1.0;
+            m._pad0 = m._pad1 = 0.0;
+            mtype = MT_GLASS;
         } else {
             hit_p = o + d * h.t;
             N = float3(0);
@@ -787,36 +837,73 @@ fragment float4 magica_fragment(
             prev_was_specular = true;
             prev_brdf_pdf = 0.0;
         } else if (mtype == MT_GLASS) {
-            // Probabilistic Fresnel reflect/refract. Assumes the medium
-            // we just came from is "air" — interior refraction tracking
-            // is a v2 refinement.
-            float NoV = dot(N, -d);
-            bool entering = NoV > 0.0;
-            float3 Nf = entering ? N : -N;
-            float eta = entering ? (1.0 / m.ior) : m.ior;
-            float cos_i = abs(NoV);
+            // Transmission interface. eta = front_ior / back_ior; the
+            // "back" side is whatever the DDA just stepped into, the
+            // "front" side is the medium we're leaving.
+            float back_ior = m.ior;
+            float eta = medium_ior / back_ior;
+
+            // VNDF GGX microfacet: reflect / refract off the sampled
+            // half-vector H rather than the macroscopic face normal N.
+            // Roughness at the interface = max(front, back) — when
+            // exiting glass, `m` is the synthesised air material with
+            // roughness 0, so `medium_roughness` carries the glass's
+            // value through.
+            float r_iface = max(m.roughness, medium_roughness);
+            float a = max(r_iface * r_iface, 1e-4);
+            float3 V_ws = -d;
+            float3 V_ts = to_local(V_ws, N);
+            float3 H_ts = ggx_sample_vndf(V_ts, a,
+                              corr2(rng, u.lobes[min(bounce, 7u)].xy,
+                                    u.jitter_mult));
+            float3 H_ws = to_world(H_ts, N);
+
+            float cos_i = max(dot(H_ws, V_ws), 0.0);
             float k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
-            if (k < 0.0) {
-                // Total internal reflection.
-                next_d = reflect(d, Nf);
+
+            // Dielectric Schlick Fresnel using the actual IOR pair at
+            // the microfacet's cosine.
+            float F0_term = (medium_ior - back_ior) / (medium_ior + back_ior);
+            float F0 = F0_term * F0_term;
+            float F = (k < 0.0) ? 1.0 : fresnel_schlick(cos_i, F0);
+
+            float gr = corr1(rng, stride1(u.frame_seed, bounce, 6u),
+                             u.jitter_mult.x);
+            if (gr < F) {
+                // Reflect off the microfacet. Reject samples that end
+                // up below the geometric surface (microfacet-shadow
+                // configuration) so we don't push the ray into the
+                // medium we just bounced off of.
+                next_d = reflect(d, H_ws);
+                if (dot(next_d, N) <= 0.0) break;
+                next_o = hit_p + N * 1e-3;
             } else {
-                float F = fresnel_schlick(cos_i, 0.04);
-                float gr = corr1(rng, stride1(u.frame_seed, bounce, 6u),
-                                 u.jitter_mult.x);
-                if (gr < F) {
-                    next_d = reflect(d, Nf);
+                // Refract off the microfacet. Step into the new
+                // medium.
+                next_d = eta * d + (eta * cos_i - sqrt(k)) * H_ws;
+                if (dot(next_d, N) >= 0.0) break;  // shouldn't happen physically
+                next_o = hit_p - N * 1e-3;
+                medium = (h.id == 0u || ground_wins) ? 0u : h.id;
+                medium_ior = back_ior;
+                if (medium == 0u) {
+                    medium_albedo = float3(1.0);
+                    medium_roughness = 0.0;
                 } else {
-                    next_d = eta * d + (eta * cos_i - sqrt(k)) * Nf;
-                    next_o = hit_p - Nf * 1e-3;
+                    // Probabilistic mode: medium tints by the back
+                    // cell's albedo. Absorption mode: interpolate
+                    // toward white as transparency rises so the user
+                    // can dial in a clear pane independently of color.
+                    medium_albedo = (u.glass_mode == 0u)
+                        ? albedo
+                        : mix(albedo, float3(1.0), m.transparency);
+                    medium_roughness = m.roughness;
                 }
             }
-            // Glass tint approximation. Probabilistic mode keeps full
-            // tint; absorption mode interpolates toward white as
-            // transparency rises (matches our GlassMode convention).
-            float3 tint = (u.glass_mode == 0u)
-                ? albedo
-                : mix(albedo, float3(1.0), m.transparency);
-            throughput *= tint;
+            // Rough glass smears the direction enough that emitter
+            // arrivals along it shouldn't be treated as perfectly-
+            // specular for MIS purposes — but we don't have rough-
+            // glass NEE wired, so the safest approximation is to
+            // still mark specular and let BSDF-arrival count fully.
             prev_was_specular = true;
             prev_brdf_pdf = 0.0;
         } else {
