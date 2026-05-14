@@ -1187,17 +1187,14 @@ fragment float4 pt_fragment(
         // — the next iteration's DDA will find the real hit in air.
         if (h.hit && entered_medium != 0u) {
             // Beer-Lambert: attenuate throughput by the path length
-            // through the medium. We want the user's albedo to read as
-            // the color at a "typical" slab thickness rather than at
-            // exactly 1 voxel — otherwise saturated colors compound
-            // into near-black across any slab more than 1 voxel thick
-            // or viewed at any angle. The 0.5 factor ties albedo to
-            // a 2-voxel reference depth, which keeps body color readable
-            // and lets edges (longer paths) darken as expected.
-            const float kAbsorptionScale = 0.5;
+            // Beer-Lambert through the medium: throughput *= albedo^dist.
+            // 1-voxel reference depth matches MagicaVoxel — saturated
+            // colored glass darkens to its albedo across a single voxel
+            // and edges (longer paths) compound from there. The softer
+            // 2-voxel-reference look is what Probabilistic mode is for.
             float dist = length(h.point - medium_entry);
             throughput *= pow(max(medium_albedo, float3(1e-6)),
-                              float3(dist * kAbsorptionScale));
+                              float3(dist));
 
             GpuMaterial em = materials[entered_medium];
             float3 n = float3(0.0);
@@ -1539,15 +1536,13 @@ fragment float4 pt_fragment(
                         ray_dir = eta * ray_dir + (eta * cos_i - sqrt(k)) * m;
                         medium_mat = h.cell_val;
                         medium_entry = h.point;
-                        // Absorption mode caps the "clear" end at 0.9
-                        // rather than full white so even nominally-
-                        // clear glass keeps a per-voxel Beer-Lambert
-                        // factor. That attenuates the back-face
-                        // Fresnel ghost reflection (P11.5) over its
-                        // two-medium-traversal path so the ghost reads
-                        // as a clearly-fainter copy of the primary.
+                        // Absorption mode: medium albedo interpolates
+                        // from the surface color (transparency=0) toward
+                        // pure white (transparency=1). At trans=1 the
+                        // medium absorbs nothing and thick glass reads
+                        // as clear, matching MagicaVoxel's interpretation.
                         medium_albedo = (u.glass_mode == 1u)
-                            ? mix(albedo, float3(0.9), trans)
+                            ? mix(albedo, float3(1.0), trans)
                             : albedo;
                         prev_is_delta = true;
                     }
