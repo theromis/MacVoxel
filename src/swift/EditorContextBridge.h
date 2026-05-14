@@ -67,6 +67,16 @@ typedef NS_ENUM(NSInteger, BridgeGlassMode) {
     BridgeGlassModeAbsorption    NS_SWIFT_NAME(absorption)    = 1,
 };
 
+// Mirror of macvoxel::RenderMode (RenderState.h). The three states the
+// renderer-mode segmented control selects between:
+// .edit drives the realtime ray-cast preview; .render drives the
+// in-house path tracer; .magica drives the Magica-ported path tracer.
+typedef NS_ENUM(NSInteger, BridgeRenderMode) {
+    BridgeRenderModeEdit   NS_SWIFT_NAME(edit)   = 0,
+    BridgeRenderModeRender NS_SWIFT_NAME(render) = 1,
+    BridgeRenderModeMagica NS_SWIFT_NAME(magica) = 2,
+};
+
 typedef NS_ENUM(NSInteger, BridgeMaterialType) {
     BridgeMaterialTypeDiffuse  NS_SWIFT_NAME(diffuse)  = 0,
     BridgeMaterialTypeMetal    NS_SWIFT_NAME(metal)    = 1,
@@ -189,8 +199,11 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 
 @property (nonatomic, assign) NSInteger maxBounces;     // 1..8
 @property (nonatomic, assign) NSInteger maxSamples;     // 1..N
-@property (nonatomic, assign) BOOL pathTraced;
+@property (nonatomic, assign) BridgeRenderMode renderMode;
 @property (nonatomic, assign) BOOL acesTonemap;
+// Magica-only "Stochastic Sampling GI" (= OPT_AREA). Has no effect in
+// the .edit / .render modes — read by MagicaRenderer only.
+@property (nonatomic, assign) BOOL magicaStochasticGI;
 @property (nonatomic, assign) BOOL powerWeightedNEE;
 @property (nonatomic, assign) BOOL areaLightNEE;
 @property (nonatomic, assign) BOOL splashMode;

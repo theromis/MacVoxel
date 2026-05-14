@@ -469,8 +469,15 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 - (NSInteger)maxSamples { return RS.max_samples; }
 - (void)setMaxSamples:(NSInteger)v { RS.max_samples = static_cast<int>(v); }
 
-- (BOOL)pathTraced { return RS.path_traced; }
-- (void)setPathTraced:(BOOL)v { RS.path_traced = (v == YES); }
+- (BridgeRenderMode)renderMode {
+    return static_cast<BridgeRenderMode>(RS.mode);
+}
+- (void)setRenderMode:(BridgeRenderMode)v {
+    RS.mode = static_cast<macvoxel::RenderMode>(v);
+}
+
+- (BOOL)magicaStochasticGI { return RS.magica_stochastic_gi; }
+- (void)setMagicaStochasticGI:(BOOL)v { RS.magica_stochastic_gi = (v == YES); }
 
 - (BOOL)acesTonemap { return RS.aces_tonemap; }
 - (void)setAcesTonemap:(BOOL)v { RS.aces_tonemap = (v == YES); }

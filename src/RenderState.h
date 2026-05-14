@@ -22,12 +22,23 @@ enum class GlassMode : uint8_t {
     Absorption = 1,
 };
 
+// Which renderer the scene view drives. Edit = realtime ray-cast
+// preview; Render = our path tracer (PathTraceRenderer); Magica =
+// the Magica-ported path tracer (MagicaRenderer). Promoted from a
+// 2-value bool when the third option arrived so SwiftUI / bridge /
+// shader code all switch over one enum instead of cascading bools.
+enum class RenderMode : uint8_t {
+    Edit = 0,
+    Render = 1,
+    Magica = 2,
+};
+
 // User-editable render configuration. Inputs only — anything the
 // renderer *produces* (sample_count, etc.) belongs on RenderProgress
 // so the input side stays a pure value an Observable / SwiftUI binding
 // can publish without churning every frame.
 struct RenderSettings {
-    bool path_traced = false;
+    RenderMode mode = RenderMode::Edit;
     int max_bounces = 5;        // depth of bounces beyond the primary ray
     // Cap on accumulated samples. Once reached, the renderer keeps
     // displaying the already-accumulated buffer but stops contributing
@@ -171,6 +182,13 @@ struct RenderSettings {
     // When off, falls back to the constant `sky_color × sky_intensity`
     // tint.
     bool atmospheric_sky = false;
+    // Magica-only: "Stochastic Sampling GI" toggle (= Magica's OPT_AREA
+    // flag). When on, the Magica path tracer fires explicit area-light
+    // NEE rays with MIS at every bounce. When off, emissive voxels are
+    // discovered only by random BSDF walks — higher variance, distinct
+    // "stochastic OFF" splotchy aesthetic. Doesn't affect the existing
+    // Render path; that has its own area_light_nee field above.
+    bool magica_stochastic_gi = true;
     // Aerial-perspective fade applied to grazing-angle primary rays
     // that hit the virtual ground plane: blends in the limit-direction
     // sky color so the floor doesn't meet the sky as a hard line.

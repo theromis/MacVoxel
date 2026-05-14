@@ -6,6 +6,7 @@
 #include "Camera.h"
 #include "Document.h"
 #include "EditorContext.h"
+#include "MagicaRenderer.h"
 #include "PathTraceRenderer.h"
 #include "RenderState.h"
 #include "VoxFile.h"
@@ -19,6 +20,8 @@
 
 namespace macvoxel {
 namespace {
+
+enum class Engine { Render, Magica };
 
 struct Args {
     const char* input = nullptr;
@@ -42,6 +45,9 @@ struct Args {
     bool override_clamp_L = false;
     float clamp_L = 8.0f;
     GlassMode glass_mode = GlassMode::Probabilistic;
+    Engine engine = Engine::Render;
+    bool override_magica_gi = false;
+    bool magica_stochastic_gi = true;
 };
 
 void PrintUsage() {
@@ -53,7 +59,8 @@ void PrintUsage() {
         "                       [--sky-intensity F] [--sun-intensity F]\n"
         "                       [--splash-mode] [--splash-jitter F]\n"
         "                       [--splash-tile-px N] [--clamp-L F]\n"
-        "                       [--glass-mode probabilistic|absorption]\n");
+        "                       [--glass-mode probabilistic|absorption]\n"
+        "                       [--engine render|magica]\n");
 }
 
 bool ParseArgs(int argc, const char* argv[], Args* out) {
@@ -125,6 +132,23 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
                     "--glass-mode must be 'probabilistic' or 'absorption'\n");
                 return false;
             }
+        } else if (eq("--engine")) {
+            const char* v = need_val("--engine"); if (!v) return false;
+            if (std::strcmp(v, "render") == 0) {
+                out->engine = Engine::Render;
+            } else if (std::strcmp(v, "magica") == 0) {
+                out->engine = Engine::Magica;
+            } else {
+                std::fprintf(stderr,
+                    "--engine must be 'render' or 'magica'\n");
+                return false;
+            }
+        } else if (eq("--magica-gi")) {
+            const char* v = need_val("--magica-gi"); if (!v) return false;
+            out->override_magica_gi = true;
+            if (std::strcmp(v, "on") == 0)  out->magica_stochastic_gi = true;
+            else if (std::strcmp(v, "off") == 0) out->magica_stochastic_gi = false;
+            else { std::fprintf(stderr, "--magica-gi must be 'on' or 'off'\n"); return false; }
         } else if (eq("-h") || eq("--help")) {
             PrintUsage();
             return false;
@@ -221,46 +245,80 @@ int RunCliRender(int argc, const char* argv[]) {
             ctx.render_settings.indirect_clamp_L = args.clamp_L;
         }
         ctx.render_settings.glass_mode = args.glass_mode;
-
-        PathTraceRenderer* renderer =
-            [[PathTraceRenderer alloc] initWithDevice:device
-                                          colorFormat:MTLPixelFormatBGRA8Unorm];
-        if (renderer == nil) {
-            std::fprintf(stderr, "could not initialize path tracer\n");
-            return 1;
+        if (args.override_magica_gi) {
+            ctx.render_settings.magica_stochastic_gi = args.magica_stochastic_gi;
         }
 
         const CGSize size = CGSizeMake(static_cast<CGFloat>(args.width),
                                        static_cast<CGFloat>(args.height));
 
         std::fprintf(stderr,
-            "rendering %s → %s  %dx%d  %d samples  %d bounces  seed=%u\n",
+            "rendering %s → %s  %dx%d  %d samples  %d bounces  seed=%u  engine=%s\n",
             args.input, args.output,
-            args.width, args.height, args.samples, args.bounces, args.seed);
+            args.width, args.height, args.samples, args.bounces, args.seed,
+            args.engine == Engine::Magica ? "magica" : "render");
 
         NSError* nerr = nil;
-        if (![renderer
-                 renderHeadlessSamples:static_cast<uint32_t>(args.samples)
-                               context:&ctx
-                                camera:camera
-                                  size:size
-                            maxBounces:static_cast<uint32_t>(args.bounces)
-                              baseSeed:args.seed
-                          commandQueue:queue
-                                 error:&nerr]) {
-            std::fprintf(stderr, "render failed: %s\n",
-                [[nerr localizedDescription] UTF8String]);
-            return 1;
-        }
-
         NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:args.output]];
-        if (![renderer exportPNGToURL:url
-                          acesTonemap:args.aces ? YES : NO
-                         commandQueue:queue
-                                error:&nerr]) {
-            std::fprintf(stderr, "export failed: %s\n",
-                [[nerr localizedDescription] UTF8String]);
-            return 1;
+
+        if (args.engine == Engine::Magica) {
+            MagicaRenderer* renderer =
+                [[MagicaRenderer alloc] initWithDevice:device
+                                           colorFormat:MTLPixelFormatBGRA8Unorm];
+            if (renderer == nil) {
+                std::fprintf(stderr, "could not initialize magica renderer\n");
+                return 1;
+            }
+            if (![renderer
+                     renderHeadlessSamples:static_cast<uint32_t>(args.samples)
+                                   context:&ctx
+                                    camera:camera
+                                      size:size
+                                maxBounces:static_cast<uint32_t>(args.bounces)
+                                  baseSeed:args.seed
+                              commandQueue:queue
+                                     error:&nerr]) {
+                std::fprintf(stderr, "render failed: %s\n",
+                    [[nerr localizedDescription] UTF8String]);
+                return 1;
+            }
+            if (![renderer exportPNGToURL:url
+                              acesTonemap:args.aces ? YES : NO
+                             commandQueue:queue
+                                    error:&nerr]) {
+                std::fprintf(stderr, "export failed: %s\n",
+                    [[nerr localizedDescription] UTF8String]);
+                return 1;
+            }
+        } else {
+            PathTraceRenderer* renderer =
+                [[PathTraceRenderer alloc] initWithDevice:device
+                                              colorFormat:MTLPixelFormatBGRA8Unorm];
+            if (renderer == nil) {
+                std::fprintf(stderr, "could not initialize path tracer\n");
+                return 1;
+            }
+            if (![renderer
+                     renderHeadlessSamples:static_cast<uint32_t>(args.samples)
+                                   context:&ctx
+                                    camera:camera
+                                      size:size
+                                maxBounces:static_cast<uint32_t>(args.bounces)
+                                  baseSeed:args.seed
+                              commandQueue:queue
+                                     error:&nerr]) {
+                std::fprintf(stderr, "render failed: %s\n",
+                    [[nerr localizedDescription] UTF8String]);
+                return 1;
+            }
+            if (![renderer exportPNGToURL:url
+                              acesTonemap:args.aces ? YES : NO
+                             commandQueue:queue
+                                    error:&nerr]) {
+                std::fprintf(stderr, "export failed: %s\n",
+                    [[nerr localizedDescription] UTF8String]);
+                return 1;
+            }
         }
         std::fprintf(stderr, "wrote %s\n", args.output);
     }

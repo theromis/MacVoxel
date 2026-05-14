@@ -1,6 +1,7 @@
 #import "MetalScene.h"
 
 #import "GeneratorEngine.h"
+#import "MagicaRenderer.h"
 #import "PathTraceRenderer.h"
 #import "RaycastRenderer.h"
 #import "SceneOverlayRenderer.h"
@@ -73,8 +74,9 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     // gestures, so we drop whatever's floating before letting the new
     // context see a stale buffer.
     macvoxel::ToolKind _lastToolForFB;
-    bool _lastPathTracedForFB;
-    bool _wasPathTraced;
+    macvoxel::RenderMode _lastModeForFB;
+    macvoxel::RenderMode _lastRenderMode;
+    MagicaRenderer *_magicaRenderer;
 
     // Modeling-side gesture state — drag mode + per-tool sub-structs.
     // See InteractionState.h for the breakdown.
@@ -127,6 +129,10 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         initWithDevice:device colorFormat:self.colorPixelFormat];
     if (_pathTraceRenderer == nil) return nil;
 
+    _magicaRenderer = [[MagicaRenderer alloc]
+        initWithDevice:device colorFormat:self.colorPixelFormat];
+    if (_magicaRenderer == nil) return nil;
+
     _overlayRenderer = [[SceneOverlayRenderer alloc]
         initWithDevice:device colorFormat:self.colorPixelFormat];
     if (_overlayRenderer == nil) return nil;
@@ -136,9 +142,9 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     if (_generatorEngine == nil) return nil;
 
     _interaction.gen_gizmo.active_drag_face = -1;  // 0 means -X face — explicit nil.
-    _wasPathTraced = NO;
+    _lastRenderMode = macvoxel::RenderMode::Edit;
     _lastToolForFB = _ctx->tool.tool;
-    _lastPathTracedForFB = _ctx->render_settings.path_traced;
+    _lastModeForFB = _ctx->render_settings.mode;
     return self;
 }
 
@@ -166,6 +172,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 - (void)invalidateRenderers {
     [_raycastRenderer invalidate];
     [_pathTraceRenderer invalidate];
+    [_magicaRenderer invalidate];
 }
 
 - (BOOL)exportRenderToURL:(NSURL *)url error:(NSError **)error {
@@ -175,6 +182,12 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         return NO;
     }
     const BOOL aces = _ctx->render_settings.aces_tonemap ? YES : NO;
+    if (_ctx->render_settings.mode == macvoxel::RenderMode::Magica) {
+        return [_magicaRenderer exportPNGToURL:url
+                                   acesTonemap:aces
+                                  commandQueue:_commandQueue
+                                         error:error];
+    }
     return [_pathTraceRenderer exportPNGToURL:url
                                   acesTonemap:aces
                                  commandQueue:_commandQueue
@@ -390,15 +403,17 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     {
         macvoxel::FloatingBuffer &fb_t = _ctx->floating_buffer;
         const macvoxel::ToolKind cur_tool = _ctx->tool.tool;
-        const bool cur_pt = _ctx->render_settings.path_traced;
+        const macvoxel::RenderMode cur_mode = _ctx->render_settings.mode;
         if (fb_t.active) {
-            if (cur_tool != _lastToolForFB ||
-                (cur_pt && !_lastPathTracedForFB)) {
+            const bool entering_render =
+                cur_mode != macvoxel::RenderMode::Edit &&
+                _lastModeForFB == macvoxel::RenderMode::Edit;
+            if (cur_tool != _lastToolForFB || entering_render) {
                 macvoxel::CommitFloatingBuffer(*_ctx);
             }
         }
         _lastToolForFB = cur_tool;
-        _lastPathTracedForFB = cur_pt;
+        _lastModeForFB = cur_mode;
     }
 
     // Build the overlay command list for this frame. The overlays draw
@@ -419,12 +434,14 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
     cmd.label = @"MacVoxel Frame";
 
-    const bool pt_now = _ctx->render_settings.path_traced;
-    if (pt_now != _wasPathTraced) {
-        // Toggling either direction invalidates whatever the path
-        // tracer had accumulated (or wants to start fresh on enable).
+    const macvoxel::RenderMode mode_now = _ctx->render_settings.mode;
+    if (mode_now != _lastRenderMode) {
+        // Toggling between any pair of modes invalidates whatever the
+        // PT engines had accumulated, so the user never sees stale
+        // pixels from the previous mode on the way back in.
         [_pathTraceRenderer invalidate];
-        _wasPathTraced = pt_now;
+        [_magicaRenderer invalidate];
+        _lastRenderMode = mode_now;
     }
 
     const CGSize ds = view.drawableSize;
@@ -433,14 +450,22 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         static_cast<float>(self.bounds.size.height),
     };
 
-    if (pt_now) {
-        // Path-traced: PathTraceRenderer handles its own accumulation
-        // + display passes. Overlay draws into a follow-up encoder
-        // sharing the same drawable's render-pass descriptor.
-        [_pathTraceRenderer renderInView:view
-                                     cmd:cmd
-                                 context:_ctx
-                                  camera:_camera];
+    if (mode_now == macvoxel::RenderMode::Render ||
+        mode_now == macvoxel::RenderMode::Magica) {
+        // Path-traced: the active PT renderer handles its own
+        // accumulation + display passes. Overlay draws into a follow-up
+        // encoder sharing the same drawable's render-pass descriptor.
+        if (mode_now == macvoxel::RenderMode::Magica) {
+            [_magicaRenderer renderInView:view
+                                      cmd:cmd
+                                  context:_ctx
+                                   camera:_camera];
+        } else {
+            [_pathTraceRenderer renderInView:view
+                                         cmd:cmd
+                                     context:_ctx
+                                      camera:_camera];
+        }
 
         if (!_od.empty()) {
             MTLRenderPassDescriptor *overlayPass =

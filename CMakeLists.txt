@@ -36,6 +36,7 @@ set(APP_SOURCES
     src/CliRender.mm
     src/RaycastRenderer.mm
     src/PathTraceRenderer.mm
+    src/MagicaRenderer.mm
     src/SceneOverlayRenderer.mm
     src/VoxelGrid.cpp
     src/Palette.cpp
@@ -91,6 +92,7 @@ set(APP_RESOURCES
     resources/SF-Symbols-Export.ttf
     resources/default.vox
     src/Generators.metal
+    src/Magica.metal
     src/Overlay.metal
     src/PathTrace.metal
 )

@@ -41,7 +41,7 @@ final class EditorState {
     //    the bridge so user input reflects on screen the same frame
     //    rather than waiting up to a full timer period. Skipping the
     //    bump here causes visible UI lag on conditionals like
-    //    `if state.pathTraced` — Observation has no way to see the
+    //    `if state.renderMode == .render` — Observation has no way to see the
     //    bridge mutation otherwise.
     // 2. A 10 Hz Timer below catches controller-driven mutations
     //    (brush strokes, selection ops) that bypass the Swift bridge
@@ -270,9 +270,13 @@ final class EditorState {
         get { _ = tick; return bridge.maxSamples }
         set { bridge.maxSamples = newValue; tick &+= 1 }
     }
-    var pathTraced: Bool {
-        get { _ = tick; return bridge.pathTraced }
-        set { bridge.pathTraced = newValue; tick &+= 1 }
+    var renderMode: BridgeRenderMode {
+        get { _ = tick; return bridge.renderMode }
+        set { bridge.renderMode = newValue; tick &+= 1 }
+    }
+    var magicaStochasticGI: Bool {
+        get { _ = tick; return bridge.magicaStochasticGI }
+        set { bridge.magicaStochasticGI = newValue; tick &+= 1 }
     }
     var acesTonemap: Bool {
         get { _ = tick; return bridge.acesTonemap }

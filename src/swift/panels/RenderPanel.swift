@@ -6,17 +6,21 @@ struct RenderPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader("Mode")
-            Picker("Mode", selection: Binding(
-                get: { state.pathTraced },
-                set: { state.pathTraced = $0 }
-            )) {
-                Text("Edit").tag(false)
-                Text("Render").tag(true)
+            Picker("Mode", selection: $state.renderMode) {
+                Text("Edit").tag(BridgeRenderMode.edit)
+                Text("Render").tag(BridgeRenderMode.render)
+                Text("Magica").tag(BridgeRenderMode.magica)
             }
             .labelsHidden()
             .pickerStyle(.segmented)
 
-            if state.pathTraced {
+            if state.renderMode == .magica {
+                Toggle("Stochastic Sampling GI",
+                       isOn: $state.magicaStochasticGI)
+                    .help("Magica's OPT_AREA toggle. On = explicit area-light NEE with MIS at every bounce. Off = emissives discovered only by BSDF random walk (splotchy 'SS-GI off' look).")
+            }
+
+            if state.renderMode != .edit {
                 Toggle("ACES tonemap", isOn: $state.acesTonemap)
 
                 HStack(spacing: 8) {
