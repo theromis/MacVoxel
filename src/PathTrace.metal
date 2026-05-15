@@ -60,6 +60,12 @@ struct PathUniforms {
     float    _pad_tail0;
     float    _pad_tail1;
     float    _pad_tail2;
+    // Thin-lens DOF. .w slots carry aperture / focus_distance so the
+    // struct doesn't need three extra padding rows. aperture == 0
+    // (the default) disables DOF entirely in the primary ray block.
+    float4   camera_right_grid;    // .xyz = right (grid); .w = aperture
+    float4   camera_up_grid;       // .xyz = up    (grid); .w = focus_distance
+    float4   camera_forward_grid;  // .xyz = forward (grid); .w unused
 };
 
 struct GpuLight {
@@ -1127,6 +1133,34 @@ fragment float4 pt_fragment(
     float3 ray_dir   = float3(ray_dir_world.x,
                                -ray_dir_world.z,
                                ray_dir_world.y);
+
+    // Thin-lens depth of field. aperture == 0 leaves the pinhole ray
+    // untouched. Otherwise we sample a uniform point on the lens disc
+    // (radius = aperture, in voxel units) in the camera's local
+    // right/up plane, then aim through the focal point — the
+    // intersection of the original through-pixel ray with the plane at
+    // perpendicular distance `focus_distance` along camera-forward.
+    // Lens samples ride the decorrelated PCG stream alongside the AA
+    // jitter so per-frame variation matches.
+    float aperture = u.camera_right_grid.w;
+    if (aperture > 0.0) {
+        float focus_distance = u.camera_up_grid.w;
+        float3 right_g   = u.camera_right_grid.xyz;
+        float3 up_g      = u.camera_up_grid.xyz;
+        float3 forward_g = u.camera_forward_grid.xyz;
+        float xi1 = rand1(rng);
+        float xi2 = rand1(rng);
+        float theta = 6.2831853 * xi1;
+        float rad = aperture * sqrt(xi2);
+        float2 lens_uv = float2(cos(theta), sin(theta)) * rad;
+        float cos_theta = max(dot(ray_dir, forward_g), 1e-3);
+        float3 focus_pt = ray_origin +
+                          ray_dir * (focus_distance / cos_theta);
+        ray_origin = ray_origin +
+                     right_g * lens_uv.x +
+                     up_g    * lens_uv.y;
+        ray_dir = normalize(focus_pt - ray_origin);
+    }
 
     float3 throughput = float3(1.0);
     float3 radiance   = float3(0.0);

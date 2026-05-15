@@ -158,6 +158,14 @@ struct RenderSettings {
     // the ground returns ~5% sky (≈ exp(-3)), so smaller = tighter,
     // 0 = off (sharp horizon).
     float horizon_softness_deg = 3.0f;
+    // Thin-lens depth of field. aperture is the lens disc radius in
+    // grid (voxel) units — 0 disables and the renderer behaves as a
+    // pinhole camera (existing default). focus_distance is the
+    // perpendicular distance along camera-forward (in voxel units)
+    // at which objects stay sharp; everything else blurs in proportion
+    // to its offset from that plane, scaled by aperture.
+    float aperture = 0.0f;
+    float focus_distance = 30.0f;
 };
 
 // Renderer-produced state. Reported back from PathTraceRenderer for the

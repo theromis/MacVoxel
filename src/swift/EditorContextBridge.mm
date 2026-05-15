@@ -522,6 +522,13 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 - (float)sunColorB { return RS.sun_color[2]; }
 - (void)setSunColorB:(float)v { RS.sun_color[2] = v; }
 
+- (float)aperture { return RS.aperture; }
+- (void)setAperture:(float)v { RS.aperture = std::max(0.0f, v); }
+- (float)focusDistance { return RS.focus_distance; }
+- (void)setFocusDistance:(float)v {
+    RS.focus_distance = std::max(0.1f, v);
+}
+
 #undef RS
 
 // ---------------------------------------------------------------------------

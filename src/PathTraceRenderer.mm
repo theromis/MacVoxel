@@ -47,13 +47,19 @@ struct PathUniforms {
     uint32_t _pad_corr;
     float indirect_clamp_L;       // <=0 disables proportional clamp
     float _pad_tail[3];           // round up to 16-byte alignment
+    // Thin-lens DOF. Camera basis is grid-space (matches the rest of
+    // the path tracer's coord system); .w slots pack the two DOF
+    // scalars to avoid extra padding rows.
+    simd::float4 camera_right_grid;    // .xyz = right (grid); .w = aperture
+    simd::float4 camera_up_grid;       // .xyz = up    (grid); .w = focus_distance
+    simd::float4 camera_forward_grid;  // .xyz = forward (grid); .w unused
 };
 // CPU and MSL `constant` PathUniforms must agree byte-for-byte, since
 // we setBytes:length:sizeof(PathUniforms). The simd float3/int3 types
 // are 16-byte slots on both sides (3-of-4 used) so the explicit `_padN`
 // scalars get an additional 12-byte auto-pad in front of every
 // 16-aligned successor.
-static_assert(sizeof(PathUniforms) == 448, "PathUniforms size mismatch");
+static_assert(sizeof(PathUniforms) == 496, "PathUniforms size mismatch");
 
 // Per-emissive-voxel entry in the next-event-estimation light buffer.
 // Built CPU-side at doc.version change so the shader doesn't have to
@@ -180,6 +186,8 @@ struct DisplayUniforms {
     // Hash of the sun parameters (elev / azim / diameter / color /
     // intensity). Cheaper to fingerprint than to compare each field.
     uint64_t _lastSunHash;
+    float _lastAperture;
+    float _lastFocusDistance;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -737,6 +745,14 @@ struct DisplayUniforms {
             _wantsClear = YES;
         }
     }
+    if (rs.aperture != _lastAperture) {
+        _lastAperture = rs.aperture;
+        _wantsClear = YES;
+    }
+    if (rs.focus_distance != _lastFocusDistance) {
+        _lastFocusDistance = rs.focus_distance;
+        _wantsClear = YES;
+    }
 
     if (_wantsClear) {
         _sampleCount = 0;
@@ -1026,6 +1042,33 @@ struct DisplayUniforms {
         u._pad_tail[0] = 0.0f;
         u._pad_tail[1] = 0.0f;
         u._pad_tail[2] = 0.0f;
+    }
+    {
+        // Camera basis in grid space for the thin-lens DOF block.
+        // World→grid rotation is (x, -z, y), matching the primary-ray
+        // conversion in PathTrace.metal.
+        const simd::float3 eye = camera.Position();
+        const simd::float3 up_world{0.0f, 1.0f, 0.0f};
+        const simd::float3 fwd_w = simd::normalize(camera.target - eye);
+        const simd::float3 right_w =
+            simd::normalize(simd::cross(fwd_w, up_world));
+        const simd::float3 up_w = simd::cross(right_w, fwd_w);
+        auto to_grid = [](simd::float3 v) {
+            return simd::float3{v.x, -v.z, v.y};
+        };
+        const simd::float3 right_g = to_grid(right_w);
+        const simd::float3 up_g    = to_grid(up_w);
+        const simd::float3 fwd_g   = to_grid(fwd_w);
+        const float aperture =
+            std::max(0.0f, rs.aperture);
+        const float focus_dist =
+            std::max(0.1f, rs.focus_distance);
+        u.camera_right_grid = simd::float4{
+            right_g.x, right_g.y, right_g.z, aperture};
+        u.camera_up_grid = simd::float4{
+            up_g.x, up_g.y, up_g.z, focus_dist};
+        u.camera_forward_grid = simd::float4{
+            fwd_g.x, fwd_g.y, fwd_g.z, 0.0f};
     }
 
     [enc setRenderPipelineState:_pathPipeline];

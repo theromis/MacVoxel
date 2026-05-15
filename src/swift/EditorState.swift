@@ -335,6 +335,14 @@ final class EditorState {
             tick &+= 1
         }
     }
+    var aperture: Float {
+        get { _ = tick; return bridge.aperture }
+        set { bridge.aperture = newValue; tick &+= 1 }
+    }
+    var focusDistance: Float {
+        get { _ = tick; return bridge.focusDistance }
+        set { bridge.focusDistance = newValue; tick &+= 1 }
+    }
 
     // ---- Tool settings (panel-facing) ----
 

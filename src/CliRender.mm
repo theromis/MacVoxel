@@ -37,6 +37,10 @@ struct Args {
     float sun_intensity = 0.0f;
     bool override_clamp_L = false;
     float clamp_L = 8.0f;
+    bool override_aperture = false;
+    float aperture = 0.0f;
+    bool override_focus = false;
+    float focus = 30.0f;
     GlassMode glass_mode = GlassMode::Probabilistic;
 };
 
@@ -49,6 +53,7 @@ void PrintUsage() {
         "                       [--reference]\n"
         "                       [--sky-intensity F] [--sun-intensity F]\n"
         "                       [--clamp-L F]\n"
+        "                       [--aperture F] [--focus F]\n"
         "                       [--glass-mode probabilistic|absorption]\n");
 }
 
@@ -103,6 +108,14 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
             const char* v = need_val("--clamp-L"); if (!v) return false;
             out->clamp_L = static_cast<float>(std::atof(v));
             out->override_clamp_L = true;
+        } else if (eq("--aperture")) {
+            const char* v = need_val("--aperture"); if (!v) return false;
+            out->aperture = static_cast<float>(std::atof(v));
+            out->override_aperture = true;
+        } else if (eq("--focus")) {
+            const char* v = need_val("--focus"); if (!v) return false;
+            out->focus = static_cast<float>(std::atof(v));
+            out->override_focus = true;
         } else if (eq("--glass-mode")) {
             const char* v = need_val("--glass-mode"); if (!v) return false;
             if (std::strcmp(v, "probabilistic") == 0) {
@@ -202,6 +215,12 @@ int RunCliRender(int argc, const char* argv[]) {
         }
         if (args.override_clamp_L) {
             ctx.render_settings.indirect_clamp_L = args.clamp_L;
+        }
+        if (args.override_aperture) {
+            ctx.render_settings.aperture = args.aperture;
+        }
+        if (args.override_focus) {
+            ctx.render_settings.focus_distance = args.focus;
         }
         ctx.render_settings.glass_mode = args.glass_mode;
 

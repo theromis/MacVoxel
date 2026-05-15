@@ -18,8 +18,6 @@ struct RenderPanel: View {
                        isOn: $state.stochasticGI)
                     .help("MagicaVoxel's OPT_AREA toggle. On = explicit area-light NEE with MIS at every bounce. Off = emissives discovered only by BSDF random walk (splotchy 'SS-GI off' look).")
 
-                Toggle("ACES tonemap", isOn: $state.acesTonemap)
-
                 HStack(spacing: 8) {
                     Text("Glass")
                         .font(.system(size: 11))
@@ -62,6 +60,42 @@ struct RenderPanel: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 44, alignment: .trailing)
                 }
+
+                sectionHeader("Camera")
+                Toggle("ACES tonemap", isOn: $state.acesTonemap)
+
+                HStack(spacing: 6) {
+                    Text("Aperture")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 64, alignment: .leading)
+                    Slider(value: Binding(
+                        get: { Double(state.aperture) },
+                        set: { state.aperture = Float($0) }
+                    ), in: 0.0...3.0)
+                    Text(String(format: "%.2f", state.aperture))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, alignment: .trailing)
+                }
+                .help("Thin-lens lens radius in voxel units. 0 = pinhole (no DOF); larger = stronger blur away from the focal plane.")
+
+                HStack(spacing: 6) {
+                    Text("Focus")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 64, alignment: .leading)
+                    Slider(value: Binding(
+                        get: { Double(state.focusDistance) },
+                        set: { state.focusDistance = Float($0) }
+                    ), in: 1.0...500.0)
+                    Text(String(format: "%.0f", state.focusDistance))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, alignment: .trailing)
+                }
+                .help("Perpendicular distance along camera-forward (voxels) where the scene stays sharp.")
+                .disabled(state.aperture == 0)
 
                 ProgressView(value: progressFraction) {
                     EmptyView()

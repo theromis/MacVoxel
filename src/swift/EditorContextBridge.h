@@ -222,6 +222,12 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, assign) float sunColorG;
 @property (nonatomic, assign) float sunColorB;
 
+// Thin-lens depth of field. aperture is the lens disc radius in voxel
+// units; 0 disables (pinhole). focusDistance is the perpendicular
+// distance along camera-forward (voxels) where the scene stays sharp.
+@property (nonatomic, assign) float aperture;
+@property (nonatomic, assign) float focusDistance;
+
 // ---------------------------------------------------------------------------
 // Tool settings. Live state — no version bump needed; the controllers
 // read fresh values each event / frame.
