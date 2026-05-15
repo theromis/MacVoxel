@@ -23,14 +23,10 @@ enum class GlassMode : uint8_t {
 };
 
 // Which renderer the scene view drives. Edit = realtime ray-cast
-// preview; Render = our path tracer (PathTraceRenderer); Magica =
-// the Magica-ported path tracer (MagicaRenderer). Promoted from a
-// 2-value bool when the third option arrived so SwiftUI / bridge /
-// shader code all switch over one enum instead of cascading bools.
+// preview; Render = our path tracer (PathTraceRenderer).
 enum class RenderMode : uint8_t {
     Edit = 0,
     Render = 1,
-    Magica = 2,
 };
 
 // User-editable render configuration. Inputs only — anything the
@@ -68,8 +64,7 @@ struct RenderSettings {
     // get discovered only when the BSDF random walk happens to land
     // on one. Higher variance with concentrated emitters but produces
     // the structured "splotchy" SS-GI-off noise character. Sun NEE is
-    // independent of this flag. Both Render and Magica renderers read
-    // it.
+    // independent of this flag.
     bool stochastic_gi = true;
     // CLI-only escape hatch: when true, the Render renderer falls
     // back to fully per-pixel PCG sampling (the unbiased textbook MC

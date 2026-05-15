@@ -9,7 +9,6 @@ struct RenderPanel: View {
             Picker("Mode", selection: $state.renderMode) {
                 Text("Edit").tag(BridgeRenderMode.edit)
                 Text("Render").tag(BridgeRenderMode.render)
-                Text("Magica").tag(BridgeRenderMode.magica)
             }
             .labelsHidden()
             .pickerStyle(.segmented)

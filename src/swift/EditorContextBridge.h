@@ -67,14 +67,11 @@ typedef NS_ENUM(NSInteger, BridgeGlassMode) {
     BridgeGlassModeAbsorption    NS_SWIFT_NAME(absorption)    = 1,
 };
 
-// Mirror of macvoxel::RenderMode (RenderState.h). The three states the
-// renderer-mode segmented control selects between:
-// .edit drives the realtime ray-cast preview; .render drives the
-// in-house path tracer; .magica drives the Magica-ported path tracer.
+// Mirror of macvoxel::RenderMode (RenderState.h). .edit drives the
+// realtime ray-cast preview; .render drives the path tracer.
 typedef NS_ENUM(NSInteger, BridgeRenderMode) {
     BridgeRenderModeEdit   NS_SWIFT_NAME(edit)   = 0,
     BridgeRenderModeRender NS_SWIFT_NAME(render) = 1,
-    BridgeRenderModeMagica NS_SWIFT_NAME(magica) = 2,
 };
 
 typedef NS_ENUM(NSInteger, BridgeMaterialType) {
@@ -202,8 +199,8 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, assign) BridgeRenderMode renderMode;
 @property (nonatomic, assign) BOOL acesTonemap;
 // MagicaVoxel's "Stochastic Sampling GI" toggle (= OPT_AREA). On =
-// area-light NEE active in both Render and Magica path tracers; off
-// = emissives discovered only by BSDF random walk.
+// area-light NEE active in the path tracer; off = emissives
+// discovered only by BSDF random walk.
 @property (nonatomic, assign) BOOL stochasticGI;
 @property (nonatomic, assign) BOOL powerWeightedNEE;
 @property (nonatomic, assign) float indirectClampL;

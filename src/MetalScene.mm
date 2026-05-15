@@ -1,7 +1,6 @@
 #import "MetalScene.h"
 
 #import "GeneratorEngine.h"
-#import "MagicaRenderer.h"
 #import "PathTraceRenderer.h"
 #import "RaycastRenderer.h"
 #import "SceneOverlayRenderer.h"
@@ -76,7 +75,6 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     macvoxel::ToolKind _lastToolForFB;
     macvoxel::RenderMode _lastModeForFB;
     macvoxel::RenderMode _lastRenderMode;
-    MagicaRenderer *_magicaRenderer;
 
     // Modeling-side gesture state — drag mode + per-tool sub-structs.
     // See InteractionState.h for the breakdown.
@@ -129,10 +127,6 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         initWithDevice:device colorFormat:self.colorPixelFormat];
     if (_pathTraceRenderer == nil) return nil;
 
-    _magicaRenderer = [[MagicaRenderer alloc]
-        initWithDevice:device colorFormat:self.colorPixelFormat];
-    if (_magicaRenderer == nil) return nil;
-
     _overlayRenderer = [[SceneOverlayRenderer alloc]
         initWithDevice:device colorFormat:self.colorPixelFormat];
     if (_overlayRenderer == nil) return nil;
@@ -172,7 +166,6 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 - (void)invalidateRenderers {
     [_raycastRenderer invalidate];
     [_pathTraceRenderer invalidate];
-    [_magicaRenderer invalidate];
 }
 
 - (BOOL)exportRenderToURL:(NSURL *)url error:(NSError **)error {
@@ -182,12 +175,6 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         return NO;
     }
     const BOOL aces = _ctx->render_settings.aces_tonemap ? YES : NO;
-    if (_ctx->render_settings.mode == macvoxel::RenderMode::Magica) {
-        return [_magicaRenderer exportPNGToURL:url
-                                   acesTonemap:aces
-                                  commandQueue:_commandQueue
-                                         error:error];
-    }
     return [_pathTraceRenderer exportPNGToURL:url
                                   acesTonemap:aces
                                  commandQueue:_commandQueue
@@ -436,11 +423,10 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 
     const macvoxel::RenderMode mode_now = _ctx->render_settings.mode;
     if (mode_now != _lastRenderMode) {
-        // Toggling between any pair of modes invalidates whatever the
-        // PT engines had accumulated, so the user never sees stale
-        // pixels from the previous mode on the way back in.
+        // Toggling between modes invalidates whatever the PT engine
+        // had accumulated, so the user never sees stale pixels from
+        // the previous mode on the way back in.
         [_pathTraceRenderer invalidate];
-        [_magicaRenderer invalidate];
         _lastRenderMode = mode_now;
     }
 
@@ -450,22 +436,14 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         static_cast<float>(self.bounds.size.height),
     };
 
-    if (mode_now == macvoxel::RenderMode::Render ||
-        mode_now == macvoxel::RenderMode::Magica) {
-        // Path-traced: the active PT renderer handles its own
-        // accumulation + display passes. Overlay draws into a follow-up
-        // encoder sharing the same drawable's render-pass descriptor.
-        if (mode_now == macvoxel::RenderMode::Magica) {
-            [_magicaRenderer renderInView:view
-                                      cmd:cmd
-                                  context:_ctx
-                                   camera:_camera];
-        } else {
-            [_pathTraceRenderer renderInView:view
-                                         cmd:cmd
-                                     context:_ctx
-                                      camera:_camera];
-        }
+    if (mode_now == macvoxel::RenderMode::Render) {
+        // Path-traced: the renderer handles its own accumulation +
+        // display passes. Overlay draws into a follow-up encoder
+        // sharing the same drawable's render-pass descriptor.
+        [_pathTraceRenderer renderInView:view
+                                     cmd:cmd
+                                 context:_ctx
+                                  camera:_camera];
 
         if (!_od.empty()) {
             MTLRenderPassDescriptor *overlayPass =
