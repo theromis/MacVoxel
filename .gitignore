@@ -2,11 +2,9 @@ build/
 build-*/
 .DS_Store
 
-# Local-only test corpus — MagicaVoxel sample .vox files, not redistributed.
-test/vox/
-
-# Screenshots / scratch images Paul drops in test/ during bug reports.
-test/*.png
+# Local-only test corpus — sample .vox files, scratch renders, A/B
+# comparison directories. Not redistributed.
+test/
 
 # Xcode user files (in case anyone opens via -G Xcode)
 *.xcodeproj/xcuserdata/
