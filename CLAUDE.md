@@ -9,13 +9,12 @@ over an Obj-C++ bridge over a C++20 core, with Metal for the renderer
 and overlays. The README has the user-facing summary; this file is
 for orienting on the code.
 
-## Where the SwiftUI port stands
+## Where development is
 
-The branch `swiftui-port` is four commits ahead of `main` and is the
-current head of development. All seven panels are ported, the AppKit
-shell (`AppDelegate`, `VoxelView`) is gone, `third_party/imgui` is
-gone — see `git log main..swiftui-port` for the migration. `main` is
-the pre-port reference; don't restart work there unless you mean to.
+The SwiftUI port is settled: all seven panels native, the AppKit shell
+(`AppDelegate`, `VoxelView`) and `third_party/imgui` are gone. Active
+work is happening on feature branches off `main` (the port hasn't
+landed there yet — see `git branch` for the current head).
 
 Deferred polish, not yet implemented:
 
@@ -230,7 +229,7 @@ if it's been a while — these are the modeling-side state machines.)
 
 Every per-tool gesture is a pure-C++ namespace of free functions in the
 FloatingBufferOps / SelectionOps style — no AppKit, no Obj-C, no view
-references. Ten of them: `marquee_controller`, `box_select_controller`,
+references. Nine of them: `marquee_controller`, `box_select_controller`,
 `flood_select_controller`, `move_select_controller`, `brush_controller`,
 `shape_controller` (Line/Circle/Square/Box bundled), `face_controller`,
 `xform_handle_controller`, `generator_controller`. All take some subset of:
@@ -281,11 +280,10 @@ Before the port, the controllers' `DrawOverlay` functions called
 - Color literal helper `macvoxel::Rgba8(r,g,b,a)` replaces `IM_COL32`.
 
 The `mouse_captured_by_ui` parameter is currently hardcoded `false`
-in `MetalScene` — Phase D didn't wire a "mouse over a SwiftUI panel"
-signal because the panels live outside the MetalSceneView in the
-SplitView, so they never intercept events that would reach the scene.
-If a future overlay panel sits *on top of* the scene, that flag needs
-real plumbing.
+in `MetalScene`: the SwiftUI panels live outside the MetalSceneView in
+the SplitView, so they never intercept events that would reach the
+scene. If a future overlay panel sits *on top of* the scene, that flag
+needs real plumbing.
 
 ## Build / run loop
 
@@ -330,7 +328,7 @@ Then `Read /tmp/check.png` to actually see the result.
 - `--seed` makes the output byte-deterministic for fixed inputs — diff
   two renders with `md5` to confirm a change is/isn't a no-op. Baseline
   digest for sanity checks: teapot.vox @ 256×256, 32 spp, seed=1 →
-  `2bfedbc31a14e01a3744de2549c594fe`.
+  `9b695a3917fb04dfa65e0d3903372b37`.
 - `--no-aces` swaps the ACES tonemap for a plain gamma-2.2 curve.
 - The camera is fit-to-bounds; there are no yaw/pitch/distance flags.
 
@@ -404,9 +402,11 @@ Key invariants in the shader:
   true air↔glass boundaries, not at every internal cell face.
 - **`medium_entry` + `medium_albedo` carry Beer-Lambert state.**
   Distance through the medium is `length(h.point - medium_entry)`;
-  tint is `pow(albedo, distance * kAbsorptionScale)`.
-  `kAbsorptionScale = 0.5` ties the user's albedo to a 2-voxel
-  reference depth.
+  tint is `pow(medium_albedo, distance)` — a 1-voxel reference depth
+  in Absorption mode (matches MagicaVoxel: saturated colored glass
+  darkens to its albedo across a single voxel). Probabilistic mode
+  uses `medium_albedo = surface_albedo` so the same Beer-Lambert math
+  yields the softer pre-P14 look without a separate scale constant.
 - **The DDA reports medium-exit boundaries.** Three transitions:
   skip-mat→empty cell, skip-mat→empty chunk, skip-mat→AABB-out. All
   return `h.hit = true, h.cell_val = 0` so the bounce loop's exit
@@ -437,11 +437,14 @@ identical layout), and stamps the cells through the PreviewOverlay so
 the live preview / single-undo-step commit path is shared with the
 shape tools.
 
-Four built-in kinds shipped: Ellipsoid, Cylinder, Cone, Pyramid. The
-latter three share an `AxisView` helper in `Generators.metal` that
-materialises the int3 lo / dims / cell as float[3] arrays so the
-axis-parameterized kernels can index by `int axis` cleanly (MSL's
-vec3 `[]` indexing across address spaces is the wobbly form).
+Six built-in kinds shipped: Ellipsoid, Cylinder, Cone, Pyramid, Perlin,
+Torus. Cylinder / Cone / Pyramid share an `AxisView` helper in
+`Generators.metal` that materialises the int3 lo / dims / cell as
+float[3] arrays so the axis-parameterized kernels can index by
+`int axis` cleanly (MSL's vec3 `[]` indexing across address spaces is
+the wobbly form). Perlin colors the AABB across a palette range
+(`perlin_palette_lo..hi`) by noise threshold rather than a single
+slot — gradient-map territory.
 
 Lives in:
 - `src/Generators.h` — pure-C++ types (`Bounds3i`, `Kind`, `Params`).
