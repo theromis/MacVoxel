@@ -133,6 +133,21 @@ struct InteractionState {
         ToolMode mode = ToolMode::Add;
         simd::float2 screen_local{0.0f, 0.0f};
         ToolKind tool = ToolKind::Brush;
+        // Shape-kernel preview bookkeeping. `last_bbox_*` is the
+        // dispatch bbox of the previous frame's preview — the new
+        // frame's dispatch unions with it so cells the old shape
+        // covered but the new one doesn't get cleared. `union_*`
+        // accumulates across the whole stroke so OnMouseUp can
+        // diff against shadow over exactly the touched region.
+        // INT32_MAX / MIN = empty.
+        int32_t last_bbox_x0 = INT32_MAX, last_bbox_y0 = INT32_MAX,
+                last_bbox_z0 = INT32_MAX;
+        int32_t last_bbox_x1 = INT32_MIN, last_bbox_y1 = INT32_MIN,
+                last_bbox_z1 = INT32_MIN;
+        int32_t union_bbox_x0 = INT32_MAX, union_bbox_y0 = INT32_MAX,
+                union_bbox_z0 = INT32_MAX;
+        int32_t union_bbox_x1 = INT32_MIN, union_bbox_y1 = INT32_MIN,
+                union_bbox_z1 = INT32_MIN;
     } anchor;
 
     // Face tool: result of the click-time flood fill (all coplanar

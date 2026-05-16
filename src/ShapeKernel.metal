@@ -1,0 +1,387 @@
+// Shape tool compute kernels — Magica's "shape tools as shaders"
+// idea adapted to Metal compute, writing into the preview texture
+// (`tex_t`) instead of the doc texture. The rasterizer composites
+// tex_t over tex_a so previews appear immediately; on commit the
+// preview is promoted into the doc (ShapeEngine.commitInto: kernel).
+//
+// One unified `shape_main` covers Line / Circle / Square / Box —
+// each thread evaluates an analytic shape-SDF expanded by the brush
+// footprint, writes palette / 0 to tex_t accordingly. The dispatch
+// bbox is the UNION of the previous frame's bbox + the current
+// frame's, so cells the previous frame wrote and the current frame
+// doesn't naturally get zeroed out.
+//
+// Variants supported in v1:
+//   * Shape: Line, Circle, Square, Box  (kinds 0..3)
+//   * Fill: filled OR shell (`shape_fill`)
+//   * Brush footprint: Square (L_inf) or Circle (L_2 / Euclidean)
+//   * Brush dim: 3D only — 2D-slice variants fall back to the CPU
+//     PreviewOverlay path in ShapeController (kernel returns nothing
+//     when `brush_3d == 0`).
+//   * Mode: Add, Paint, Remove (Remove writes 0 to tex_t for now;
+//     end-of-stroke commit handles the actual cell removal).
+
+#include <metal_stdlib>
+using namespace metal;
+
+constant uint kModeAdd    = 0u;
+constant uint kModeRemove = 1u;
+constant uint kModePaint  = 2u;
+
+constant int kShapeLine   = 0;
+constant int kShapeCircle = 1;
+constant int kShapeSquare = 2;
+constant int kShapeBox    = 3;
+
+constant int kBrushSquare = 0;
+constant int kBrushCircle = 1;
+
+struct ShapeUniforms {
+    int3 anchor;            // anchor cell (click 1)
+    int3 endpoint;          // endpoint cell (current cursor)
+    int  face_axis;         // 0/1/2 for planar shapes
+    int  brush_size;
+    int  brush_shape;       // 0 square, 1 circle
+    int  brush_3d;          // 1 = 3D, 0 = 2D slice
+    uint mode;              // 0 add / 1 remove / 2 paint
+    uint palette_idx;
+    int  shape_kind;        // 0..3
+    int  shape_fill;        // 1 = filled, 0 = shell/outline
+    int  shape_even;        // circle/square even-diameter toggle
+    int  line_straight;     // 1 = 3D Bresenham, 0 = project mode
+                            //   (project handled CPU-side; we draw
+                            //   straight even for project so the
+                            //   preview at least reflects something
+                            //   useful until project kernel exists).
+    int3 dispatch_lo;       // bbox to write (texture-local cells)
+    int3 dispatch_size;     // dims of the dispatch bbox
+    int3 vol_min;           // edit-volume bounds (inclusive)
+    int3 vol_max;           // edit-volume bounds (inclusive)
+    int3 tex_origin;        // texture's [0,0,0] in world cell coords
+};
+
+// Brush footprint test in world coords. Returns the L_inf or L_2
+// distance from `delta` (an offset vector) to "the center of a brush
+// of side `size`". Even sizes shift center between cells.
+static float brush_footprint_distance(float3 delta, int size, int brush_shape) {
+    const float c = float((-(size - 1) / 2) + (size / 2)) * 0.5;
+    float fdx = delta.x - c;
+    float fdy = delta.y - c;
+    float fdz = delta.z - c;
+    if (brush_shape == kBrushSquare) {
+        return max(max(abs(fdx), abs(fdy)), abs(fdz));
+    }
+    return sqrt(fdx * fdx + fdy * fdy + fdz * fdz);
+}
+
+// Distance from cell-center C to a continuous line segment.
+static float3 segment_closest(float3 C, float3 a, float3 b) {
+    float3 v = b - a;
+    float vv = dot(v, v);
+    if (vv < 1e-6) return a;
+    float t = clamp(dot(C - a, v) / vv, 0.0, 1.0);
+    return a + v * t;
+}
+
+// Filled axis-aligned box SDF (negative inside, distance to surface
+// outside). For a box bounded by inclusive cell coords [lo, hi].
+static float box_distance(float3 C, float3 lo, float3 hi, int brush_shape) {
+    float3 closest;
+    closest.x = clamp(C.x, lo.x, hi.x);
+    closest.y = clamp(C.y, lo.y, hi.y);
+    closest.z = clamp(C.z, lo.z, hi.z);
+    if (brush_shape == kBrushSquare) {
+        return max(max(abs(C.x - closest.x), abs(C.y - closest.y)),
+                   abs(C.z - closest.z));
+    }
+    float dx = C.x - closest.x;
+    float dy = C.y - closest.y;
+    float dz = C.z - closest.z;
+    return sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// Test cell against the shape (with brush-footprint expansion in 3D).
+static bool cell_in_shape(int3 cell_world, constant ShapeUniforms& u) {
+    const float r = float(u.brush_size) * 0.5;
+    float3 C = float3(cell_world) + 0.5;
+
+    if (u.shape_kind == kShapeLine) {
+        float3 a = float3(u.anchor) + 0.5;
+        float3 b = float3(u.endpoint) + 0.5;
+        float3 closest = segment_closest(C, a, b);
+        float3 d = C - closest;
+        float dist = (u.brush_shape == kBrushSquare)
+            ? max(max(abs(d.x), abs(d.y)), abs(d.z))
+            : sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        return dist <= r;
+    }
+
+    if (u.shape_kind == kShapeBox) {
+        // Box bounded by min/max of anchor and endpoint (componentwise).
+        float3 lo = float3(min(u.anchor, u.endpoint));
+        float3 hi = float3(max(u.anchor, u.endpoint)) + 1.0;  // +1 for exclusive max
+        float d = box_distance(C, lo, hi - 1.0, u.brush_shape);
+        if (u.shape_fill != 0) return d <= r;
+        // Shell: surface band of width 2r around the box surface.
+        // Distance to surface = 0 if on surface, abs(signed_box_dist).
+        // For points outside box, d > 0 = distance to surface.
+        // For points inside box, we need min(C - lo, hi - 1 - C) per axis.
+        float3 inside_d = min(C - lo, (hi - 1.0) - C);
+        float inside_min = min(min(inside_d.x, inside_d.y), inside_d.z);
+        // If inside_min > 0 the point is strictly inside the box; the
+        // distance to the surface is inside_min itself. If outside, d > 0.
+        float surf_dist = (inside_min > 0.0) ? inside_min : d;
+        return surf_dist <= r;
+    }
+
+    if (u.shape_kind == kShapeCircle || u.shape_kind == kShapeSquare) {
+        // Planar shapes live in the plane perpendicular to face_axis,
+        // anchored at the anchor cell. The radius is the in-plane
+        // distance from anchor to endpoint.
+        int ax = u.face_axis;
+        // Pick the two in-plane axes.
+        int u_axis = (ax == 0) ? 1 : 0;
+        int v_axis = (ax == 2) ? 1 : 2;
+        if (ax == 0) { u_axis = 1; v_axis = 2; }
+        else if (ax == 1) { u_axis = 0; v_axis = 2; }
+        else { u_axis = 0; v_axis = 1; }
+
+        float Cu, Cv;
+        if (ax == 0) { Cu = C.y; Cv = C.z; }
+        else if (ax == 1) { Cu = C.x; Cv = C.z; }
+        else { Cu = C.x; Cv = C.y; }
+        float anchor_u, anchor_v;
+        if (ax == 0) { anchor_u = float(u.anchor.y); anchor_v = float(u.anchor.z); }
+        else if (ax == 1) { anchor_u = float(u.anchor.x); anchor_v = float(u.anchor.z); }
+        else { anchor_u = float(u.anchor.x); anchor_v = float(u.anchor.y); }
+        float endpoint_u, endpoint_v;
+        if (ax == 0) { endpoint_u = float(u.endpoint.y); endpoint_v = float(u.endpoint.z); }
+        else if (ax == 1) { endpoint_u = float(u.endpoint.x); endpoint_v = float(u.endpoint.z); }
+        else { endpoint_u = float(u.endpoint.x); endpoint_v = float(u.endpoint.y); }
+
+        float du = endpoint_u - anchor_u;
+        float dv = endpoint_v - anchor_v;
+        float radius = sqrt(du * du + dv * dv);
+        // Out-of-plane (along face_axis) distance — used as part of
+        // the 3D brush expansion (the planar shape thickens by the
+        // brush in the face_axis direction).
+        float C_ax = (ax == 0) ? C.x : (ax == 1) ? C.y : C.z;
+        float anchor_ax = (ax == 0) ? float(u.anchor.x)
+                       : (ax == 1) ? float(u.anchor.y) : float(u.anchor.z);
+        float out_of_plane = abs(C_ax - (anchor_ax + 0.5));
+
+        anchor_u += 0.5;
+        anchor_v += 0.5;
+        float duC = Cu - anchor_u;
+        float dvC = Cv - anchor_v;
+
+        if (u.shape_kind == kShapeCircle) {
+            float in_plane_dist = sqrt(duC * duC + dvC * dvC);
+            float dist_to_shape;
+            if (u.shape_fill != 0) {
+                dist_to_shape = max(0.0, in_plane_dist - radius);
+            } else {
+                // Ring: distance from C to circle perimeter.
+                dist_to_shape = abs(in_plane_dist - radius);
+            }
+            float total;
+            if (u.brush_shape == kBrushSquare) {
+                total = max(dist_to_shape, out_of_plane);
+            } else {
+                total = sqrt(dist_to_shape * dist_to_shape +
+                             out_of_plane * out_of_plane);
+            }
+            return total <= r;
+        }
+
+        // Square (planar) — Chebyshev (L_inf) version of the circle.
+        float chebyshev = max(abs(duC), abs(dvC));
+        float dist_to_shape;
+        if (u.shape_fill != 0) {
+            dist_to_shape = max(0.0, chebyshev - radius);
+        } else {
+            dist_to_shape = abs(chebyshev - radius);
+        }
+        float total;
+        if (u.brush_shape == kBrushSquare) {
+            total = max(dist_to_shape, out_of_plane);
+        } else {
+            total = sqrt(dist_to_shape * dist_to_shape +
+                         out_of_plane * out_of_plane);
+        }
+        return total <= r;
+    }
+
+    return false;
+}
+
+kernel void shape_main(
+    constant ShapeUniforms& u                       [[buffer(0)]],
+    texture3d<uint, access::read>       tex_a       [[texture(0)]],
+    texture3d<uint, access::write>      preview     [[texture(1)]],
+    texture3d<uint, access::write>      preview_oracle [[texture(2)]],
+    uint3 gid                                       [[thread_position_in_grid]])
+{
+    int3 d = int3(gid);
+    if (any(d >= u.dispatch_size)) return;
+
+    int3 cell_local = u.dispatch_lo + d;  // texture-local coords
+    int3 cell_world = cell_local + u.tex_origin;
+
+    bool in_shape = false;
+    if (u.brush_3d != 0) {
+        in_shape = cell_in_shape(cell_world, u);
+    }
+
+    uint write_val = 0u;
+    if (in_shape) {
+        // Mode rule: Add only writes when the doc cell is currently
+        // empty (so the preview shows added voxels but doesn't paint
+        // over existing ones). Remove always writes 0 here — the
+        // commit kernel handles the actual cell zeroing; the visual
+        // gap is a known v1 wart. Paint only writes where the doc
+        // has a non-empty cell.
+        uint doc_val = tex_a.read(uint3(cell_local)).r;
+        bool in_vol = all(cell_world >= u.vol_min) &&
+                      all(cell_world <= u.vol_max);
+        if (u.mode == kModeAdd) {
+            if (doc_val == 0u && in_vol) write_val = u.palette_idx;
+        } else if (u.mode == kModePaint) {
+            if (doc_val != 0u) write_val = u.palette_idx;
+        }
+        // kModeRemove: leaves write_val = 0 (silent preview).
+    }
+
+    preview.write(uint4(write_val, 0u, 0u, 0u), uint3(cell_local));
+    if (write_val != 0u) {
+        preview_oracle.write(uint4(1u, 0u, 0u, 0u),
+                             uint3(uint3(cell_local) >> uint3(4u)));
+    }
+}
+
+// Line tool's "project" mode kernel. The picked cells (one per
+// oversampled screen-space step, deduped) live in a constant buffer
+// uploaded by the CPU; the kernel runs over the union bbox and
+// writes palette / 0 to each cell based on whether any picked cell
+// is within the brush footprint. Same mode-rule + footprint shape
+// + 3D/2D-brush handling as `shape_main`.
+struct PackedCellXYZ { int x, y, z, _pad; };
+
+kernel void shape_line_project_main(
+    constant ShapeUniforms& u                            [[buffer(0)]],
+    constant PackedCellXYZ* cells                        [[buffer(1)]],
+    constant uint& cell_count                            [[buffer(2)]],
+    texture3d<uint, access::read>       tex_a            [[texture(0)]],
+    texture3d<uint, access::write>      preview          [[texture(1)]],
+    texture3d<uint, access::write>      preview_oracle   [[texture(2)]],
+    uint3 gid                                            [[thread_position_in_grid]])
+{
+    int3 d = int3(gid);
+    if (any(d >= u.dispatch_size)) return;
+    int3 cell_local = u.dispatch_lo + d;
+    int3 cell_world = cell_local + u.tex_origin;
+
+    const float r = float(u.brush_size) * 0.5;
+    const float c = float((-(u.brush_size - 1) / 2) + (u.brush_size / 2)) * 0.5;
+
+    bool in_shape = false;
+    for (uint i = 0; i < cell_count && !in_shape; ++i) {
+        int3 L = int3(cells[i].x, cells[i].y, cells[i].z);
+        float3 delta = float3(cell_world - L);
+        float fdx = delta.x - c;
+        float fdy = delta.y - c;
+        float fdz = delta.z - c;
+        if (u.brush_3d == 0) {
+            // 2D slab: cell must be on the line cell's slice along face_axis.
+            int ax_delta;
+            if (u.face_axis == 0) ax_delta = cell_world.x - L.x;
+            else if (u.face_axis == 1) ax_delta = cell_world.y - L.y;
+            else ax_delta = cell_world.z - L.z;
+            if (ax_delta != 0) continue;
+            float pa, pb;
+            if (u.face_axis == 0) { pa = fdy; pb = fdz; }
+            else if (u.face_axis == 1) { pa = fdx; pb = fdz; }
+            else { pa = fdx; pb = fdy; }
+            float dist = (u.brush_shape == kBrushSquare)
+                ? max(abs(pa), abs(pb))
+                : sqrt(pa * pa + pb * pb);
+            if (dist <= r) in_shape = true;
+        } else {
+            float dist = (u.brush_shape == kBrushSquare)
+                ? max(max(abs(fdx), abs(fdy)), abs(fdz))
+                : sqrt(fdx * fdx + fdy * fdy + fdz * fdz);
+            if (dist <= r) in_shape = true;
+        }
+    }
+
+    uint write_val = 0u;
+    if (in_shape) {
+        uint doc_val = tex_a.read(uint3(cell_local)).r;
+        bool in_vol = all(cell_world >= u.vol_min) &&
+                      all(cell_world <= u.vol_max);
+        if (u.mode == kModeAdd) {
+            if (doc_val == 0u && in_vol) write_val = u.palette_idx;
+        } else if (u.mode == kModePaint) {
+            if (doc_val != 0u) write_val = u.palette_idx;
+        }
+    }
+    preview.write(uint4(write_val, 0u, 0u, 0u), uint3(cell_local));
+    if (write_val != 0u) {
+        preview_oracle.write(uint4(1u, 0u, 0u, 0u),
+                             uint3(uint3(cell_local) >> uint3(4u)));
+    }
+}
+
+// Clear-bbox kernel — zeros a 3D region of tex_t. Called between
+// strokes (and at the start of each stamp to drop the previous
+// frame's preview).
+kernel void shape_clear(
+    constant ShapeUniforms& u             [[buffer(0)]],
+    texture3d<uint, access::write> preview [[texture(0)]],
+    uint3 gid                              [[thread_position_in_grid]])
+{
+    int3 d = int3(gid);
+    if (any(d >= u.dispatch_size)) return;
+    int3 cell_local = u.dispatch_lo + d;
+    preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+}
+
+// Commit kernel — copies non-zero preview cells into the doc texture
+// + the doc oracle, and clears the preview cells as it goes. Run at
+// OnMouseUp, dispatched over the union bbox the stroke touched.
+kernel void shape_commit(
+    constant ShapeUniforms& u                           [[buffer(0)]],
+    texture3d<uint, access::read_write> tex_a           [[texture(0)]],
+    texture3d<uint, access::read_write> preview         [[texture(1)]],
+    texture3d<uint, access::write>      doc_oracle      [[texture(2)]],
+    uint3 gid                                           [[thread_position_in_grid]])
+{
+    int3 d = int3(gid);
+    if (any(d >= u.dispatch_size)) return;
+    int3 cell_local = u.dispatch_lo + d;
+    uint p = preview.read(uint3(cell_local)).r;
+    if (p == 0u) return;
+    // Magica's mode rule applies here too. Paint can only modify
+    // existing non-empty cells; Add can only fill empty ones. The
+    // preview already filtered on these rules; we re-check defensively
+    // in case the doc changed (it shouldn't, since the preview is
+    // strictly during a stroke).
+    uint old_val = tex_a.read(uint3(cell_local)).r;
+    uint new_val = old_val;
+    if (u.mode == kModeAdd) {
+        if (old_val == 0u) new_val = p;
+    } else if (u.mode == kModeRemove) {
+        new_val = 0u;
+    } else if (u.mode == kModePaint) {
+        if (old_val != 0u) new_val = p;
+    }
+    if (new_val != old_val) {
+        tex_a.write(uint4(new_val, 0u, 0u, 0u), uint3(cell_local));
+        if (new_val != 0u) {
+            doc_oracle.write(uint4(1u, 0u, 0u, 0u),
+                             uint3(uint3(cell_local) >> uint3(4u)));
+        }
+    }
+    // Clear the preview cell either way — stroke is committed.
+    preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+}

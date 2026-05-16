@@ -41,6 +41,7 @@ set(APP_SOURCES
     src/VoxelVolume.cpp
     src/VolumeTexture.mm
     src/BrushEngine.mm
+    src/ShapeEngine.mm
     src/Palette.cpp
     src/VoxFile.cpp
     src/Raycast.cpp
@@ -95,6 +96,7 @@ set(APP_RESOURCES
     resources/default.vox
     src/BrushKernel.metal
     src/Generators.metal
+    src/ShapeKernel.metal
     src/Overlay.metal
     src/PathTrace.metal
 )

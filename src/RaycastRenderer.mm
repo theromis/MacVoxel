@@ -51,6 +51,16 @@ struct Uniforms {
     float _pad5;
     simd::float3 box_max;
     float _pad6;
+    // Preview-tex slot. When `preview_active != 0` the fragment
+    // shader samples `preview_tex` (dense, same dims as the doc tex)
+    // for each cell after the doc lookup; non-zero preview cells
+    // shade on top of the doc. `preview_tex` has its own 16³ coarse
+    // oracle (`preview_oracle`) so we don't pay a per-cell read
+    // through chunks the preview hasn't touched.
+    int preview_active;
+    int _pad7;
+    int _pad8;
+    int _pad9;
 };
 
 NSString* const kShaderSource = @R"MSL(
@@ -82,6 +92,10 @@ struct Uniforms {
     float    _pad5;
     float3   box_max;
     float    _pad6;
+    int      preview_active;
+    int      _pad7;
+    int      _pad8;
+    int      _pad9;
 };
 
 struct Chunk {
@@ -199,7 +213,9 @@ fragment float4 raycast_fragment(
     device const uint* rem_coarse_grid [[buffer(4)]],
     device const Chunk* rem_chunk_pool [[buffer(5)]],
     texture3d<uint, access::read> tex_a [[texture(0)]],
-    texture3d<uint, access::read> doc_oracle [[texture(1)]])
+    texture3d<uint, access::read> doc_oracle [[texture(1)]],
+    texture3d<uint, access::read> preview_tex [[texture(2)]],
+    texture3d<uint, access::read> preview_oracle [[texture(3)]])
 {
     // Reconstruct world-space ray from NDC.
     float4 near_clip = float4(in.ndc, 0.0, 1.0);
@@ -297,11 +313,24 @@ fragment float4 raycast_fragment(
         int3 doc_chunk_c = cell >> int(kChunkBits);
         bool doc_chunk_empty = true;
         uint val_doc = 0u;
+        int3 oracle_c = int3(0);
         if (doc_in) {
-            int3 oracle_c = doc_chunk_c - box_chunk_min;
+            oracle_c = doc_chunk_c - box_chunk_min;
             doc_chunk_empty = (doc_oracle.read(uint3(oracle_c)).r == 0u);
             if (!doc_chunk_empty) {
                 val_doc = tex_a.read(uint3(cell_local)).r;
+            }
+        }
+        // Preview-tex: shape/face/generator tool live preview. Same
+        // dims + chunking as the doc tex; gated by preview_active so
+        // the rasterizer skips the read entirely between strokes.
+        bool preview_chunk_empty = true;
+        uint val_preview = 0u;
+        if (u.preview_active != 0 && doc_in) {
+            preview_chunk_empty =
+                (preview_oracle.read(uint3(oracle_c)).r == 0u);
+            if (!preview_chunk_empty) {
+                val_preview = preview_tex.read(uint3(cell_local)).r;
             }
         }
 
@@ -333,7 +362,19 @@ fragment float4 raycast_fragment(
             return float4(bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max), 1.0);
         }
 
-        // Hit detection. Buf renders on top of doc where they overlap.
+        // Hit detection. Preview-tex wins over everything when active,
+        // then buf (FB / legacy preview), then doc.
+        if (val_preview != 0u) {
+            float3 grid_normal = float3(0.0);
+            if (last_axis == 0) grid_normal.x = -float(step_dir.x);
+            else if (last_axis == 1) grid_normal.y = -float(step_dir.y);
+            else if (last_axis == 2) grid_normal.z = -float(step_dir.z);
+            float3 world_normal = float3(grid_normal.x, grid_normal.z, -grid_normal.y);
+            float ndl = max(dot(world_normal, u.light_dir), 0.0);
+            float lambert = 0.3 + 0.7 * ndl;
+            float3 base = palette[val_preview].rgb;
+            return float4(base * lambert, 1.0);
+        }
         if (pool_idx_buf != 0u) {
             int3 cell_buf = cell - u.buf_offset;
             uint lx = uint(cell_buf.x) & kChunkMask;
@@ -402,7 +443,7 @@ fragment float4 raycast_fragment(
         // whichever chunk boundary comes first along the ray. Otherwise
         // cell-step (the chunk we're in has either doc or buf cells
         // and we need to keep sampling per cell).
-        if (doc_chunk_empty && pool_idx_buf == 0u) {
+        if (doc_chunk_empty && pool_idx_buf == 0u && preview_chunk_empty) {
             float3 chunk_min_doc = float3(doc_chunk_c) * float(kChunkSize);
             float3 chunk_max_doc = chunk_min_doc + float(kChunkSize);
             float3 exit_face_doc = select(chunk_min_doc, chunk_max_doc, step_dir > 0);
@@ -800,6 +841,14 @@ fragment float4 raycast_fragment(
                              static_cast<float>(vol.z1 + 1)};
     u._pad5 = 0.0f;
     u._pad6 = 0.0f;
+    // Preview-tex is active when a shape stroke is mid-flight. The
+    // ShapeController flips ctx->preview.active true on first stamp,
+    // false on commit/cancel; the rasterizer pays exactly the cost
+    // of one oracle byte per pixel when inactive.
+    u.preview_active = ctx->preview.active ? 1 : 0;
+    u._pad7 = 0;
+    u._pad8 = 0;
+    u._pad9 = 0;
 
     [encoder pushDebugGroup:@"Voxels (raycast)"];
     [encoder setRenderPipelineState:_pipeline];
@@ -820,6 +869,8 @@ fragment float4 raycast_fragment(
                        atIndex:5];
     [encoder setFragmentTexture:docVolumeTex.texture atIndex:0];
     [encoder setFragmentTexture:docVolumeTex.oracleTexture atIndex:1];
+    [encoder setFragmentTexture:docVolumeTex.previewTexture atIndex:2];
+    [encoder setFragmentTexture:docVolumeTex.previewOracleTexture atIndex:3];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:3];

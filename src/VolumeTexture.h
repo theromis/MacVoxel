@@ -48,6 +48,14 @@ class VoxelVolume;
 // that update the doc texture out-of-band from `syncFromVolume`.
 - (void)markOracleChunkAtX:(int)x y:(int)y z:(int)z;
 
+// Preview texture ("tex_t" in Magica's framework): shape/face/
+// generator tools write their live preview here instead of into a
+// CPU-side PreviewOverlay. The rasterizer composites it on top of
+// the doc texture, gated by the `preview_active` uniform. Same
+// 256³ R8Uint dimensions + 16³ coarse oracle as the doc.
+@property(nonatomic, readonly, nonnull) id<MTLTexture> previewTexture;
+@property(nonatomic, readonly, nonnull) id<MTLTexture> previewOracleTexture;
+
 // Texture dimensions in cells. Mirrors volume.size_{x,y,z}.
 @property(nonatomic, readonly) int sizeX;
 @property(nonatomic, readonly) int sizeY;

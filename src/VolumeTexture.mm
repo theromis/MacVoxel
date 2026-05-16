@@ -9,6 +9,8 @@
 @implementation VolumeTexture {
     id<MTLTexture> _texture;
     id<MTLTexture> _oracleTexture;
+    id<MTLTexture> _previewTexture;
+    id<MTLTexture> _previewOracleTexture;
     int _chunksX;
     int _chunksY;
     int _chunksZ;
@@ -60,6 +62,33 @@
     _oracleTexture = [device newTextureWithDescriptor:oracleDesc];
     if (_oracleTexture == nil) return nil;
     [_oracleTexture setLabel:@"VolumeTexture.oracle"];
+
+    MTLTextureDescriptor* previewDesc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Uint
+                                                            width:(NSUInteger)_sizeX
+                                                           height:(NSUInteger)_sizeY
+                                                        mipmapped:NO];
+    previewDesc.textureType = MTLTextureType3D;
+    previewDesc.depth = (NSUInteger)_sizeZ;
+    previewDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    previewDesc.storageMode = MTLStorageModeShared;
+    _previewTexture = [device newTextureWithDescriptor:previewDesc];
+    if (_previewTexture == nil) return nil;
+    [_previewTexture setLabel:@"VolumeTexture.previewTex"];
+
+    MTLTextureDescriptor* previewOracleDesc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Uint
+                                                            width:(NSUInteger)_chunksX
+                                                           height:(NSUInteger)_chunksY
+                                                        mipmapped:NO];
+    previewOracleDesc.textureType = MTLTextureType3D;
+    previewOracleDesc.depth = (NSUInteger)_chunksZ;
+    previewOracleDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    previewOracleDesc.storageMode = MTLStorageModeShared;
+    _previewOracleTexture = [device newTextureWithDescriptor:previewOracleDesc];
+    if (_previewOracleTexture == nil) return nil;
+    [_previewOracleTexture setLabel:@"VolumeTexture.previewOracle"];
+
     return self;
 }
 

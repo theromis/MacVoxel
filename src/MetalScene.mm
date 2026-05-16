@@ -5,6 +5,7 @@
 #import "PathTraceRenderer.h"
 #import "RaycastRenderer.h"
 #import "SceneOverlayRenderer.h"
+#import "ShapeEngine.h"
 #import "VolumeTexture.h"
 
 #import "swift/EditorContextBridge.h"
@@ -67,6 +68,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     SceneOverlayRenderer *_overlayRenderer;
     GeneratorEngine *_generatorEngine;
     BrushEngine *_brushEngine;
+    ShapeEngine *_shapeEngine;
     // Per-document GPU mirror of the voxel grid. Both renderers and
     // the brush kernel bind it; the brush kernel writes through
     // access::read_write, the rasterizer fragment shader reads.
@@ -152,6 +154,13 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     _brushEngine = [[BrushEngine alloc]
         initWithDevice:device commandQueue:brushQueue];
     if (_brushEngine == nil) return nil;
+
+    // Shape kernels share a queue with the brush — they're mutually
+    // exclusive at the gesture level, and the dedicated queue keeps
+    // them off the rasterizer's frame-draw critical path.
+    _shapeEngine = [[ShapeEngine alloc]
+        initWithDevice:device commandQueue:brushQueue];
+    if (_shapeEngine == nil) return nil;
 
     _docVolumeTex = [[VolumeTexture alloc]
         initWithDevice:device
@@ -364,6 +373,60 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         local.y1 = world_bbox.y1 - vol.y0;
         local.z1 = world_bbox.z1 - vol.z0;
         [engine readTextureRegion:out target:texture bbox:local];
+    };
+}
+
+- (macvoxel::shape_controller::PreviewFn)shapePreviewFn {
+    ShapeEngine *engine = _shapeEngine;
+    VolumeTexture *texture = _docVolumeTex;
+    return [engine, texture](const macvoxel::ShapeParams &params) {
+        [engine dispatchPreview:params target:texture];
+    };
+}
+
+- (macvoxel::shape_controller::PreviewLineProjectFn)shapeProjectFn {
+    ShapeEngine *engine = _shapeEngine;
+    VolumeTexture *texture = _docVolumeTex;
+    return [engine, texture](const macvoxel::ShapeParams &params,
+                              const int32_t *cells_xyz, size_t cell_count) {
+        [engine dispatchLineProjectPreview:params
+                                      cells:cells_xyz
+                                 cellCount:cell_count
+                                     target:texture];
+    };
+}
+
+- (macvoxel::shape_controller::CommitFn)shapeCommitFn {
+    ShapeEngine *engine = _shapeEngine;
+    VolumeTexture *texture = _docVolumeTex;
+    return [engine, texture](const macvoxel::ShapeParams &params) {
+        [engine commitShape:params target:texture];
+    };
+}
+
+- (macvoxel::shape_controller::ReadBackFn)shapeReadBackFn {
+    // Same readback contract as brushReadBackFn — wait for the shape
+    // engine's queue, then blit the bbox region of the doc tex.
+    // (Shape engine shares brush's command queue, but we'd waitForPendingWork
+    // on whichever ran last; the brush engine's wait is sufficient
+    // because it waits on the queue's most recent buffer.)
+    ShapeEngine *shapeEngine = _shapeEngine;
+    BrushEngine *brushEngine = _brushEngine;
+    VolumeTexture *texture = _docVolumeTex;
+    macvoxel::EditorContext *ctx = _ctx;
+    return [shapeEngine, brushEngine, texture, ctx](
+                const macvoxel::Bbox3 &world_bbox,
+                std::vector<uint8_t> *out) {
+        [shapeEngine waitForPendingWork];
+        const macvoxel::EditVolume &vol = ctx->document.volume;
+        macvoxel::Bbox3 local{};
+        local.x0 = world_bbox.x0 - vol.x0;
+        local.y0 = world_bbox.y0 - vol.y0;
+        local.z0 = world_bbox.z0 - vol.z0;
+        local.x1 = world_bbox.x1 - vol.x0;
+        local.y1 = world_bbox.y1 - vol.y0;
+        local.z1 = world_bbox.z1 - vol.z0;
+        [brushEngine readTextureRegion:out target:texture bbox:local];
     };
 }
 
@@ -615,7 +678,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         [self autoCommitFloatingBuffer];
         const macvoxel::MouseEvent me = [self mouseEventFromNSEvent:event];
         if (macvoxel::shape_controller::OnMouseDown(
-                *_ctx, _interaction, [self viewContext], me)) {
+                *_ctx, _interaction, [self viewContext], me,
+                [self shapePreviewFn], [self shapeProjectFn])) {
             _interaction.hover.local = [self localFromWindow:event.locationInWindow];
             _interaction.hover.has_point = YES;
         } else {
@@ -694,7 +758,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                 _interaction.anchor.tool == macvoxel::ToolKind::Box) {
                 macvoxel::shape_controller::OnMouseDragged(
                     *_ctx, _interaction, [self viewContext],
-                    [self mouseEventFromNSEvent:event]);
+                    [self mouseEventFromNSEvent:event],
+                    [self shapePreviewFn], [self shapeProjectFn]);
             } else if (_interaction.anchor.tool == macvoxel::ToolKind::Face) {
                 macvoxel::face_controller::OnMouseDragged(
                     *_ctx, _interaction, [self viewContext],
@@ -746,7 +811,9 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
             case macvoxel::ToolKind::Circle:
             case macvoxel::ToolKind::Square:
             case macvoxel::ToolKind::Box:
-                macvoxel::shape_controller::OnMouseUp(*_ctx, _interaction);
+                macvoxel::shape_controller::OnMouseUp(
+                    *_ctx, _interaction,
+                    [self shapeCommitFn], [self shapeReadBackFn]);
                 break;
             case macvoxel::ToolKind::Face:
                 macvoxel::face_controller::OnMouseUp(
