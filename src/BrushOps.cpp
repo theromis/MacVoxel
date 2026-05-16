@@ -43,7 +43,7 @@ void StampBrushFootprint(EditorContext& ctx,
             return;
         }
         if (new_val == old_val) return;
-        doc.grid.Set(x, y, z, new_val);
+        doc.SetCell(x, y, z, new_val);
         history.Record(x, y, z, old_val, new_val);
         if (track_skip) {
             skip_out->insert(PackCellKey(x, y, z));

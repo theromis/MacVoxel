@@ -45,7 +45,7 @@ void CommitPreviewOverlayThroughHistory(EditorContext& ctx) {
             const uint8_t old_val = doc.grid.Get(x, y, z);
             if (old_val == new_val) continue;
             ensure_op();
-            doc.grid.Set(x, y, z, new_val);
+            doc.SetCell(x, y, z, new_val);
             history.Record(x, y, z, old_val, new_val);
             any_writes = true;
         }
@@ -65,7 +65,7 @@ void CommitPreviewOverlayThroughHistory(EditorContext& ctx) {
             const uint8_t old_val = doc.grid.Get(x, y, z);
             if (old_val == 0) continue;
             ensure_op();
-            doc.grid.Set(x, y, z, 0);
+            doc.SetCell(x, y, z, 0);
             history.Record(x, y, z, old_val, 0);
             any_writes = true;
         }

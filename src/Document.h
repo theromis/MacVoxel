@@ -3,7 +3,9 @@
 #include "EditVolume.h"
 #include "Palette.h"
 #include "VoxelGrid.h"
+#include "VoxelVolume.h"
 
+#include <cassert>
 #include <cstdint>
 #include <string>
 
@@ -32,6 +34,11 @@ struct Document {
     VoxelGrid grid;
     Palette palette;
     EditVolume volume;
+    // Dense write-through shadow of the in-volume cells of `grid`,
+    // sized from `volume`. Phase A1: just a CPU cache. A2 attaches a
+    // Metal 3D texture; B1 makes the GPU side authoritative. Reads
+    // still go through `grid` until then.
+    VoxelVolume volume_shadow{volume};
     std::string path;  // empty => Untitled, never saved
     uint64_t version = 0;
     uint64_t geometry_version = 0;
@@ -41,6 +48,42 @@ struct Document {
     void BumpGeometry()  { ++geometry_version; ++version; }
     void BumpPalette()   { ++palette_version;  ++version; }
     void BumpMaterials() { ++material_version; ++version; }
+    // Single flip-point for routing voxel writes through future
+    // GPU-authoritative storage (Phase A1: write-through to VoxelVolume
+    // shadow; A2: ping-pong texture upload). All in-process edit paths
+    // — brushes, preview commit, selection ops, history undo/redo,
+    // floating-buffer commit, paste — must go through here. Loose
+    // bounds and version bumping stay the caller's responsibility, so
+    // semantics match `grid.Set` exactly until A1 flips the body.
+    //
+    // Carved out: `VoxFile::LoadVox` writes directly into a passed-in
+    // `VoxelGrid&` (no Document). The whole-document load path will
+    // grow its own bulk-upload entry point in A1.
+    void SetCell(int32_t x, int32_t y, int32_t z, uint8_t v) {
+        grid.Set(x, y, z, v);
+        volume_shadow.Set(x, y, z, v);
+        // A1 invariant: inside the edit volume, the dense shadow tracks
+        // `grid` byte-for-byte. Cells outside the volume live in `grid`
+        // alone (see VoxelVolume's drop-on-write rule).
+        assert(!volume.Contains(x, y, z) ||
+               grid.Get(x, y, z) == volume_shadow.Get(x, y, z));
+    }
+
+    // Whole-document cell wipe — used by New / Open / default seed.
+    // Matches the previous `doc.grid.Clear()` pattern but keeps the
+    // shadow in sync.
+    void ClearCells() {
+        grid.Clear();
+        volume_shadow.Clear();
+    }
+
+    // Re-seed `volume_shadow` from the current `grid`. Required after
+    // `LoadVox` populates `grid` directly (the carve-out documented on
+    // `SetCell`), or after `grid` is wholesale-replaced (e.g. Open
+    // moves a fresh Document in).
+    void ReseedVolumeShadow() {
+        volume_shadow.RebuildFromGrid(grid);
+    }
     // Whole-document replacement (load / new / open). Bumps every
     // typed counter so renderers invalidate all categories at once.
     void BumpAll() {

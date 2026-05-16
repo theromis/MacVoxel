@@ -7,20 +7,20 @@
 namespace macvoxel { struct EditorContext; }
 
 // GPU ray-cast renderer. For each pixel of a fullscreen triangle, the
-// fragment shader marches a ray (3D DDA) through a sparse representation
-// of the voxel grid and outputs the color of the first filled cell hit.
+// fragment shader marches a ray (3D DDA) through the document's voxels
+// and outputs the color of the first filled cell hit.
 //
-// Sparse layout uploaded to GPU:
-//   * Coarse grid: dense 3D array of uint32 chunk pool indices (1-based;
-//     0 = empty 16^3 region). Sized to fit the document's chunk-coord
-//     bounds, so a 1 M-slot grid for a Rancho-Ancon-scale scene.
-//   * Chunk pool: flat array of {uint8 cells[4096]}, one entry per
-//     non-empty chunk in the document.
-//   * Palette: 256 RGBA floats (same layout as the mesh renderer used).
-//
-// Edits don't trigger any mesh rebuild — they only update the affected
-// chunks in the pool buffer. For Phase 6.1 the upload still happens
-// wholesale on doc->version change; incremental upload is a follow-up.
+// Layout uploaded to GPU (Phase A2):
+//   * Doc texture: a `texture3d<uint, R8Uint>` sized to the EditVolume
+//     (default 256³). Per-cell lookup is a direct `tex.read(uint3)`.
+//     Maintained by the `VolumeTexture` helper, which uploads dirty
+//     16³ chunks from `doc.volume_shadow` on geometry_version change.
+//   * Overlay slots: coarse-grid + chunk-pool buffers for the floating-
+//     buffer (selection lift/paste/move) and preview-removals
+//     (Remove/Paint preview). Those stay sparse — they're small (one
+//     brush footprint) and can wander outside the edit volume during
+//     a drag, which the dense doc texture can't represent.
+//   * Palette: 256 RGBA floats.
 @interface RaycastRenderer : NSObject
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -36,15 +36,13 @@ namespace macvoxel { struct EditorContext; }
 - (uint32_t)lastChunkCount;
 
 // Total GPU memory occupied by the renderer's voxel data structures
-// (coarse grid + chunk pool capacity, in bytes).
+// (doc texture, in bytes).
 - (size_t)lastGPUBytes;
 
-// Drop the GPU cache so the next encode does a wholesale rebuild
-// instead of an incremental dirty-chunk update. Call when the
-// document is replaced wholesale (load, new) — the dirty-chunk set
-// only tracks what's been *changed*, not what no longer exists, so
-// without this the previous file's chunks linger on the GPU as
-// zombies.
+// Drop the GPU cache so the next encode rebuilds from scratch. Called
+// when the document is replaced wholesale (load, new) — the new
+// document's shadow may be a different size, and any prior chunk
+// state must be discarded.
 - (void)invalidate;
 
 @end

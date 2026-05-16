@@ -132,7 +132,7 @@ void ApplyMappingToSelection(
             !doc.volume.Contains(x, y, z)) return;
         const int64_t key = PackCellKey(x, y, z);
         changes.try_emplace(key, cur);
-        doc.grid.Set(x, y, z, new_val);
+        doc.SetCell(x, y, z, new_val);
     };
     for (const auto& s : src) touch(s.x, s.y, s.z, 0);
     for (const auto& s : src) {

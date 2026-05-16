@@ -109,7 +109,7 @@ bool EditHistory::Undo(Document& doc, Selection* sel) {
     EditOp op = std::move(undo_.back());
     undo_.pop_back();
     for (const auto& c : op.changes) {
-        doc.grid.Set(c.x, c.y, c.z, c.old_val);
+        doc.SetCell(c.x, c.y, c.z, c.old_val);
     }
     for (const auto& p : op.palette_changes) {
         doc.palette.Set(p.index, p.old_val);
@@ -133,7 +133,7 @@ bool EditHistory::Redo(Document& doc, Selection* sel) {
     EditOp op = std::move(redo_.back());
     redo_.pop_back();
     for (const auto& c : op.changes) {
-        doc.grid.Set(c.x, c.y, c.z, c.new_val);
+        doc.SetCell(c.x, c.y, c.z, c.new_val);
     }
     for (const auto& p : op.palette_changes) {
         doc.palette.Set(p.index, p.new_val);

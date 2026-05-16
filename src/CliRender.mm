@@ -172,24 +172,6 @@ int RunCliRender(int argc, const char* argv[]) {
     Args args;
     if (!ParseArgs(argc, argv, &args)) return 2;
 
-    EditorContext ctx;
-    Document& doc = ctx.document;
-    std::string err;
-    if (!LoadVox(args.input, &doc.grid, &doc.palette, &err)) {
-        std::fprintf(stderr, "load failed: %s\n", err.c_str());
-        return 1;
-    }
-    doc.path = args.input;
-    doc.BumpAll();
-
-    if (doc.grid.empty()) {
-        std::fprintf(stderr, "document has no voxels\n");
-        return 1;
-    }
-
-    Camera camera;
-    FitCameraToDocument(&camera, doc);
-
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (device == nil) {
@@ -201,6 +183,28 @@ int RunCliRender(int argc, const char* argv[]) {
             std::fprintf(stderr, "could not create Metal command queue\n");
             return 1;
         }
+
+        // Device-create precedes LoadVox so EditorContext / Document
+        // construction can attach Metal-backed members (Phase A2:
+        // VoxelVolume's tex_a/tex_a_out).
+        EditorContext ctx;
+        Document& doc = ctx.document;
+        std::string err;
+        if (!LoadVox(args.input, &doc.grid, &doc.palette, &err)) {
+            std::fprintf(stderr, "load failed: %s\n", err.c_str());
+            return 1;
+        }
+        doc.ReseedVolumeShadow();
+        doc.path = args.input;
+        doc.BumpAll();
+
+        if (doc.grid.empty()) {
+            std::fprintf(stderr, "document has no voxels\n");
+            return 1;
+        }
+
+        Camera camera;
+        FitCameraToDocument(&camera, doc);
 
         // The path-trace pass reads glass_mode from ctx.render_settings;
         // the export pass takes aces_tonemap as an explicit parameter.

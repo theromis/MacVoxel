@@ -60,6 +60,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
         const std::string p = [path UTF8String];
         std::string err;
         if (macvoxel::LoadVox(p, &doc.grid, &doc.palette, &err)) {
+            doc.ReseedVolumeShadow();
             return;
         }
         std::fprintf(stderr,
@@ -67,8 +68,8 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
                      "falling back to single-voxel seed\n",
                      err.c_str());
     }
-    doc.grid.Clear();
-    doc.grid.Set(0, 0, 0, 1);
+    doc.ClearCells();
+    doc.SetCell(0, 0, 0, 1);
     doc.palette.ResetToDefault();
 }
 
@@ -129,6 +130,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     }
     fresh.path = path;
     _ctx->document = std::move(fresh);
+    _ctx->document.ReseedVolumeShadow();
     _ctx->document.BumpAll();
     _ctx->history.Clear();
     [[NSDocumentController sharedDocumentController]
@@ -307,7 +309,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     for (const auto &v : sel.voxels()) {
         const uint8_t old = doc.grid.Get(v[0], v[1], v[2]);
         if (old != 0) {
-            doc.grid.Set(v[0], v[1], v[2], 0);
+            doc.SetCell(v[0], v[1], v[2], 0);
             history.Record(v[0], v[1], v[2], old, 0);
         }
     }
@@ -925,7 +927,7 @@ static void PaintSelectedVoxels(macvoxel::EditorContext &ctx, Choose choose) {
         if (old == 0) continue;  // empty cells aren't "voxels"
         const uint8_t nv = choose();
         if (nv == 0 || nv == old) continue;
-        doc.grid.Set(v[0], v[1], v[2], nv);
+        doc.SetCell(v[0], v[1], v[2], nv);
         hist.Record(v[0], v[1], v[2], old, nv);
         any = true;
     }

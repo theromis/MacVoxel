@@ -42,7 +42,7 @@ void LiftSelectionToFloating(EditorContext& ctx) {
     fb.grid.Clear();
     for (const auto& p : picked) {
         fb.grid.Set(p.x, p.y, p.z, p.pal);
-        doc.grid.Set(p.x, p.y, p.z, 0);
+        doc.SetCell(p.x, p.y, p.z, 0);
         fb.source_originals.push_back({{p.x, p.y, p.z}, p.pal});
     }
     fb.offset_x = fb.offset_y = fb.offset_z = 0;
@@ -128,7 +128,7 @@ void CommitFloatingBuffer(EditorContext& ctx) {
         int32_t x, y, z;
         UnpackCellKey(key, &x, &y, &z);
         if (doc.grid.Get(x, y, z) != d.new_val) {
-            doc.grid.Set(x, y, z, d.new_val);
+            doc.SetCell(x, y, z, d.new_val);
         }
         hist.Record(x, y, z, d.old_val, d.new_val);
     }
@@ -160,7 +160,7 @@ void CancelFloatingLift(EditorContext& ctx) {
         // restore the pre-lift selection. No EditHistory entry to pop
         // — lift never made one.
         for (const auto& [c, pal] : fb.source_originals) {
-            doc.grid.Set(c[0], c[1], c[2], pal);
+            doc.SetCell(c[0], c[1], c[2], pal);
         }
         ctx.selection = fb.pre_lift_sel;
     } else {

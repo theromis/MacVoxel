@@ -38,6 +38,8 @@ set(APP_SOURCES
     src/PathTraceRenderer.mm
     src/SceneOverlayRenderer.mm
     src/VoxelGrid.cpp
+    src/VoxelVolume.cpp
+    src/VolumeTexture.mm
     src/Palette.cpp
     src/VoxFile.cpp
     src/Raycast.cpp

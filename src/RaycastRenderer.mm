@@ -1,4 +1,5 @@
 #import "RaycastRenderer.h"
+#import "VolumeTexture.h"
 
 #include "EditorContext.h"
 
@@ -18,38 +19,38 @@ struct Uniforms {
     simd::float4x4 inv_vp;
     simd::float3 camera_pos;
     float _pad0;
-    simd::int3 coarse_min;     // min chunk coord (signed; can be negative)
-    int _pad1;
-    simd::int3 coarse_dim;     // # of chunks per axis in the coarse grid
-    int _pad2;
     simd::float3 light_dir;
-    float _pad3;
-    // Overlay additions slot — a second sparse grid the shader DDA samples
-    // in parallel. Renders "on top of" the document wherever the slot is
-    // non-zero. Two sources feed it (mutually exclusive at the gesture
-    // level, so they share one slot):
+    float _pad1;
+    // Overlay additions slot — a sparse grid the shader DDA samples
+    // alongside the doc texture. Renders "on top of" the doc wherever
+    // non-zero. Two mutually-exclusive sources share the slot:
     //   1. FloatingBuffer.grid for selection lift / paste / move-drag /
-    //      rotate / flip — the grid stays in document-relative cells and
-    //      `buf_offset` is the running drag delta.
+    //      rotate / flip — `buf_offset` is the running drag delta.
     //   2. PreviewOverlay.additions for shape / face / generator tool
-    //      previews — no offset; cells are already at their final coords.
+    //      previews — no offset; cells are at their final coords.
     // When `buf_active == 0` all buf_* fields are ignored.
     simd::int3 buf_coarse_min;
-    int _pad4;
+    int _pad2;
     simd::int3 buf_coarse_dim;
-    int _pad5;
-    simd::int3 buf_offset;     // world cell delta added to buffer-local cells
-    int buf_active;            // 0 = ignore buffer
+    int _pad3;
+    simd::int3 buf_offset;
+    int buf_active;
     // Preview removals slot — only set during a tool preview. Marks doc
     // cells the preview wants to appear empty (Remove / Paint / Add-inset
     // strokes). Same coarse-grid + chunk-pool layout as the additions
-    // slot; any non-zero byte means "hide the doc cell here". `rem_active`
-    // is 0 outside of preview gestures, so the cost is one branch in the
-    // shader's hit path.
+    // slot; any non-zero byte means "hide the doc cell here".
     simd::int3 rem_coarse_min;
-    int _pad6;
+    int _pad4;
     simd::int3 rem_coarse_dim;
     int rem_active;
+    // Edit-volume bounds in cell coords. `box_min` is inclusive, `box_max`
+    // is exclusive (e.g. EditVolume{x0=-128, x1=127} → box_min.x=-128,
+    // box_max.x=128). Doubles as the doc texture's index space:
+    // `tex_a.read(uint3(cell - int3(box_min)))`.
+    simd::float3 box_min;
+    float _pad5;
+    simd::float3 box_max;
+    float _pad6;
 };
 
 NSString* const kShaderSource = @R"MSL(
@@ -65,22 +66,22 @@ struct Uniforms {
     float4x4 inv_vp;
     float3   camera_pos;
     float    _pad0;
-    int3     coarse_min;
-    int      _pad1;
-    int3     coarse_dim;
-    int      _pad2;
     float3   light_dir;
-    float    _pad3;
+    float    _pad1;
     int3     buf_coarse_min;
-    int      _pad4;
+    int      _pad2;
     int3     buf_coarse_dim;
-    int      _pad5;
+    int      _pad3;
     int3     buf_offset;
     int      buf_active;
     int3     rem_coarse_min;
-    int      _pad6;
+    int      _pad4;
     int3     rem_coarse_dim;
     int      rem_active;
+    float3   box_min;
+    float    _pad5;
+    float3   box_max;
+    float    _pad6;
 };
 
 struct Chunk {
@@ -105,16 +106,6 @@ constant uint kChunkBits = 4;
 constant uint kChunkMask = 15u;
 constant uint kChunkSize = 16u;
 constant uint kChunkVolume = 4096u;
-
-// Bounding-cube of the edit volume — matches EditVolume's defaults.
-// Hardcoded since the volume is fixed-size for Phase 13.5; promote to
-// uniforms the moment the volume becomes per-document and editable.
-constant float kBoxXMin = -128.0;
-constant float kBoxXMax =  128.0;
-constant float kBoxYMin = -128.0;
-constant float kBoxYMax =  128.0;
-constant float kBoxZMin =    0.0;
-constant float kBoxZMax =  256.0;
 
 // Closest approach of the forward ray (t ≥ 0) to an axis-aligned
 // infinite line. `axis` is which world axis the line runs along
@@ -158,13 +149,15 @@ float3 ray_to_axis_line(float3 ro, float3 rd, int axis, float a, float b) {
 // viewing angles. The matching 3 near faces are also excluded from
 // empty-space click anchoring (see ViewContext::IntersectVolumeWall),
 // so the cutaway is consistent between rendering and interaction.
-float3 bbox_edges_color(float3 ro, float3 rd, float3 bg) {
-    float xs[2] = {kBoxXMin, kBoxXMax};
-    float ys[2] = {kBoxYMin, kBoxYMax};
-    float zs[2] = {kBoxZMin, kBoxZMax};
-    int nx = (ro.x < (kBoxXMin + kBoxXMax) * 0.5) ? 0 : 1;
-    int ny = (ro.y < (kBoxYMin + kBoxYMax) * 0.5) ? 0 : 1;
-    int nz = (ro.z < (kBoxZMin + kBoxZMax) * 0.5) ? 0 : 1;
+float3 bbox_edges_color(float3 ro, float3 rd, float3 bg,
+                        float3 box_min, float3 box_max) {
+    float xs[2] = {box_min.x, box_max.x};
+    float ys[2] = {box_min.y, box_max.y};
+    float zs[2] = {box_min.z, box_max.z};
+    float3 mid = (box_min + box_max) * 0.5;
+    int nx = (ro.x < mid.x) ? 0 : 1;
+    int ny = (ro.y < mid.y) ? 0 : 1;
+    int nz = (ro.z < mid.z) ? 0 : 1;
     float strongest = 0.0;
     for (int i = 0; i < 2; ++i) {
         for (int j = 0; j < 2; ++j) {
@@ -172,21 +165,21 @@ float3 bbox_edges_color(float3 ro, float3 rd, float3 bg) {
             // corner's X-edge has y == near_y and z == near_z.
             if (!(i == ny && j == nz)) {
                 float3 ex = ray_to_axis_line(ro, rd, 0, ys[i], zs[j]);
-                if (ex.z >= kBoxXMin && ex.z <= kBoxXMax) {
+                if (ex.z >= box_min.x && ex.z <= box_max.x) {
                     float w = max(0.18, ex.y * 0.0014);
                     strongest = max(strongest, 1.0 - smoothstep(w * 0.5, w, ex.x));
                 }
             }
             if (!(i == nx && j == nz)) {
                 float3 ey = ray_to_axis_line(ro, rd, 1, xs[i], zs[j]);
-                if (ey.z >= kBoxYMin && ey.z <= kBoxYMax) {
+                if (ey.z >= box_min.y && ey.z <= box_max.y) {
                     float w = max(0.18, ey.y * 0.0014);
                     strongest = max(strongest, 1.0 - smoothstep(w * 0.5, w, ey.x));
                 }
             }
             if (!(i == nx && j == ny)) {
                 float3 ez = ray_to_axis_line(ro, rd, 2, xs[i], ys[j]);
-                if (ez.z >= kBoxZMin && ez.z <= kBoxZMax) {
+                if (ez.z >= box_min.z && ez.z <= box_max.z) {
                     float w = max(0.18, ez.y * 0.0014);
                     strongest = max(strongest, 1.0 - smoothstep(w * 0.5, w, ez.x));
                 }
@@ -200,13 +193,12 @@ float3 bbox_edges_color(float3 ro, float3 rd, float3 bg) {
 fragment float4 raycast_fragment(
     VertOut in [[stage_in]],
     constant Uniforms& u [[buffer(0)]],
-    device const uint* coarse_grid [[buffer(1)]],
-    device const Chunk* chunk_pool [[buffer(2)]],
-    constant float4* palette [[buffer(3)]],
-    device const uint* buf_coarse_grid [[buffer(4)]],
-    device const Chunk* buf_chunk_pool [[buffer(5)]],
-    device const uint* rem_coarse_grid [[buffer(6)]],
-    device const Chunk* rem_chunk_pool [[buffer(7)]])
+    constant float4* palette [[buffer(1)]],
+    device const uint* buf_coarse_grid [[buffer(2)]],
+    device const Chunk* buf_chunk_pool [[buffer(3)]],
+    device const uint* rem_coarse_grid [[buffer(4)]],
+    device const Chunk* rem_chunk_pool [[buffer(5)]],
+    texture3d<uint, access::read> tex_a [[texture(0)]])
 {
     // Reconstruct world-space ray from NDC.
     float4 near_clip = float4(in.ndc, 0.0, 1.0);
@@ -227,15 +219,13 @@ fragment float4 raycast_fragment(
     // distances in front of the clip plane.
     float3 cam_origin = ray_origin;
 
-    // Combined AABB clip. Without the buffer this is just the doc's
-    // chunk extents; with it, we expand to include the buffer's footprint
-    // (which can wander outside the doc, e.g. dragging a paste off into
-    // empty space). The early reject keeps cameras far from any geometry
-    // from spinning the DDA in pure void.
-    float3 doc_min = float3(u.coarse_min) * float(kChunkSize);
-    float3 doc_max = float3(u.coarse_min + u.coarse_dim) * float(kChunkSize);
-    float3 aabb_min = doc_min;
-    float3 aabb_max = doc_max;
+    // Combined AABB clip. Without the buffer this is just the edit
+    // volume; with it, we expand to include the buffer's footprint
+    // (which can wander outside the volume, e.g. dragging a paste off
+    // into empty space). The early reject keeps cameras far from any
+    // geometry from spinning the DDA in pure void.
+    float3 aabb_min = u.box_min;
+    float3 aabb_max = u.box_max;
     if (u.buf_active != 0) {
         float3 b_min = float3(u.buf_coarse_min) * float(kChunkSize)
                      + float3(u.buf_offset);
@@ -253,7 +243,7 @@ fragment float4 raycast_fragment(
     float t_exit  = min(min(t_hi.x, t_hi.y), t_hi.z);
     if (t_exit < 0.0 || t_enter > t_exit) {
         float3 bg = float3(0.118, 0.118, 0.18);
-        return float4(bbox_edges_color(cam_origin, ray_dir, bg), 1.0);
+        return float4(bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max), 1.0);
     }
     // Advance origin to the entry point if we're outside. The small nudge
     // past the boundary avoids landing on a cell edge with floor() rounding
@@ -286,35 +276,26 @@ fragment float4 raycast_fragment(
 
     int last_axis = -1;
 
-    // Dual-volume DDA. At each cell we look up both volumes' chunk
-    // indices; if both chunks are empty we coarse-skip to whichever
-    // chunk boundary comes first (so the skip never overshoots a
-    // non-empty chunk in either volume). When a cell is non-empty we
-    // sample the buffer first — it renders on top of the document
-    // wherever the two overlap (which only happens during a paste at
-    // offset 0; once the user starts dragging, the lift cleared the
-    // document cells under the buffer's source position).
+    // Dense-doc DDA. The doc lives in a single read-only `texture3d<uint>`
+    // sized to the edit volume; per-cell lookup is one `tex_a.read()`.
+    // Coarse-skip-on-empty is gone — at 256³ the worst-case 256-step
+    // texture-fetch DDA is still trivially cheap, and the optimization
+    // depended on a coarse occupancy oracle we no longer maintain for
+    // the doc. The overlay slots (buf + rem) keep their sparse pool
+    // layout — they're small (a brush footprint or selection lift), so
+    // chunk-pool indirection plus their coarse oracle stays worthwhile.
+    int3 box_min_i = int3(int(u.box_min.x), int(u.box_min.y), int(u.box_min.z));
+    int3 box_max_i = int3(int(u.box_max.x), int(u.box_max.y), int(u.box_max.z));
     for (int s = 0; s < kMaxSteps; ++s) {
-        int3 chunk_c;
-        chunk_c.x = cell.x >> int(kChunkBits);
-        chunk_c.y = cell.y >> int(kChunkBits);
-        chunk_c.z = cell.z >> int(kChunkBits);
+        // Doc texture lookup. Out-of-volume cells read as empty.
+        bool doc_in = (cell.x >= box_min_i.x && cell.x < box_max_i.x &&
+                       cell.y >= box_min_i.y && cell.y < box_max_i.y &&
+                       cell.z >= box_min_i.z && cell.z < box_max_i.z);
+        uint val_doc = doc_in
+            ? tex_a.read(uint3(cell - box_min_i)).r
+            : 0u;
 
-        int3 cgc = chunk_c - u.coarse_min;
-        bool doc_in = (cgc.x >= 0 && cgc.y >= 0 && cgc.z >= 0 &&
-                       cgc.x < u.coarse_dim.x &&
-                       cgc.y < u.coarse_dim.y &&
-                       cgc.z < u.coarse_dim.z);
-        uint pool_idx_doc = 0u;
-        if (doc_in) {
-            uint coarse_idx = uint(cgc.x) +
-                              uint(cgc.y) * uint(u.coarse_dim.x) +
-                              uint(cgc.z) * uint(u.coarse_dim.x) * uint(u.coarse_dim.y);
-            pool_idx_doc = coarse_grid[coarse_idx];
-        }
-
-        // Buffer-side lookup (only when the buffer is active and the
-        // cell falls inside its chunk extents in *world* coords).
+        // Buffer-side lookup (unchanged — overlay slots stay sparse).
         uint pool_idx_buf = 0u;
         int3 chunk_c_buf = int3(0);
         bool buf_in = false;
@@ -336,85 +317,13 @@ fragment float4 raycast_fragment(
             }
         }
 
-        // Outside both volumes' chunk extents: nothing to hit anywhere
-        // along the ray's continuation either (the AABB clip already
-        // guaranteed we'd enter at least one of them, so leaving both
-        // means we exited the union).
+        // Outside the union of doc volume + buf extent: ray has exited.
         if (!doc_in && !buf_in) {
             float3 bg = float3(0.118, 0.118, 0.18);
-            return float4(bbox_edges_color(cam_origin, ray_dir, bg), 1.0);
+            return float4(bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max), 1.0);
         }
 
-        if (pool_idx_doc == 0u && pool_idx_buf == 0u) {
-            // Both volumes empty here. Skip to whichever chunk boundary
-            // comes first, so the next iteration lands at the earliest
-            // cell that *might* be non-empty in either volume.
-            float3 chunk_min_doc = float3(chunk_c) * float(kChunkSize);
-            float3 chunk_max_doc = chunk_min_doc + float(kChunkSize);
-            float3 exit_face_doc = select(chunk_min_doc, chunk_max_doc, step_dir > 0);
-            float3 t_face_doc = (exit_face_doc - ray_origin) * inv_dir;
-            if (step_dir.x == 0) t_face_doc.x = INFINITY;
-            if (step_dir.y == 0) t_face_doc.y = INFINITY;
-            if (step_dir.z == 0) t_face_doc.z = INFINITY;
-            float t_exit_doc = min(min(t_face_doc.x, t_face_doc.y), t_face_doc.z);
-
-            float t_exit_buf = INFINITY;
-            float3 t_face_buf = float3(INFINITY);
-            if (u.buf_active != 0) {
-                float3 chunk_min_buf = float3(chunk_c_buf) * float(kChunkSize)
-                                     + float3(u.buf_offset);
-                float3 chunk_max_buf = chunk_min_buf + float(kChunkSize);
-                float3 exit_face_buf = select(chunk_min_buf, chunk_max_buf, step_dir > 0);
-                t_face_buf = (exit_face_buf - ray_origin) * inv_dir;
-                if (step_dir.x == 0) t_face_buf.x = INFINITY;
-                if (step_dir.y == 0) t_face_buf.y = INFINITY;
-                if (step_dir.z == 0) t_face_buf.z = INFINITY;
-                t_exit_buf = min(min(t_face_buf.x, t_face_buf.y), t_face_buf.z);
-            }
-
-            float t_skip = min(t_exit_doc, t_exit_buf);
-            float3 t_face = (t_exit_doc <= t_exit_buf) ? t_face_doc : t_face_buf;
-            int3 chunk_c_skip = (t_exit_doc <= t_exit_buf) ? chunk_c : chunk_c_buf;
-            int3 base_offset = (t_exit_doc <= t_exit_buf) ? int3(0) : u.buf_offset;
-            int exit_axis = (t_face.x <= t_face.y && t_face.x <= t_face.z) ? 0
-                          : (t_face.y <= t_face.z) ? 1 : 2;
-            last_axis = exit_axis;
-
-            float eps = max(1e-3, t_skip * 1e-5);
-            float3 pos = ray_origin + ray_dir * (t_skip + eps);
-            cell.x = int(floor(pos.x));
-            cell.y = int(floor(pos.y));
-            cell.z = int(floor(pos.z));
-            if (exit_axis == 0) {
-                cell.x = step_dir.x > 0
-                    ? (chunk_c_skip.x + 1) * int(kChunkSize) + base_offset.x
-                    :  chunk_c_skip.x      * int(kChunkSize) + base_offset.x - 1;
-            } else if (exit_axis == 1) {
-                cell.y = step_dir.y > 0
-                    ? (chunk_c_skip.y + 1) * int(kChunkSize) + base_offset.y
-                    :  chunk_c_skip.y      * int(kChunkSize) + base_offset.y - 1;
-            } else {
-                cell.z = step_dir.z > 0
-                    ? (chunk_c_skip.z + 1) * int(kChunkSize) + base_offset.z
-                    :  chunk_c_skip.z      * int(kChunkSize) + base_offset.z - 1;
-            }
-            t_max.x = step_dir.x == 0 ? INFINITY :
-                      (step_dir.x > 0
-                           ? (float(cell.x + 1) - ray_origin.x) / ray_dir.x
-                           : (ray_origin.x - float(cell.x))     / -ray_dir.x);
-            t_max.y = step_dir.y == 0 ? INFINITY :
-                      (step_dir.y > 0
-                           ? (float(cell.y + 1) - ray_origin.y) / ray_dir.y
-                           : (ray_origin.y - float(cell.y))     / -ray_dir.y);
-            t_max.z = step_dir.z == 0 ? INFINITY :
-                      (step_dir.z > 0
-                           ? (float(cell.z + 1) - ray_origin.z) / ray_dir.z
-                           : (ray_origin.z - float(cell.z))     / -ray_dir.z);
-            continue;
-        }
-
-        // At least one chunk has cells. Sample the buffer first — when
-        // it overlaps the document the buffer wins.
+        // Hit detection. Buf renders on top of doc where they overlap.
         if (pool_idx_buf != 0u) {
             int3 cell_buf = cell - u.buf_offset;
             uint lx = uint(cell_buf.x) & kChunkMask;
@@ -434,16 +343,15 @@ fragment float4 raycast_fragment(
                 return float4(base * lambert, 1.0);
             }
         }
-        if (pool_idx_doc != 0u) {
-            uint lx = uint(cell.x) & kChunkMask;
-            uint ly = uint(cell.y) & kChunkMask;
-            uint lz = uint(cell.z) & kChunkMask;
-            uint local_idx = lx + ly * kChunkSize + lz * kChunkSize * kChunkSize;
-            uint val = uint(chunk_pool[pool_idx_doc - 1u].cells[local_idx]);
+        if (val_doc != 0u) {
             // Preview removals: skip doc cells the active preview wants to
             // appear empty (Remove / Paint / Add-inset previews stage their
-            // hidden cells here so the doc grid stays untouched).
-            if (val != 0u && u.rem_active != 0) {
+            // hidden cells here so the doc texture stays untouched).
+            if (u.rem_active != 0) {
+                int3 chunk_c;
+                chunk_c.x = cell.x >> int(kChunkBits);
+                chunk_c.y = cell.y >> int(kChunkBits);
+                chunk_c.z = cell.z >> int(kChunkBits);
                 int3 rgc = chunk_c - u.rem_coarse_min;
                 if (rgc.x >= 0 && rgc.y >= 0 && rgc.z >= 0 &&
                     rgc.x < u.rem_coarse_dim.x &&
@@ -454,13 +362,19 @@ fragment float4 raycast_fragment(
                                  uint(rgc.z) * uint(u.rem_coarse_dim.x) *
                                                uint(u.rem_coarse_dim.y);
                     uint pool_idx_rem = rem_coarse_grid[r_idx];
-                    if (pool_idx_rem != 0u &&
-                        rem_chunk_pool[pool_idx_rem - 1u].cells[local_idx] != 0u) {
-                        val = 0u;
+                    if (pool_idx_rem != 0u) {
+                        uint lx = uint(cell.x) & kChunkMask;
+                        uint ly = uint(cell.y) & kChunkMask;
+                        uint lz = uint(cell.z) & kChunkMask;
+                        uint local_idx = lx + ly * kChunkSize +
+                                         lz * kChunkSize * kChunkSize;
+                        if (rem_chunk_pool[pool_idx_rem - 1u].cells[local_idx] != 0u) {
+                            val_doc = 0u;
+                        }
                     }
                 }
             }
-            if (val != 0u) {
+            if (val_doc != 0u) {
                 float3 grid_normal = float3(0.0);
                 if (last_axis == 0) grid_normal.x = -float(step_dir.x);
                 else if (last_axis == 1) grid_normal.y = -float(step_dir.y);
@@ -468,12 +382,12 @@ fragment float4 raycast_fragment(
                 float3 world_normal = float3(grid_normal.x, grid_normal.z, -grid_normal.y);
                 float ndl = max(dot(world_normal, u.light_dir), 0.0);
                 float lambert = 0.3 + 0.7 * ndl;
-                float3 base = palette[val].rgb;
+                float3 base = palette[val_doc].rgb;
                 return float4(base * lambert, 1.0);
             }
         }
 
-        // Both chunks present, both cells empty here. Cell-level step.
+        // No hit at this cell. Cell-step.
         if (t_max.x < t_max.y && t_max.x < t_max.z) {
             cell.x += step_dir.x;
             t_max.x += t_delta.x;
@@ -489,7 +403,7 @@ fragment float4 raycast_fragment(
         }
     }
     float3 bg = float3(0.118, 0.118, 0.18);
-    return float4(bbox_edges_color(cam_origin, ray_dir, bg), 1.0);
+    return float4(bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max), 1.0);
 }
 )MSL";
 
@@ -498,20 +412,14 @@ fragment float4 raycast_fragment(
 @implementation RaycastRenderer {
     id<MTLDevice> _device;
     id<MTLRenderPipelineState> _pipeline;
-    id<MTLBuffer> _coarseBuffer;
-    id<MTLBuffer> _poolBuffer;
+    // Dense doc texture (A2): R8Uint 3D texture sized to the edit
+    // volume. Re-synced from doc->volume_shadow whenever
+    // doc->geometry_version advances. Allocated lazily on first encode.
+    VolumeTexture* _docVolumeTex;
     id<MTLBuffer> _paletteBuffer;
     uint64_t _cachedGeometryVersion;
     uint64_t _cachedPaletteVersion;
     BOOL _cacheValid;
-    simd::int3 _coarseMin;
-    simd::int3 _coarseDim;
-    uint32_t _chunkCount;
-    // Pool slot bookkeeping: how many slots are currently in use, and how
-    // many fit in the buffer's current allocation. Slot 0 is reserved as
-    // the "empty" sentinel that coarse_grid uses (1-based pool indices).
-    uint32_t _poolSlotsUsed;
-    uint32_t _poolSlotsCapacity;
     // Overlay-additions resources. The slot is shared by FloatingBuffer
     // (selection lift / paste / move-drag) and PreviewOverlay (shape /
     // face / generator preview); the two are mutually exclusive at the
@@ -587,17 +495,25 @@ fragment float4 raycast_fragment(
     return self;
 }
 
-- (uint32_t)lastChunkCount { return _chunkCount; }
+- (uint32_t)lastChunkCount {
+    // Dense texture has no chunk count of its own — report nothing.
+    // Field stays in the API for the SwiftUI stats panel, which now
+    // reads chunk counts off VoxelGrid directly.
+    return 0;
+}
 
 - (size_t)lastGPUBytes {
-    size_t bytes = 0;
-    if (_coarseBuffer != nil) bytes += _coarseBuffer.length;
-    if (_poolBuffer != nil) bytes += _poolBuffer.length;
-    return bytes;
+    if (_docVolumeTex == nil) return 0;
+    id<MTLTexture> t = _docVolumeTex.texture;
+    return (size_t)t.width * (size_t)t.height * (size_t)t.depth;
 }
 
 - (void)invalidate {
     _cacheValid = NO;
+    _docVolumeTex = nil;
+    _paletteBuffer = nil;
+    _cachedGeometryVersion = 0;
+    _cachedPaletteVersion = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -672,112 +588,8 @@ fragment float4 raycast_fragment(
     (*coarseOut).label = coarseLabel;
 }
 
-- (void)wholesaleRebuildFromDocument:(macvoxel::Document*)doc {
-    using VG = macvoxel::VoxelGrid;
-    const auto& chunks = doc->grid.chunks();
-    _chunkCount = static_cast<uint32_t>(chunks.size());
-
-    if (chunks.empty()) {
-        _coarseMin = simd::int3{0, 0, 0};
-        _coarseDim = simd::int3{0, 0, 0};
-        _coarseBuffer = nil;
-        _poolBuffer = nil;
-        _poolSlotsUsed = 0;
-        _poolSlotsCapacity = 0;
-    } else {
-        // Coarse-grid extents from chunk coords, inflated with headroom so
-        // edits that grow the model into nearby empty chunks don't fall
-        // outside the cached bounds and trigger another wholesale rebuild.
-        // Without this, dragging the brush / Face tool into empty space
-        // re-uploads the entire chunk pool every frame: two MTLBuffer
-        // allocations + a memcpy per chunk for the whole document, which
-        // tanks framerate on anything beyond a few-chunk model.
-        //
-        // Cost is one bigger coarse buffer (4 bytes per padded slot —
-        // trivial). The pool buffer is unaffected; growPoolToSlots: still
-        // amortizes new-slot growth via doubling.
-        constexpr int32_t kPaddingChunks = 4;
-        int32_t min_cx = INT32_MAX, min_cy = INT32_MAX, min_cz = INT32_MAX;
-        int32_t max_cx = INT32_MIN, max_cy = INT32_MIN, max_cz = INT32_MIN;
-        for (const auto& [coord, chunk] : chunks) {
-            min_cx = std::min(min_cx, coord.x);
-            min_cy = std::min(min_cy, coord.y);
-            min_cz = std::min(min_cz, coord.z);
-            max_cx = std::max(max_cx, coord.x);
-            max_cy = std::max(max_cy, coord.y);
-            max_cz = std::max(max_cz, coord.z);
-        }
-        min_cx -= kPaddingChunks; min_cy -= kPaddingChunks; min_cz -= kPaddingChunks;
-        max_cx += kPaddingChunks; max_cy += kPaddingChunks; max_cz += kPaddingChunks;
-        _coarseMin = simd::int3{min_cx, min_cy, min_cz};
-        _coarseDim = simd::int3{max_cx - min_cx + 1,
-                                max_cy - min_cy + 1,
-                                max_cz - min_cz + 1};
-
-        const size_t coarse_count =
-            static_cast<size_t>(_coarseDim.x) *
-            static_cast<size_t>(_coarseDim.y) *
-            static_cast<size_t>(_coarseDim.z);
-        std::vector<uint32_t> coarse(coarse_count, 0);
-
-        // Pool capacity: one slot per chunk plus headroom so subsequent
-        // edits can append without reallocating immediately.
-        _poolSlotsCapacity = static_cast<uint32_t>(
-            std::max<size_t>(chunks.size() * 3 / 2 + 16, 64));
-        const size_t pool_bytes =
-            static_cast<size_t>(_poolSlotsCapacity) * VG::kChunkVolume;
-        _poolBuffer = [_device newBufferWithLength:pool_bytes
-                                           options:MTLResourceStorageModeShared];
-        _poolBuffer.label = @"RaycastChunkPool";
-
-        auto* pool = static_cast<uint8_t*>(_poolBuffer.contents);
-        uint32_t pool_idx = 1;  // 1-based; 0 means empty in the coarse grid
-        for (const auto& [coord, chunk] : chunks) {
-            const size_t cgi =
-                static_cast<size_t>(coord.x - min_cx) +
-                static_cast<size_t>(coord.y - min_cy) *
-                    static_cast<size_t>(_coarseDim.x) +
-                static_cast<size_t>(coord.z - min_cz) *
-                    static_cast<size_t>(_coarseDim.x) *
-                    static_cast<size_t>(_coarseDim.y);
-            coarse[cgi] = pool_idx;
-            std::memcpy(pool + (pool_idx - 1) * VG::kChunkVolume,
-                        chunk->cells, VG::kChunkVolume);
-            ++pool_idx;
-        }
-        _poolSlotsUsed = pool_idx - 1;
-
-        _coarseBuffer = [_device newBufferWithBytes:coarse.data()
-                                             length:coarse.size() * sizeof(uint32_t)
-                                            options:MTLResourceStorageModeShared];
-        _coarseBuffer.label = @"RaycastCoarse";
-    }
-
-    // Palette buffer.
-    std::array<simd::float4, 256> pal_floats{};
-    for (size_t i = 0; i < 256; ++i) {
-        const macvoxel::Color c = doc->palette.Get(static_cast<uint8_t>(i));
-        pal_floats[i] = simd::float4{
-            c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f,
-        };
-    }
-    _paletteBuffer = [_device newBufferWithBytes:pal_floats.data()
-                                          length:sizeof(pal_floats)
-                                         options:MTLResourceStorageModeShared];
-    _paletteBuffer.label = @"RaycastPalette";
-
-    // Wholesale rebuild covered everything; flush the dirty queue so the
-    // next encode doesn't redundantly re-process those same chunks.
-    doc->grid.TakeDirtyChunks();
-
-    _cachedGeometryVersion = doc->geometry_version;
-    _cachedPaletteVersion = doc->palette_version;
-    _cacheValid = YES;
-}
-
-// Upload the palette to its existing GPU buffer. Cheap (1 KB memcpy).
-// Caller is responsible for ensuring _paletteBuffer is non-nil — i.e.
-// only call after at least one wholesale rebuild has happened.
+// Upload the palette into its GPU buffer. Lazy-allocates _paletteBuffer
+// on first call. Cheap (1 KB memcpy).
 - (void)uploadPalette:(macvoxel::Document*)doc {
     std::array<simd::float4, 256> pal_floats{};
     for (size_t i = 0; i < 256; ++i) {
@@ -786,114 +598,30 @@ fragment float4 raycast_fragment(
             c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f,
         };
     }
+    if (_paletteBuffer == nil) {
+        _paletteBuffer =
+            [_device newBufferWithBytes:pal_floats.data()
+                                 length:sizeof(pal_floats)
+                                options:MTLResourceStorageModeShared];
+        _paletteBuffer.label = @"RaycastPalette";
+        return;
+    }
     std::memcpy(_paletteBuffer.contents, pal_floats.data(), sizeof(pal_floats));
 }
 
-- (BOOL)dirtyFitsInExistingBounds:(const macvoxel::VoxelGrid::ChunkSet&)dirty {
-    for (const auto& coord : dirty) {
-        if (coord.x < _coarseMin.x ||
-            coord.y < _coarseMin.y ||
-            coord.z < _coarseMin.z ||
-            coord.x >= _coarseMin.x + _coarseDim.x ||
-            coord.y >= _coarseMin.y + _coarseDim.y ||
-            coord.z >= _coarseMin.z + _coarseDim.z) {
-            return NO;
-        }
+// Bring _docVolumeTex up to date with doc->volume_shadow. Lazy-allocates
+// the texture on first call. The shadow's dirty-chunk bitset drives
+// per-chunk uploads, so the steady-state cost is just the bytes
+// touched by the most recent edit.
+- (void)syncDocVolumeFromDocument:(macvoxel::Document*)doc {
+    if (_docVolumeTex == nil) {
+        _docVolumeTex =
+            [[VolumeTexture alloc] initWithDevice:_device
+                                            volume:doc->volume_shadow];
     }
-    return YES;
-}
-
-- (void)growPoolToSlots:(uint32_t)needed {
-    using VG = macvoxel::VoxelGrid;
-    uint32_t new_cap = std::max(_poolSlotsCapacity * 2, needed);
-    new_cap = std::max<uint32_t>(new_cap, 64);
-    const size_t new_bytes = static_cast<size_t>(new_cap) * VG::kChunkVolume;
-    id<MTLBuffer> new_buf =
-        [_device newBufferWithLength:new_bytes
-                             options:MTLResourceStorageModeShared];
-    new_buf.label = @"RaycastChunkPool";
-    if (_poolBuffer != nil && _poolSlotsUsed > 0) {
-        std::memcpy(new_buf.contents, _poolBuffer.contents,
-                    static_cast<size_t>(_poolSlotsUsed) * VG::kChunkVolume);
-    }
-    _poolBuffer = new_buf;
-    _poolSlotsCapacity = new_cap;
-}
-
-- (void)applyDirty:(macvoxel::Document*)doc dirty:(const macvoxel::VoxelGrid::ChunkSet&)dirty {
-    using VG = macvoxel::VoxelGrid;
-    const auto& chunks = doc->grid.chunks();
-
-    auto* coarse = static_cast<uint32_t*>(_coarseBuffer.contents);
-
-    // First pass: see how many new pool slots we need and grow once.
-    uint32_t new_slots_needed = 0;
-    for (const auto& coord : dirty) {
-        const size_t cgi =
-            static_cast<size_t>(coord.x - _coarseMin.x) +
-            static_cast<size_t>(coord.y - _coarseMin.y) *
-                static_cast<size_t>(_coarseDim.x) +
-            static_cast<size_t>(coord.z - _coarseMin.z) *
-                static_cast<size_t>(_coarseDim.x) *
-                static_cast<size_t>(_coarseDim.y);
-        if (coarse[cgi] == 0 && chunks.find(coord) != chunks.end()) {
-            ++new_slots_needed;
-        }
-    }
-    if (_poolSlotsUsed + new_slots_needed > _poolSlotsCapacity) {
-        [self growPoolToSlots:_poolSlotsUsed + new_slots_needed];
-    }
-
-    auto* pool = static_cast<uint8_t*>(_poolBuffer.contents);
-
-    for (const auto& coord : dirty) {
-        const size_t cgi =
-            static_cast<size_t>(coord.x - _coarseMin.x) +
-            static_cast<size_t>(coord.y - _coarseMin.y) *
-                static_cast<size_t>(_coarseDim.x) +
-            static_cast<size_t>(coord.z - _coarseMin.z) *
-                static_cast<size_t>(_coarseDim.x) *
-                static_cast<size_t>(_coarseDim.y);
-
-        auto chunk_it = chunks.find(coord);
-        if (chunk_it == chunks.end()) {
-            // Chunk was deleted (last filled cell cleared). Mark its coarse
-            // slot empty; pool slot is left unreclaimed for now (a future
-            // free-list could reuse it).
-            coarse[cgi] = 0;
-            continue;
-        }
-
-        uint32_t pool_idx = coarse[cgi];
-        if (pool_idx == 0) {
-            ++_poolSlotsUsed;
-            pool_idx = _poolSlotsUsed;  // 1-based
-            coarse[cgi] = pool_idx;
-        }
-        std::memcpy(pool + (pool_idx - 1) * VG::kChunkVolume,
-                    chunk_it->second->cells, VG::kChunkVolume);
-    }
-
-    _chunkCount = static_cast<uint32_t>(chunks.size());
-}
-
-- (void)updateGeometryFromDocument:(macvoxel::Document*)doc {
-    auto dirty = doc->grid.TakeDirtyChunks();
-
-    if (!_cacheValid || _coarseBuffer == nil ||
-        ![self dirtyFitsInExistingBounds:dirty]) {
-        // wholesaleRebuildFromDocument re-uploads palette too and
-        // refreshes both cached typed versions, so the encode-time
-        // palette check downstream will be a no-op this frame.
-        [self wholesaleRebuildFromDocument:doc];
-        return;
-    }
-
-    if (!dirty.empty()) {
-        [self applyDirty:doc dirty:dirty];
-    }
-
+    [_docVolumeTex syncFromVolume:doc->volume_shadow];
     _cachedGeometryVersion = doc->geometry_version;
+    _cacheValid = YES;
 }
 
 - (void)encodeWithEncoder:(id<MTLRenderCommandEncoder>)encoder
@@ -904,18 +632,15 @@ fragment float4 raycast_fragment(
     if (ctx == nullptr) return;
     macvoxel::Document* doc = &ctx->document;
     if (!_cacheValid || _cachedGeometryVersion != doc->geometry_version) {
-        [self updateGeometryFromDocument:doc];
+        [self syncDocVolumeFromDocument:doc];
     }
-    // Palette upload is independent of geometry — a single colour tweak
-    // mustn't drag the chunk pool through a wholesale rebuild. The cached
-    // version stays in sync regardless of which path advanced it (the
-    // wholesale rebuild also refreshes _cachedPaletteVersion).
-    if (_paletteBuffer != nil &&
+    // Palette upload is independent of geometry.
+    if (_paletteBuffer == nil ||
         _cachedPaletteVersion != doc->palette_version) {
         [self uploadPalette:doc];
         _cachedPaletteVersion = doc->palette_version;
     }
-    if (_coarseBuffer == nil || _poolBuffer == nil) return;
+    if (_docVolumeTex == nil || _paletteBuffer == nil) return;
 
     // Resolve which overlay (if any) feeds the additions slot this frame.
     // FloatingBuffer (selection move/paste/transform) and PreviewOverlay
@@ -993,12 +718,8 @@ fragment float4 raycast_fragment(
     u.inv_vp = simd_inverse(projection * view);
     u.camera_pos = cameraWorld;
     u._pad0 = 0.0f;
-    u.coarse_min = _coarseMin;
-    u._pad1 = 0;
-    u.coarse_dim = _coarseDim;
-    u._pad2 = 0;
     u.light_dir = simd::normalize(simd::float3{0.4f, 0.7f, 0.5f});
-    u._pad3 = 0.0f;
+    u._pad1 = 0.0f;
 
     const bool buffer_drawable = _bufBuilt && _bufCoarseBuffer != nil;
     if (buffer_drawable) {
@@ -1014,8 +735,8 @@ fragment float4 raycast_fragment(
         u.buf_offset = simd::int3{0, 0, 0};
         u.buf_active = 0;
     }
-    u._pad4 = 0;
-    u._pad5 = 0;
+    u._pad2 = 0;
+    u._pad3 = 0;
 
     const bool removals_drawable = _remBuilt && _remCoarseBuffer != nil;
     if (removals_drawable) {
@@ -1027,27 +748,36 @@ fragment float4 raycast_fragment(
         u.rem_coarse_dim = simd::int3{0, 0, 0};
         u.rem_active = 0;
     }
-    u._pad6 = 0;
+    u._pad4 = 0;
+
+    const macvoxel::EditVolume& vol = doc->volume;
+    u.box_min = simd::float3{static_cast<float>(vol.x0),
+                             static_cast<float>(vol.y0),
+                             static_cast<float>(vol.z0)};
+    u.box_max = simd::float3{static_cast<float>(vol.x1 + 1),
+                             static_cast<float>(vol.y1 + 1),
+                             static_cast<float>(vol.z1 + 1)};
+    u._pad5 = 0.0f;
+    u._pad6 = 0.0f;
 
     [encoder pushDebugGroup:@"Voxels (raycast)"];
     [encoder setRenderPipelineState:_pipeline];
     [encoder setCullMode:MTLCullModeNone];
     [encoder setFragmentBytes:&u length:sizeof(u) atIndex:0];
-    [encoder setFragmentBuffer:_coarseBuffer offset:0 atIndex:1];
-    [encoder setFragmentBuffer:_poolBuffer offset:0 atIndex:2];
-    [encoder setFragmentBuffer:_paletteBuffer offset:0 atIndex:3];
+    [encoder setFragmentBuffer:_paletteBuffer offset:0 atIndex:1];
     [encoder setFragmentBuffer:(buffer_drawable ? _bufCoarseBuffer : _stubBuffer)
                         offset:0
-                       atIndex:4];
+                       atIndex:2];
     [encoder setFragmentBuffer:(buffer_drawable ? _bufPoolBuffer : _stubBuffer)
                         offset:0
-                       atIndex:5];
+                       atIndex:3];
     [encoder setFragmentBuffer:(removals_drawable ? _remCoarseBuffer : _stubBuffer)
                         offset:0
-                       atIndex:6];
+                       atIndex:4];
     [encoder setFragmentBuffer:(removals_drawable ? _remPoolBuffer : _stubBuffer)
                         offset:0
-                       atIndex:7];
+                       atIndex:5];
+    [encoder setFragmentTexture:_docVolumeTex.texture atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:3];
