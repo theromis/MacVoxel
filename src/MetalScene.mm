@@ -1,9 +1,11 @@
 #import "MetalScene.h"
 
+#import "BrushEngine.h"
 #import "GeneratorEngine.h"
 #import "PathTraceRenderer.h"
 #import "RaycastRenderer.h"
 #import "SceneOverlayRenderer.h"
+#import "VolumeTexture.h"
 
 #import "swift/EditorContextBridge.h"
 #import "swift/EditorContextBridge_Internal.h"
@@ -64,6 +66,12 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     PathTraceRenderer *_pathTraceRenderer;
     SceneOverlayRenderer *_overlayRenderer;
     GeneratorEngine *_generatorEngine;
+    BrushEngine *_brushEngine;
+    // Per-document GPU mirror of the voxel grid. Both renderers and
+    // the brush kernel bind it; the brush kernel writes through
+    // access::read_write, the rasterizer fragment shader reads.
+    VolumeTexture *_docVolumeTex;
+    uint64_t _docVolumeTexCachedVersion;
 
     macvoxel::Camera _camera;
     NSTrackingArea *_trackingArea;
@@ -135,6 +143,22 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         initWithDevice:device commandQueue:_commandQueue];
     if (_generatorEngine == nil) return nil;
 
+    // Dedicated brush queue. Sharing with the rasterizer's
+    // _commandQueue forces the brush's `waitUntilCompleted` to block
+    // behind in-flight frame draws — the source of the 30–60 ms
+    // dispatch spikes seen during a drag.
+    id<MTLCommandQueue> brushQueue = [device newCommandQueue];
+    brushQueue.label = @"MacVoxelBrushQueue";
+    _brushEngine = [[BrushEngine alloc]
+        initWithDevice:device commandQueue:brushQueue];
+    if (_brushEngine == nil) return nil;
+
+    _docVolumeTex = [[VolumeTexture alloc]
+        initWithDevice:device
+                volume:_ctx->document.volume_shadow];
+    if (_docVolumeTex == nil) return nil;
+    _docVolumeTexCachedVersion = 0;
+
     _interaction.gen_gizmo.active_drag_face = -1;  // 0 means -X face — explicit nil.
     _lastRenderMode = macvoxel::RenderMode::Edit;
     _lastToolForFB = _ctx->tool.tool;
@@ -166,6 +190,11 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 - (void)invalidateRenderers {
     [_raycastRenderer invalidate];
     [_pathTraceRenderer invalidate];
+    // Force a full re-sync of the doc texture from the (possibly new)
+    // shadow on the next draw. VoxelVolume::Clear / ReseedVolumeShadow
+    // already mark every chunk dirty; resetting the cached version
+    // ensures the sync path actually fires.
+    _docVolumeTexCachedVersion = 0;
 }
 
 - (BOOL)exportRenderToURL:(NSURL *)url error:(NSError **)error {
@@ -308,6 +337,33 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                     macvoxel::generators::Params params,
                     std::vector<macvoxel::generators::CellOut> &out) {
         [engine generateInto:out kind:kind bounds:bounds params:params];
+    };
+}
+
+- (macvoxel::brush_controller::StampFn)brushStampFn {
+    BrushEngine *engine = _brushEngine;
+    VolumeTexture *texture = _docVolumeTex;
+    return [engine, texture](const macvoxel::BrushParams &params) {
+        [engine dispatch:params target:texture];
+    };
+}
+
+- (macvoxel::brush_controller::ReadBackFn)brushReadBackFn {
+    BrushEngine *engine = _brushEngine;
+    VolumeTexture *texture = _docVolumeTex;
+    macvoxel::EditorContext *ctx = _ctx;
+    return [engine, texture, ctx](const macvoxel::Bbox3 &world_bbox,
+                                  std::vector<uint8_t> *out) {
+        [engine waitForPendingWork];
+        const macvoxel::EditVolume &vol = ctx->document.volume;
+        macvoxel::Bbox3 local{};
+        local.x0 = world_bbox.x0 - vol.x0;
+        local.y0 = world_bbox.y0 - vol.y0;
+        local.z0 = world_bbox.z0 - vol.z0;
+        local.x1 = world_bbox.x1 - vol.x0;
+        local.y1 = world_bbox.y1 - vol.y0;
+        local.z1 = world_bbox.z1 - vol.z0;
+        [engine readTextureRegion:out target:texture bbox:local];
     };
 }
 
@@ -467,6 +523,15 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         const simd::float4x4 viewMat = _camera.ViewMatrix();
         const simd::float4x4 projMat = _camera.ProjectionMatrix(aspect);
 
+        // Sync the doc texture from CPU shadow on geometry_version
+        // change. Skipped when the GPU was the authoritative writer
+        // (brush kernel) — those edits drain the shadow's dirty
+        // chunks post-dispatch so this finds nothing to upload.
+        if (_docVolumeTexCachedVersion != _ctx->document.geometry_version) {
+            [_docVolumeTex syncFromVolume:_ctx->document.volume_shadow];
+            _docVolumeTexCachedVersion = _ctx->document.geometry_version;
+        }
+
         id<MTLRenderCommandEncoder> enc =
             [cmd renderCommandEncoderWithDescriptor:pass];
         enc.label = @"MacVoxel Pass";
@@ -474,7 +539,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                                        view:viewMat
                                  projection:projMat
                                 cameraWorld:_camera.Position()
-                                    context:_ctx];
+                                    context:_ctx
+                              volumeTexture:_docVolumeTex];
         if (!_od.empty()) {
             [_overlayRenderer encodeWithEncoder:enc
                                         overlay:_od
@@ -581,7 +647,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         [self autoCommitFloatingBuffer];
         macvoxel::brush_controller::OnMouseDown(
             *_ctx, _interaction, [self viewContext],
-            [self mouseEventFromNSEvent:event]);
+            [self mouseEventFromNSEvent:event], [self brushStampFn]);
     }
 }
 
@@ -598,7 +664,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         case DragMode::Paint:
             macvoxel::brush_controller::OnMouseDragged(
                 *_ctx, _interaction, [self viewContext],
-                [self mouseEventFromNSEvent:event]);
+                [self mouseEventFromNSEvent:event], [self brushStampFn]);
             break;
         case DragMode::Marquee:
             macvoxel::marquee_controller::OnMouseDragged(
@@ -651,7 +717,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 
 - (void)mouseUp:(NSEvent *)event {
     if (_interaction.drag_mode == DragMode::Paint) {
-        macvoxel::brush_controller::OnMouseUp(*_ctx, _interaction);
+        macvoxel::brush_controller::OnMouseUp(*_ctx, _interaction,
+                                              [self brushReadBackFn]);
     } else if (_interaction.drag_mode == DragMode::Marquee) {
         macvoxel::marquee_controller::OnMouseUp(
             *_ctx, _interaction.marquee, [self viewContext],

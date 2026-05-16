@@ -69,6 +69,15 @@ struct Document {
                grid.Get(x, y, z) == volume_shadow.Get(x, y, z));
     }
 
+    // Bulk equivalent of SetCell for a CellChange[] array — used by
+    // the GPU brush path so a 30k-cell stamp doesn't pay 30k chunk
+    // hashmap finds in grid.Set. See VoxelGrid::ApplyChanges for the
+    // semantic equivalence note.
+    void ApplyChanges(const CellChange* changes, size_t count) {
+        grid.ApplyChanges(changes, count);
+        volume_shadow.ApplyChanges(changes, count);
+    }
+
     // Whole-document cell wipe — used by New / Open / default seed.
     // Matches the previous `doc.grid.Clear()` pattern but keeps the
     // shadow in sync.

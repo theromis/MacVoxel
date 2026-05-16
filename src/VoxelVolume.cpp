@@ -99,6 +99,18 @@ void VoxelVolume::MarkAllChunksDirty() noexcept {
     }
 }
 
+void VoxelVolume::ApplyChanges(const CellChange* changes, size_t count) {
+    // Volume.Set is already O(1) (linear index + dirty-bit set, no
+    // hashmap); the win here is just avoiding the function-call
+    // overhead and tightening the inner loop. The big amortization
+    // happens in VoxelGrid::ApplyChanges.
+    for (size_t i = 0; i < count; ++i) {
+        const auto& c = changes[i];
+        if (c.old_val == c.new_val) continue;
+        Set(c.x, c.y, c.z, c.new_val);
+    }
+}
+
 void VoxelVolume::Clear() noexcept {
     std::fill(cells_.begin(), cells_.end(), 0);
     bounds_ = Bounds3{};

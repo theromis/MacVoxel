@@ -40,6 +40,7 @@ set(APP_SOURCES
     src/VoxelGrid.cpp
     src/VoxelVolume.cpp
     src/VolumeTexture.mm
+    src/BrushEngine.mm
     src/Palette.cpp
     src/VoxFile.cpp
     src/Raycast.cpp
@@ -92,6 +93,7 @@ set(APP_SWIFT_SOURCES
 set(APP_RESOURCES
     resources/SF-Symbols-Export.ttf
     resources/default.vox
+    src/BrushKernel.metal
     src/Generators.metal
     src/Overlay.metal
     src/PathTrace.metal

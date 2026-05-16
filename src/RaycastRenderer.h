@@ -4,6 +4,7 @@
 
 #include <simd/simd.h>
 
+@class VolumeTexture;
 namespace macvoxel { struct EditorContext; }
 
 // GPU ray-cast renderer. For each pixel of a fullscreen triangle, the
@@ -31,7 +32,8 @@ namespace macvoxel { struct EditorContext; }
                      view:(simd::float4x4)view
                projection:(simd::float4x4)projection
               cameraWorld:(simd::float3)cameraWorld
-                  context:(macvoxel::EditorContext*)ctx;
+                  context:(macvoxel::EditorContext*)ctx
+            volumeTexture:(VolumeTexture*)docVolumeTex;
 
 - (uint32_t)lastChunkCount;
 

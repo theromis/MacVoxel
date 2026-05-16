@@ -66,6 +66,10 @@ public:
     // change to the grid / palette; this just remembers old / new.
     // Coalescing same-target writes within one op is handled here.
     void Record(int32_t x, int32_t y, int32_t z, uint8_t old_val, uint8_t new_val);
+    // Bulk equivalent — reserves capacity up front, but keeps per-cell
+    // dedupe via current_index_ (drag-paint can revisit cells across
+    // stamps, and the dedupe is what keeps undo correct when it does).
+    void RecordBatch(const CellChange* changes, size_t count);
     void RecordPalette(uint8_t index, Color old_val, Color new_val);
     void RecordMaterial(uint8_t index, Material old_val, Material new_val);
     // Attach pre/post selection snapshots to the in-progress op. Called

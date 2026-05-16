@@ -8,6 +8,7 @@
 #include <CoreGraphics/CGGeometry.h>
 #include <simd/simd.h>
 
+#include <climits>
 #include <cstdint>
 #include <unordered_set>
 #include <vector>
@@ -59,6 +60,13 @@ struct InteractionState {
         shapes::Vec3i last_drag_edit_cell{0, 0, 0};
         CGPoint last_drag_location{};
         std::unordered_set<int64_t> drag_skip_cells;
+        // Union AABB of every stamp's footprint in this stroke. Used
+        // at OnMouseUp to bound the texture readback. INT32_MAX/MIN
+        // sentinels = empty (no stamps yet).
+        int32_t stroke_bbox_x0 = INT32_MAX, stroke_bbox_y0 = INT32_MAX,
+                stroke_bbox_z0 = INT32_MAX;
+        int32_t stroke_bbox_x1 = INT32_MIN, stroke_bbox_y1 = INT32_MIN,
+                stroke_bbox_z1 = INT32_MIN;
     } brush;
 
     // Cursor hover — last known mouse position in view-local coords,

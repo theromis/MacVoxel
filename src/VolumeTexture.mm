@@ -8,6 +8,7 @@
 
 @implementation VolumeTexture {
     id<MTLTexture> _texture;
+    id<MTLTexture> _oracleTexture;
     int _chunksX;
     int _chunksY;
     int _chunksZ;
@@ -36,13 +37,29 @@
                                                         mipmapped:NO];
     desc.textureType = MTLTextureType3D;
     desc.depth = (NSUInteger)_sizeZ;
-    desc.usage = MTLTextureUsageShaderRead;
+    // ShaderRead for rasterizer sampling; ShaderWrite so the brush
+    // compute kernel can write through `access::read_write`. R8Uint is
+    // in the Apple Silicon read-write pixel format subset.
+    desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
     // Shared storage on Apple Silicon (unified memory). Required for
     // `replaceRegion:` uploads — Private textures are blit-only.
     desc.storageMode = MTLStorageModeShared;
     _texture = [device newTextureWithDescriptor:desc];
     if (_texture == nil) return nil;
     [_texture setLabel:@"VolumeTexture.docTex"];
+
+    MTLTextureDescriptor* oracleDesc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Uint
+                                                            width:(NSUInteger)_chunksX
+                                                           height:(NSUInteger)_chunksY
+                                                        mipmapped:NO];
+    oracleDesc.textureType = MTLTextureType3D;
+    oracleDesc.depth = (NSUInteger)_chunksZ;
+    oracleDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    oracleDesc.storageMode = MTLStorageModeShared;
+    _oracleTexture = [device newTextureWithDescriptor:oracleDesc];
+    if (_oracleTexture == nil) return nil;
+    [_oracleTexture setLabel:@"VolumeTexture.oracle"];
     return self;
 }
 
@@ -67,6 +84,11 @@
     // straight into `base` without a staging copy. Per-chunk regions
     // are clamped to the texture's edge for non-multiple-of-16 axes
     // (default 256³ is clean, but stay safe).
+    //
+    // Each chunk upload also refreshes its corresponding oracle byte:
+    // 0 if the chunk's bytes are all zero, 1 otherwise. Scanning 4 KiB
+    // per chunk on the CPU is much cheaper than the alternative (a
+    // reduction kernel) and stays comparable to the upload itself.
     for (int cz_i = 0; cz_i < cz; ++cz_i) {
         for (int cy_i = 0; cy_i < cy; ++cy_i) {
             for (int cx_i = 0; cx_i < cx; ++cx_i) {
@@ -95,9 +117,44 @@
                               withBytes:base + off
                             bytesPerRow:(NSUInteger)bytes_per_row
                           bytesPerImage:(NSUInteger)bytes_per_image];
+
+                uint8_t any = 0;
+                for (int z = 0; z < d && !any; ++z) {
+                    for (int y = 0; y < h && !any; ++y) {
+                        const uint8_t* row = base + off +
+                            (size_t)y * bytes_per_row +
+                            (size_t)z * bytes_per_image;
+                        for (int x = 0; x < w; ++x) {
+                            if (row[x]) { any = 1; break; }
+                        }
+                    }
+                }
+                MTLRegion oc = MTLRegionMake3D(
+                    (NSUInteger)cx_i, (NSUInteger)cy_i, (NSUInteger)cz_i,
+                    1, 1, 1);
+                [_oracleTexture replaceRegion:oc
+                                  mipmapLevel:0
+                                        slice:0
+                                    withBytes:&any
+                                  bytesPerRow:1
+                                bytesPerImage:1];
             }
         }
     }
+}
+
+- (void)markOracleChunkAtX:(int)x y:(int)y z:(int)z {
+    if (x < 0 || y < 0 || z < 0 ||
+        x >= _chunksX || y >= _chunksY || z >= _chunksZ) return;
+    uint8_t one = 1;
+    MTLRegion oc = MTLRegionMake3D((NSUInteger)x, (NSUInteger)y, (NSUInteger)z,
+                                   1, 1, 1);
+    [_oracleTexture replaceRegion:oc
+                      mipmapLevel:0
+                            slice:0
+                        withBytes:&one
+                      bytesPerRow:1
+                    bytesPerImage:1];
 }
 
 @end

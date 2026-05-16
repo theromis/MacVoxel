@@ -198,7 +198,8 @@ fragment float4 raycast_fragment(
     device const Chunk* buf_chunk_pool [[buffer(3)]],
     device const uint* rem_coarse_grid [[buffer(4)]],
     device const Chunk* rem_chunk_pool [[buffer(5)]],
-    texture3d<uint, access::read> tex_a [[texture(0)]])
+    texture3d<uint, access::read> tex_a [[texture(0)]],
+    texture3d<uint, access::read> doc_oracle [[texture(1)]])
 {
     // Reconstruct world-space ray from NDC.
     float4 near_clip = float4(in.ndc, 0.0, 1.0);
@@ -276,24 +277,33 @@ fragment float4 raycast_fragment(
 
     int last_axis = -1;
 
-    // Dense-doc DDA. The doc lives in a single read-only `texture3d<uint>`
-    // sized to the edit volume; per-cell lookup is one `tex_a.read()`.
-    // Coarse-skip-on-empty is gone — at 256³ the worst-case 256-step
-    // texture-fetch DDA is still trivially cheap, and the optimization
-    // depended on a coarse occupancy oracle we no longer maintain for
-    // the doc. The overlay slots (buf + rem) keep their sparse pool
-    // layout — they're small (a brush footprint or selection lift), so
-    // chunk-pool indirection plus their coarse oracle stays worthwhile.
+    // Dense-doc DDA with a 16³ coarse occupancy oracle. The doc lives
+    // in a `texture3d<uint>` sized to the edit volume; the oracle is a
+    // 1/16-scale `texture3d<uint>` where each cell is 0 (chunk empty) or
+    // non-zero (chunk has filled voxels). At retina resolution the
+    // per-pixel DDA cost is dominated by empty-space marching, so
+    // skipping a whole 16³ chunk at a time when its oracle entry is 0
+    // is the difference between ~35 ms and ~3 ms per frame.
     int3 box_min_i = int3(int(u.box_min.x), int(u.box_min.y), int(u.box_min.z));
     int3 box_max_i = int3(int(u.box_max.x), int(u.box_max.y), int(u.box_max.z));
+    int3 box_chunk_min = box_min_i >> int(kChunkBits);
     for (int s = 0; s < kMaxSteps; ++s) {
-        // Doc texture lookup. Out-of-volume cells read as empty.
+        // Doc-side: oracle lookup. Skip the per-cell read when the
+        // chunk is reported empty; only sample tex_a otherwise.
+        int3 cell_local = cell - box_min_i;
         bool doc_in = (cell.x >= box_min_i.x && cell.x < box_max_i.x &&
                        cell.y >= box_min_i.y && cell.y < box_max_i.y &&
                        cell.z >= box_min_i.z && cell.z < box_max_i.z);
-        uint val_doc = doc_in
-            ? tex_a.read(uint3(cell - box_min_i)).r
-            : 0u;
+        int3 doc_chunk_c = cell >> int(kChunkBits);
+        bool doc_chunk_empty = true;
+        uint val_doc = 0u;
+        if (doc_in) {
+            int3 oracle_c = doc_chunk_c - box_chunk_min;
+            doc_chunk_empty = (doc_oracle.read(uint3(oracle_c)).r == 0u);
+            if (!doc_chunk_empty) {
+                val_doc = tex_a.read(uint3(cell_local)).r;
+            }
+        }
 
         // Buffer-side lookup (unchanged — overlay slots stay sparse).
         uint pool_idx_buf = 0u;
@@ -387,7 +397,61 @@ fragment float4 raycast_fragment(
             }
         }
 
-        // No hit at this cell. Cell-step.
+        // No hit at this cell. If both the doc oracle says this chunk
+        // is empty AND the buf pool slot here is empty, coarse-skip to
+        // whichever chunk boundary comes first along the ray. Otherwise
+        // cell-step (the chunk we're in has either doc or buf cells
+        // and we need to keep sampling per cell).
+        if (doc_chunk_empty && pool_idx_buf == 0u) {
+            float3 chunk_min_doc = float3(doc_chunk_c) * float(kChunkSize);
+            float3 chunk_max_doc = chunk_min_doc + float(kChunkSize);
+            float3 exit_face_doc = select(chunk_min_doc, chunk_max_doc, step_dir > 0);
+            float3 t_face_doc = (exit_face_doc - ray_origin) * inv_dir;
+            if (step_dir.x == 0) t_face_doc.x = INFINITY;
+            if (step_dir.y == 0) t_face_doc.y = INFINITY;
+            if (step_dir.z == 0) t_face_doc.z = INFINITY;
+            float t_exit_doc = min(min(t_face_doc.x, t_face_doc.y), t_face_doc.z);
+
+            float t_exit_buf = INFINITY;
+            float3 t_face_buf = float3(INFINITY);
+            if (u.buf_active != 0) {
+                float3 chunk_min_buf = float3(chunk_c_buf) * float(kChunkSize)
+                                     + float3(u.buf_offset);
+                float3 chunk_max_buf = chunk_min_buf + float(kChunkSize);
+                float3 exit_face_buf = select(chunk_min_buf, chunk_max_buf, step_dir > 0);
+                t_face_buf = (exit_face_buf - ray_origin) * inv_dir;
+                if (step_dir.x == 0) t_face_buf.x = INFINITY;
+                if (step_dir.y == 0) t_face_buf.y = INFINITY;
+                if (step_dir.z == 0) t_face_buf.z = INFINITY;
+                t_exit_buf = min(min(t_face_buf.x, t_face_buf.y), t_face_buf.z);
+            }
+
+            float t_skip = min(t_exit_doc, t_exit_buf);
+            float3 t_face = (t_exit_doc <= t_exit_buf) ? t_face_doc : t_face_buf;
+            int exit_axis = (t_face.x <= t_face.y && t_face.x <= t_face.z) ? 0
+                          : (t_face.y <= t_face.z) ? 1 : 2;
+            last_axis = exit_axis;
+
+            float eps = max(1e-3, t_skip * 1e-5);
+            float3 pos = ray_origin + ray_dir * (t_skip + eps);
+            cell.x = int(floor(pos.x));
+            cell.y = int(floor(pos.y));
+            cell.z = int(floor(pos.z));
+            t_max.x = step_dir.x == 0 ? INFINITY :
+                      (step_dir.x > 0
+                           ? (float(cell.x + 1) - ray_origin.x) / ray_dir.x
+                           : (ray_origin.x - float(cell.x))     / -ray_dir.x);
+            t_max.y = step_dir.y == 0 ? INFINITY :
+                      (step_dir.y > 0
+                           ? (float(cell.y + 1) - ray_origin.y) / ray_dir.y
+                           : (ray_origin.y - float(cell.y))     / -ray_dir.y);
+            t_max.z = step_dir.z == 0 ? INFINITY :
+                      (step_dir.z > 0
+                           ? (float(cell.z + 1) - ray_origin.z) / ray_dir.z
+                           : (ray_origin.z - float(cell.z))     / -ray_dir.z);
+            continue;
+        }
+
         if (t_max.x < t_max.y && t_max.x < t_max.z) {
             cell.x += step_dir.x;
             t_max.x += t_delta.x;
@@ -412,12 +476,7 @@ fragment float4 raycast_fragment(
 @implementation RaycastRenderer {
     id<MTLDevice> _device;
     id<MTLRenderPipelineState> _pipeline;
-    // Dense doc texture (A2): R8Uint 3D texture sized to the edit
-    // volume. Re-synced from doc->volume_shadow whenever
-    // doc->geometry_version advances. Allocated lazily on first encode.
-    VolumeTexture* _docVolumeTex;
     id<MTLBuffer> _paletteBuffer;
-    uint64_t _cachedGeometryVersion;
     uint64_t _cachedPaletteVersion;
     BOOL _cacheValid;
     // Overlay-additions resources. The slot is shared by FloatingBuffer
@@ -503,16 +562,12 @@ fragment float4 raycast_fragment(
 }
 
 - (size_t)lastGPUBytes {
-    if (_docVolumeTex == nil) return 0;
-    id<MTLTexture> t = _docVolumeTex.texture;
-    return (size_t)t.width * (size_t)t.height * (size_t)t.depth;
+    return _paletteBuffer == nil ? 0 : _paletteBuffer.length;
 }
 
 - (void)invalidate {
     _cacheValid = NO;
-    _docVolumeTex = nil;
     _paletteBuffer = nil;
-    _cachedGeometryVersion = 0;
     _cachedPaletteVersion = 0;
 }
 
@@ -609,38 +664,24 @@ fragment float4 raycast_fragment(
     std::memcpy(_paletteBuffer.contents, pal_floats.data(), sizeof(pal_floats));
 }
 
-// Bring _docVolumeTex up to date with doc->volume_shadow. Lazy-allocates
-// the texture on first call. The shadow's dirty-chunk bitset drives
-// per-chunk uploads, so the steady-state cost is just the bytes
-// touched by the most recent edit.
-- (void)syncDocVolumeFromDocument:(macvoxel::Document*)doc {
-    if (_docVolumeTex == nil) {
-        _docVolumeTex =
-            [[VolumeTexture alloc] initWithDevice:_device
-                                            volume:doc->volume_shadow];
-    }
-    [_docVolumeTex syncFromVolume:doc->volume_shadow];
-    _cachedGeometryVersion = doc->geometry_version;
-    _cacheValid = YES;
-}
 
 - (void)encodeWithEncoder:(id<MTLRenderCommandEncoder>)encoder
                      view:(simd::float4x4)view
                projection:(simd::float4x4)projection
               cameraWorld:(simd::float3)cameraWorld
-                  context:(macvoxel::EditorContext*)ctx {
-    if (ctx == nullptr) return;
+                  context:(macvoxel::EditorContext*)ctx
+            volumeTexture:(VolumeTexture*)docVolumeTex {
+    if (ctx == nullptr || docVolumeTex == nil) return;
     macvoxel::Document* doc = &ctx->document;
-    if (!_cacheValid || _cachedGeometryVersion != doc->geometry_version) {
-        [self syncDocVolumeFromDocument:doc];
-    }
-    // Palette upload is independent of geometry.
+    // Palette upload is independent of geometry; doc volume is synced
+    // by the owner (MetalScene) before this encode.
     if (_paletteBuffer == nil ||
         _cachedPaletteVersion != doc->palette_version) {
         [self uploadPalette:doc];
         _cachedPaletteVersion = doc->palette_version;
     }
-    if (_docVolumeTex == nil || _paletteBuffer == nil) return;
+    if (_paletteBuffer == nil) return;
+    _cacheValid = YES;
 
     // Resolve which overlay (if any) feeds the additions slot this frame.
     // FloatingBuffer (selection move/paste/transform) and PreviewOverlay
@@ -777,7 +818,8 @@ fragment float4 raycast_fragment(
     [encoder setFragmentBuffer:(removals_drawable ? _remPoolBuffer : _stubBuffer)
                         offset:0
                        atIndex:5];
-    [encoder setFragmentTexture:_docVolumeTex.texture atIndex:0];
+    [encoder setFragmentTexture:docVolumeTex.texture atIndex:0];
+    [encoder setFragmentTexture:docVolumeTex.oracleTexture atIndex:1];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:3];

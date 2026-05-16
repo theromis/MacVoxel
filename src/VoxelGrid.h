@@ -19,6 +19,20 @@ struct Bounds3 {
     int32_t size_z() const { return empty() ? 0 : max_z - min_z + 1; }
 };
 
+// Bulk cell write record used by Document::ApplyChanges (grouped by
+// chunk so 30k-cell brush stamps don't pay 30k hashmap finds in
+// VoxelGrid::Set). Layout matches BrushChange (BrushEngine.h) so the
+// brush kernel's diff buffer can be reinterpret_cast to this without
+// a copy.
+struct CellChange {
+    int32_t x, y, z;
+    uint8_t old_val;
+    uint8_t new_val;
+    uint8_t _pad0;
+    uint8_t _pad1;
+};
+static_assert(sizeof(CellChange) == 16, "CellChange layout mismatch");
+
 // Sparse 3D grid of uint8 palette indices, stored as 16x16x16 dense chunks
 // keyed by chunk coord in a hash map. Cells default to 0 ("empty"). World
 // coordinates are signed so models with negative translations (common in
@@ -78,6 +92,19 @@ public:
 
     uint8_t Get(int32_t x, int32_t y, int32_t z) const;
     void Set(int32_t x, int32_t y, int32_t z, uint8_t value);
+
+    // Bulk apply of a CellChange[] array — typical brush-stroke caller
+    // hands over the kernel's diff buffer. Groups by chunk so per-chunk
+    // bookkeeping (hashmap find, version bump, dirty insert, boundary
+    // neighbor bumps) amortizes across all cells in that chunk.
+    // Semantics match calling Set() per cell, with two side-effect
+    // differences that are correctness-equivalent:
+    //   * Chunk `version` increments by 1 per call (not per cell). The
+    //     renderer's `cached_version != current_version` check fires
+    //     regardless, so remesh behavior is unchanged.
+    //   * Boundary-neighbor `version` increments by 1 per touched face
+    //     (not per cell on the face). Same renderer impact.
+    void ApplyChanges(const CellChange* changes, size_t count);
 
     void Clear();
 

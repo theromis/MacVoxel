@@ -48,6 +48,25 @@ void EditHistory::Record(int32_t x, int32_t y, int32_t z,
     current_.changes.push_back(EditOp::Change{x, y, z, old_val, new_val});
 }
 
+void EditHistory::RecordBatch(const CellChange* changes, size_t count) {
+    if (!in_op_ || count == 0) return;
+    current_.changes.reserve(current_.changes.size() + count);
+    current_index_.reserve(current_index_.size() + count);
+    for (size_t i = 0; i < count; ++i) {
+        const auto& c = changes[i];
+        if (c.old_val == c.new_val) continue;
+        const int64_t key = PackCellKey(c.x, c.y, c.z);
+        auto [it, inserted] =
+            current_index_.try_emplace(key, current_.changes.size());
+        if (inserted) {
+            current_.changes.push_back(
+                EditOp::Change{c.x, c.y, c.z, c.old_val, c.new_val});
+        } else {
+            current_.changes[it->second].new_val = c.new_val;
+        }
+    }
+}
+
 void EditHistory::RecordPalette(uint8_t index, Color old_val, Color new_val) {
     if (!in_op_ || old_val == new_val) return;
     // Same dedupe pattern as cells. A color-picker drag sends a fresh

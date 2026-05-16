@@ -30,6 +30,24 @@ class VoxelVolume;
 // caller binds it to a fragment/compute slot.
 @property(nonatomic, readonly, nonnull) id<MTLTexture> texture;
 
+// 16³-resolution occupancy oracle: a R8Uint texture with one cell per
+// 16³ chunk of the doc texture, 0 = chunk is empty / 1 = chunk has
+// non-zero cells. Sized to `(sizeX/16, sizeY/16, sizeZ/16)`. The
+// rasterizer fragment shader samples this first to coarse-skip empty
+// chunks (otherwise a per-pixel 256-cell DDA at retina resolution
+// crushes frame rate).
+//
+// Maintenance is monotone-and-rebuild: writes to chunks set the
+// oracle byte to 1 (brush kernel + replaceRegion uploads), and a
+// full rebuild from VoxelVolume happens via `syncFromVolume`. Stale
+// "occupied" entries cause under-skip (a tiny perf hit), never
+// over-skip (which would visually drop voxels).
+@property(nonatomic, readonly, nonnull) id<MTLTexture> oracleTexture;
+
+// Mark a chunk as non-empty in the oracle. Used by Phase B1+ paths
+// that update the doc texture out-of-band from `syncFromVolume`.
+- (void)markOracleChunkAtX:(int)x y:(int)y z:(int)z;
+
 // Texture dimensions in cells. Mirrors volume.size_{x,y,z}.
 @property(nonatomic, readonly) int sizeX;
 @property(nonatomic, readonly) int sizeY;

@@ -34,6 +34,11 @@ public:
     void Set(int32_t x, int32_t y, int32_t z, uint8_t value);
     void Clear() noexcept;
 
+    // Bulk apply. Each entry's old_val isn't validated against the
+    // current cell — callers must hand over a diff that matches the
+    // current shadow state (which the brush kernel does by construction).
+    void ApplyChanges(const CellChange* changes, size_t count);
+
     // Whole-buffer reseed used by load + open + new. The per-cell `Set`
     // storm would also work but skips the dense-zero scan when the
     // source is sparse.
