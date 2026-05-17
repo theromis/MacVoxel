@@ -9,7 +9,6 @@
 #include <simd/simd.h>
 
 #include <cstdint>
-#include <vector>
 
 namespace macvoxel {
 
@@ -139,33 +138,9 @@ struct InteractionState {
     // d/face_with values currently materialised into the preview
     // texture so each frame only does O(seed_cells × Δd) work as the
     // user drags through layer boundaries.
-    struct FaceTool {
-        int sign = 0;
-        uint8_t seed_color = 0;
-        bool observed_drag = false;
-        int applied_d = 0;
-        FaceWithColor applied_with = FaceWithColor::Geometry;
-        // True when the seed plane came from a volume-wall pick
-        // rather than a voxel-face pick. Forces `face_with =
-        // Palette` regardless of the user's selection (there's no
-        // geometry color to source from — the seed cells are shifted
-        // outside the volume), and skips the "no preview if source
-        // cell is 0" no-op that Geometry mode would otherwise emit.
-        bool from_wall = false;
-        std::vector<shapes::Vec3i> seed_cells;
-        // Per-frame bbox bookkeeping for the tex_t preview. last_bbox
-        // is what we wrote last frame (cleared on next Refresh);
-        // union_bbox accumulates across the stroke for the commit
-        // readback. INT32_MAX/MIN = empty.
-        int32_t last_bbox_x0 = INT32_MAX, last_bbox_y0 = INT32_MAX,
-                last_bbox_z0 = INT32_MAX;
-        int32_t last_bbox_x1 = INT32_MIN, last_bbox_y1 = INT32_MIN,
-                last_bbox_z1 = INT32_MIN;
-        int32_t union_bbox_x0 = INT32_MAX, union_bbox_y0 = INT32_MAX,
-                union_bbox_z0 = INT32_MAX;
-        int32_t union_bbox_x1 = INT32_MIN, union_bbox_y1 = INT32_MIN,
-                union_bbox_z1 = INT32_MIN;
-    } face;
+    // Face-tool gesture state moved into `FaceTool`. The stub stays so
+    // Phase 4's dissolution commit has something to delete in one go.
+    struct FaceTool {} face;
 
     // Generator gizmo. After the user releases the mouse from a
     // Generator-tool drag-out, the box stays visible (along with the
