@@ -145,7 +145,7 @@ bool GeneratorTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
         state.anchor.cell.x, state.anchor.cell.y, state.anchor.cell.z,
     };
     active_ = true;
-    state.gen_gizmo.active = true;  // mirrored for SelectionOverlay
+    state.gen_gizmo_active = true;  // mirrored for SelectionOverlay
     ResetUnion();
     ResetDispatchHash();
     ctx.history.BeginOp();
@@ -318,7 +318,7 @@ void GeneratorTool::Commit(EditorContext& ctx, InteractionState& state,
     ctx.history.CommitOp();
     ctx.preview_active = false;
     active_ = false;
-    state.gen_gizmo.active = false;  // mirrored for SelectionOverlay
+    state.gen_gizmo_active = false;  // mirrored for SelectionOverlay
     active_drag_face_ = -1;
     mouse_drag_ = Drag::None;
     ResetUnion();
@@ -338,7 +338,7 @@ void GeneratorTool::Cancel(EditorContext& ctx, InteractionState& state,
     ctx.history.AbandonOp();
     ctx.preview_active = false;
     active_ = false;
-    state.gen_gizmo.active = false;  // mirrored for SelectionOverlay
+    state.gen_gizmo_active = false;  // mirrored for SelectionOverlay
     active_drag_face_ = -1;
     mouse_drag_ = Drag::None;
     ResetUnion();

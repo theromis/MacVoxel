@@ -1,14 +1,11 @@
 #pragma once
 
-#include "Generators.h"
 #include "Shapes.h"
 #include "ToolState.h"
 #include "VoxelGrid.h"
 
 #include <CoreGraphics/CGGeometry.h>
 #include <simd/simd.h>
-
-#include <cstdint>
 
 namespace macvoxel {
 
@@ -54,9 +51,6 @@ struct InteractionState {
     // because it's not tool-specific.
     CGPoint last_drag_location{};
 
-    // Brush gesture state moved into `BrushTool`; the stub remains so
-    // Phase 4's dissolution commit has something to delete in one go.
-    struct BrushStream {} brush;
 
     // Cursor hover — last known mouse position in view-local coords,
     // and whether the cursor is currently inside the view. Drives
@@ -138,48 +132,13 @@ struct InteractionState {
     // d/face_with values currently materialised into the preview
     // texture so each frame only does O(seed_cells × Δd) work as the
     // user drags through layer boundaries.
-    // Face-tool gesture state moved into `FaceTool`. The stub stays so
-    // Phase 4's dissolution commit has something to delete in one go.
-    struct FaceTool {} face;
 
-    // Generator gizmo. After the user releases the mouse from a
-    // Generator-tool drag-out, the box stays visible (along with the
-    // preview-texture cells) until they confirm. Clicking outside the
-    // box commits the preview through EditHistory; Esc drops the
-    // overlay without a commit. The bounds + active-kind cache lets
-    // the per-frame loop detect param/kind changes from the panel
-    // and re-run the engine. While a face-handle is being dragged
-    // (`active_drag_face` 0..5; -1 otherwise), `handle_start_bounds`
-    // locks in the bounds at drag-start so each frame's drag distance
-    // projects against the same NDC reference direction — without
-    // this, the projected normal moves as bounds change and the
-    // drag-to-voxels mapping drifts.
-    struct GenGizmo {
-        bool active = false;
-        generators::Bounds3i bounds{};
-        generators::Kind last_kind = generators::Kind::Ellipsoid;
-        generators::Bounds3i last_bounds{};
-        generators::Params last_params{};
-        int active_drag_face = -1;
-        simd::float2 handle_start_local{0.0f, 0.0f};
-        generators::Bounds3i handle_start_bounds{};
-        // Bbox of the PREVIOUSLY-DISPATCHED bounds (used to union with
-        // the new dispatch so shrinking-bounds cells naturally clear).
-        // Distinct from `last_bounds` only briefly across the Tick
-        // dirty check — `last_bounds` is updated at end of Regenerate
-        // for next frame's dirty compare, while
-        // `last_bounds_dispatched` is read at the start of the next
-        // Regenerate. `_valid=false` on first dispatch in a session.
-        generators::Bounds3i last_bounds_dispatched{};
-        bool last_bounds_dispatched_valid = false;
-        // Union of every dispatch's bbox across the gesture. OnMouseUp
-        // reads this to know how much of tex_a to blit back for diff.
-        // INT32_MAX/MIN = empty.
-        int32_t union_bounds_x0 = INT32_MAX, union_bounds_y0 = INT32_MAX,
-                union_bounds_z0 = INT32_MAX;
-        int32_t union_bounds_x1 = INT32_MIN, union_bounds_y1 = INT32_MIN,
-                union_bounds_z1 = INT32_MIN;
-    } gen_gizmo;
+    // Whether the Generator gizmo is alive (drag-out, idle-with-gizmo,
+    // or handle-scaling). The bulk of the gizmo state lives privately
+    // in GeneratorTool; this single bool is mirrored here so
+    // SelectionOverlay (a free function over InteractionState) can
+    // suppress its overlay while the gizmo is visible.
+    bool gen_gizmo_active = false;
 };
 
 }  // namespace macvoxel

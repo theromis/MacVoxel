@@ -250,7 +250,7 @@ void DrawHover(const InteractionState& state, const ViewContext& vc,
     // Generator gizmo is the cursor indicator while it's live; the
     // would-place-cell wireframe would compete with it and read as a
     // stray duplicate.
-    if (state.gen_gizmo.active) return;
+    if (state.gen_gizmo_active) return;
     if (vc.ctx == nullptr) return;
 
     const ToolSettings& t = vc.ctx->tool;
