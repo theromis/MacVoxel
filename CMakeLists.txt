@@ -47,6 +47,7 @@ set(APP_SOURCES
     src/Raycast.cpp
     src/Shapes.cpp
     src/GeneratorEngine.mm
+    src/EditEngine.mm
     src/EditHistory.cpp
     src/Selection.cpp
     src/SelectionOps.cpp
