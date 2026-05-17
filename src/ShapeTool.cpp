@@ -1,25 +1,27 @@
-#include "ShapeController.h"
+#include "ShapeTool.h"
 
-#include "BrushEngine.h"     // for Bbox3
+#include "BrushEngine.h"
 #include "CellKey.h"
 #include "Document.h"
+#include "EditEngine.h"
 #include "EditHistory.h"
 #include "EditorContext.h"
 #include "Input.h"
-#include "Shapes.h"
+#include "InteractionState.h"
 #include "ShapeEngine.h"
+#include "Shapes.h"
+#include "ToolState.h"
 #include "ViewContext.h"
 #include "VoxelGrid.h"
 #include "VoxelVolume.h"
 
 #include <algorithm>
-#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <unordered_set>
 #include <vector>
 
-namespace macvoxel::shape_controller {
+namespace macvoxel {
 namespace {
 
 int ShapeKindForTool(ToolKind tool) {
@@ -32,8 +34,9 @@ int ShapeKindForTool(ToolKind tool) {
     }
 }
 
-// Per-shape `(fill, even)` flags pulled from ToolSettings; the kernel
-// uses these to choose between filled/shell + center-on-cell-vs-corner.
+// Per-shape `(fill, even, line_straight)` flags pulled from ToolSettings;
+// the kernel uses these to choose between filled/shell + center-on-cell-
+// vs-corner.
 void GetShapeFlags(const ToolSettings& t, ToolKind tool,
                    int* fill, int* even, int* line_straight) {
     *fill = 1;
@@ -78,10 +81,6 @@ void ComputeShapeBbox(const ToolSettings& t, ToolKind tool,
     int32_t hi_z = std::max(a_z, b_z);
 
     if (tool == ToolKind::Circle || tool == ToolKind::Square) {
-        // Planar shapes: bbox is a disc/square in the plane perp to
-        // face_axis, sized by the in-plane radius. Pad by `half` in
-        // every dim — overestimates the out-of-plane extent but
-        // simpler than splitting axes.
         const int32_t dx = b_x - a_x;
         const int32_t dy = b_y - a_y;
         const int32_t dz = b_z - a_z;
@@ -109,76 +108,7 @@ void ComputeShapeBbox(const ToolSettings& t, ToolKind tool,
     *z1 = std::min(hi_z + half, vol.z1);
 }
 
-ShapeParams BuildParams(EditorContext& ctx, InteractionState& state,
-                        shapes::Vec3i endpoint, int kind) {
-    const auto& a = state.anchor;
-    const ToolSettings& t = ctx.tool;
-    const EditVolume& vol = ctx.document.volume;
-
-    int fill = 1, even = 0, line_straight = 1;
-    GetShapeFlags(t, a.tool, &fill, &even, &line_straight);
-
-    int32_t x0, y0, z0, x1, y1, z1;
-    ComputeShapeBbox(t, a.tool, a.cell, endpoint, a.face_axis, vol,
-                     &x0, &y0, &z0, &x1, &y1, &z1);
-
-    // Union with the previous frame's bbox so cells the old preview
-    // covered but the new one doesn't get zeroed by this dispatch.
-    if (a.last_bbox_x0 != INT32_MAX) {
-        x0 = std::min(x0, a.last_bbox_x0);
-        y0 = std::min(y0, a.last_bbox_y0);
-        z0 = std::min(z0, a.last_bbox_z0);
-        x1 = std::max(x1, a.last_bbox_x1);
-        y1 = std::max(y1, a.last_bbox_y1);
-        z1 = std::max(z1, a.last_bbox_z1);
-    }
-    // Clamp again to volume after the union — the previous bbox is
-    // already volume-clamped, but defensive math is cheap.
-    x0 = std::max(x0, vol.x0); y0 = std::max(y0, vol.y0); z0 = std::max(z0, vol.z0);
-    x1 = std::min(x1, vol.x1); y1 = std::min(y1, vol.y1); z1 = std::min(z1, vol.z1);
-
-    ShapeParams p{};
-    p.anchor_x = a.cell.x; p.anchor_y = a.cell.y; p.anchor_z = a.cell.z;
-    p.endpoint_x = endpoint.x; p.endpoint_y = endpoint.y; p.endpoint_z = endpoint.z;
-    p.face_axis = a.face_axis;
-    p.brush_size = std::max(1, t.brush_size);
-    p.brush_shape = (t.brush_shape == BrushShape::Circle) ? 1 : 0;
-    p.brush_3d = t.brush_3d ? 1 : 0;
-    p.mode = static_cast<uint32_t>(a.mode);
-    p.palette_idx = t.palette_idx;
-    p.shape_kind = kind;
-    p.shape_fill = fill;
-    p.shape_even = even;
-    p.line_straight = line_straight;
-    // Texture-local dispatch bbox.
-    p.dispatch_lo_x = x0 - vol.x0;
-    p.dispatch_lo_y = y0 - vol.y0;
-    p.dispatch_lo_z = z0 - vol.z0;
-    p.dispatch_size_x = x1 - x0 + 1;
-    p.dispatch_size_y = y1 - y0 + 1;
-    p.dispatch_size_z = z1 - z0 + 1;
-    p.vol_min_x = vol.x0; p.vol_min_y = vol.y0; p.vol_min_z = vol.z0;
-    p.vol_max_x = vol.x1; p.vol_max_y = vol.y1; p.vol_max_z = vol.z1;
-    p.tex_origin_x = vol.x0; p.tex_origin_y = vol.y0; p.tex_origin_z = vol.z0;
-
-    // Persist dispatch & union bboxes for the next frame / for
-    // OnMouseUp.
-    state.anchor.last_bbox_x0 = x0;
-    state.anchor.last_bbox_y0 = y0;
-    state.anchor.last_bbox_z0 = z0;
-    state.anchor.last_bbox_x1 = x1;
-    state.anchor.last_bbox_y1 = y1;
-    state.anchor.last_bbox_z1 = z1;
-    state.anchor.union_bbox_x0 = std::min(state.anchor.union_bbox_x0, x0);
-    state.anchor.union_bbox_y0 = std::min(state.anchor.union_bbox_y0, y0);
-    state.anchor.union_bbox_z0 = std::min(state.anchor.union_bbox_z0, z0);
-    state.anchor.union_bbox_x1 = std::max(state.anchor.union_bbox_x1, x1);
-    state.anchor.union_bbox_y1 = std::max(state.anchor.union_bbox_y1, y1);
-    state.anchor.union_bbox_z1 = std::max(state.anchor.union_bbox_z1, z1);
-    return p;
-}
-
-shapes::Vec3i ResolveEndpoint(EditorContext& /*ctx*/, InteractionState& state,
+shapes::Vec3i ResolveEndpoint(const InteractionState& state,
                               const ViewContext& vc, const MouseEvent& e) {
     shapes::Vec3i endpoint = state.anchor.cell;
     int end_face = state.anchor.face_axis;
@@ -190,11 +120,10 @@ shapes::Vec3i ResolveEndpoint(EditorContext& /*ctx*/, InteractionState& state,
 }
 
 // Line "project" mode: walk the screen-space segment from the anchor
-// pixel to the cursor pixel, raycasting at each oversampled step.
-// Same logic as the legacy CPU `EnumerateLine`'s Project branch. The
-// resulting picked cells are uploaded to a GPU buffer and the kernel
-// expands them by the brush footprint into tex_t. Returns the
-// (xyz, xyz, ...) packed cell list.
+// pixel to the cursor pixel, raycasting at each oversampled step. The
+// picked cells are uploaded to a GPU buffer and the kernel expands
+// them by the brush footprint into tex_t. Returns the (xyz, xyz, …)
+// packed cell list.
 std::vector<int32_t> EnumerateLineProjectCells(const InteractionState& state,
                                                 const ViewContext& vc,
                                                 const MouseEvent& e) {
@@ -223,12 +152,8 @@ std::vector<int32_t> EnumerateLineProjectCells(const InteractionState& state,
         if (!vc.ComputeTargetCell(px, py, a.mode, &cell, &face_axis)) continue;
         push(cell.x, cell.y, cell.z);
     }
-    // Anchor cell should always be included — matches legacy behavior
-    // where the first raycast might miss the anchor due to its
-    // ground-plane-fallback origin.
     const int64_t anchor_k = PackCellKey(a.cell.x, a.cell.y, a.cell.z);
     if (seen.find(anchor_k) == seen.end()) {
-        // Prepend the anchor (xyz triple).
         std::vector<int32_t> with_anchor;
         with_anchor.reserve(out.size() + 3);
         with_anchor.push_back(a.cell.x);
@@ -240,9 +165,6 @@ std::vector<int32_t> EnumerateLineProjectCells(const InteractionState& state,
     return out;
 }
 
-// Conservative AABB over a list of cells, inflated by half the brush
-// footprint so the kernel's expansion always fits inside. Returns
-// false on empty input.
 bool BboxFromCells(const std::vector<int32_t>& cells_xyz, int brush_size,
                    const EditVolume& vol,
                    int32_t* x0, int32_t* y0, int32_t* z0,
@@ -268,97 +190,11 @@ bool BboxFromCells(const std::vector<int32_t>& cells_xyz, int brush_size,
     return true;
 }
 
-// Build a ShapeParams populated for project-mode line dispatch.
-// Differs from the analytic BuildParams in that the dispatch bbox is
-// driven by the picked-cell list rather than analytic endpoints.
-ShapeParams BuildProjectParams(EditorContext& ctx, InteractionState& state,
-                               const std::vector<int32_t>& cells_xyz) {
-    const auto& a = state.anchor;
-    const ToolSettings& t = ctx.tool;
-    const EditVolume& vol = ctx.document.volume;
-
-    int32_t x0, y0, z0, x1, y1, z1;
-    if (!BboxFromCells(cells_xyz, t.brush_size, vol,
-                       &x0, &y0, &z0, &x1, &y1, &z1)) {
-        // No cells → zero-size bbox. The dispatch will be a no-op.
-        x0 = vol.x0; y0 = vol.y0; z0 = vol.z0;
-        x1 = vol.x0; y1 = vol.y0; z1 = vol.z0;
-    }
-    if (a.last_bbox_x0 != INT32_MAX) {
-        x0 = std::min(x0, a.last_bbox_x0);
-        y0 = std::min(y0, a.last_bbox_y0);
-        z0 = std::min(z0, a.last_bbox_z0);
-        x1 = std::max(x1, a.last_bbox_x1);
-        y1 = std::max(y1, a.last_bbox_y1);
-        z1 = std::max(z1, a.last_bbox_z1);
-    }
-    x0 = std::max(x0, vol.x0); y0 = std::max(y0, vol.y0); z0 = std::max(z0, vol.z0);
-    x1 = std::min(x1, vol.x1); y1 = std::min(y1, vol.y1); z1 = std::min(z1, vol.z1);
-
-    ShapeParams p{};
-    p.anchor_x = a.cell.x; p.anchor_y = a.cell.y; p.anchor_z = a.cell.z;
-    p.endpoint_x = a.cell.x; p.endpoint_y = a.cell.y; p.endpoint_z = a.cell.z;
-    p.face_axis = a.face_axis;
-    p.brush_size = std::max(1, t.brush_size);
-    p.brush_shape = (t.brush_shape == BrushShape::Circle) ? 1 : 0;
-    p.brush_3d = t.brush_3d ? 1 : 0;
-    p.mode = static_cast<uint32_t>(a.mode);
-    p.palette_idx = t.palette_idx;
-    p.shape_kind = 0;
-    p.shape_fill = 1;
-    p.shape_even = 0;
-    p.line_straight = 0;
-    p.dispatch_lo_x = x0 - vol.x0;
-    p.dispatch_lo_y = y0 - vol.y0;
-    p.dispatch_lo_z = z0 - vol.z0;
-    p.dispatch_size_x = x1 - x0 + 1;
-    p.dispatch_size_y = y1 - y0 + 1;
-    p.dispatch_size_z = z1 - z0 + 1;
-    p.vol_min_x = vol.x0; p.vol_min_y = vol.y0; p.vol_min_z = vol.z0;
-    p.vol_max_x = vol.x1; p.vol_max_y = vol.y1; p.vol_max_z = vol.z1;
-    p.tex_origin_x = vol.x0; p.tex_origin_y = vol.y0; p.tex_origin_z = vol.z0;
-
-    state.anchor.last_bbox_x0 = x0;
-    state.anchor.last_bbox_y0 = y0;
-    state.anchor.last_bbox_z0 = z0;
-    state.anchor.last_bbox_x1 = x1;
-    state.anchor.last_bbox_y1 = y1;
-    state.anchor.last_bbox_z1 = z1;
-    state.anchor.union_bbox_x0 = std::min(state.anchor.union_bbox_x0, x0);
-    state.anchor.union_bbox_y0 = std::min(state.anchor.union_bbox_y0, y0);
-    state.anchor.union_bbox_z0 = std::min(state.anchor.union_bbox_z0, z0);
-    state.anchor.union_bbox_x1 = std::max(state.anchor.union_bbox_x1, x1);
-    state.anchor.union_bbox_y1 = std::max(state.anchor.union_bbox_y1, y1);
-    state.anchor.union_bbox_z1 = std::max(state.anchor.union_bbox_z1, z1);
-    return p;
-}
-
-// Decide which preview path to take and dispatch. Line + project mode
-// goes through the project closure with a CPU-enumerated cell list;
-// everything else (analytic line, circle, square, box) goes through
-// the regular analytic shape kernel.
-void DispatchPreview(EditorContext& ctx, InteractionState& state,
-                     const ViewContext& vc, const MouseEvent& e,
-                     int kind, const PreviewFn& preview,
-                     const PreviewLineProjectFn& preview_project) {
-    if (kind == 0 && ctx.tool.line_mode == LineMode::Project) {
-        std::vector<int32_t> cells = EnumerateLineProjectCells(state, vc, e);
-        const size_t cell_count = cells.size() / 3;
-        const ShapeParams params = BuildProjectParams(ctx, state, cells);
-        preview_project(params, cells.empty() ? nullptr : cells.data(),
-                        cell_count);
-        return;
-    }
-    const shapes::Vec3i endpoint = ResolveEndpoint(ctx, state, vc, e);
-    const ShapeParams params = BuildParams(ctx, state, endpoint, kind);
-    preview(params);
-}
-
 }  // namespace
 
-bool BeginAnchor(EditorContext& ctx, InteractionState& state,
-                 const ViewContext& vc, const MouseEvent& e,
-                 ToolMode mode) {
+bool BeginShapeAnchor(EditorContext& ctx, InteractionState& state,
+                      const ViewContext& vc, const MouseEvent& e,
+                      ToolMode mode) {
     shapes::Vec3i target;
     int face_axis = 2;
     if (!vc.ComputeLineEndpoint(e.local.x, e.local.y, mode,
@@ -371,27 +207,143 @@ bool BeginAnchor(EditorContext& ctx, InteractionState& state,
     state.anchor.mode = mode;
     state.anchor.screen_local = e.local;
     state.anchor.tool = ctx.tool.tool;
-    state.anchor.last_bbox_x0 = INT32_MAX;
-    state.anchor.last_bbox_y0 = INT32_MAX;
-    state.anchor.last_bbox_z0 = INT32_MAX;
-    state.anchor.last_bbox_x1 = INT32_MIN;
-    state.anchor.last_bbox_y1 = INT32_MIN;
-    state.anchor.last_bbox_z1 = INT32_MIN;
-    state.anchor.union_bbox_x0 = INT32_MAX;
-    state.anchor.union_bbox_y0 = INT32_MAX;
-    state.anchor.union_bbox_z0 = INT32_MAX;
-    state.anchor.union_bbox_x1 = INT32_MIN;
-    state.anchor.union_bbox_y1 = INT32_MIN;
-    state.anchor.union_bbox_z1 = INT32_MIN;
     return true;
 }
 
-bool OnMouseDown(EditorContext& ctx, InteractionState& state,
-                 const ViewContext& vc, const MouseEvent& e,
-                 const PreviewFn& preview,
-                 const PreviewLineProjectFn& preview_project) {
+void ShapeTool::ResetBboxes() {
+    last_bbox_x0_ = last_bbox_y0_ = last_bbox_z0_ = INT32_MAX;
+    last_bbox_x1_ = last_bbox_y1_ = last_bbox_z1_ = INT32_MIN;
+    union_bbox_x0_ = union_bbox_y0_ = union_bbox_z0_ = INT32_MAX;
+    union_bbox_x1_ = union_bbox_y1_ = union_bbox_z1_ = INT32_MIN;
+}
+
+void ShapeTool::DispatchPreview(EditorContext& ctx, InteractionState& state,
+                                 const ViewContext& vc, const MouseEvent& e,
+                                 int kind, EditEngine& engine) {
+    const auto& a = state.anchor;
+    const ToolSettings& t = ctx.tool;
+    const EditVolume& vol = ctx.document.volume;
+
+    // Line project mode: CPU-enumerate the picked cells, dispatch via
+    // the project-preview kernel with the cell list.
+    if (kind == 0 && t.line_mode == LineMode::Project) {
+        std::vector<int32_t> cells = EnumerateLineProjectCells(state, vc, e);
+        const size_t cell_count = cells.size() / 3;
+
+        int32_t x0, y0, z0, x1, y1, z1;
+        if (!BboxFromCells(cells, t.brush_size, vol,
+                           &x0, &y0, &z0, &x1, &y1, &z1)) {
+            x0 = vol.x0; y0 = vol.y0; z0 = vol.z0;
+            x1 = vol.x0; y1 = vol.y0; z1 = vol.z0;
+        }
+        if (last_bbox_x0_ != INT32_MAX) {
+            x0 = std::min(x0, last_bbox_x0_);
+            y0 = std::min(y0, last_bbox_y0_);
+            z0 = std::min(z0, last_bbox_z0_);
+            x1 = std::max(x1, last_bbox_x1_);
+            y1 = std::max(y1, last_bbox_y1_);
+            z1 = std::max(z1, last_bbox_z1_);
+        }
+        x0 = std::max(x0, vol.x0); y0 = std::max(y0, vol.y0); z0 = std::max(z0, vol.z0);
+        x1 = std::min(x1, vol.x1); y1 = std::min(y1, vol.y1); z1 = std::min(z1, vol.z1);
+
+        ShapeParams p{};
+        p.anchor_x = a.cell.x; p.anchor_y = a.cell.y; p.anchor_z = a.cell.z;
+        p.endpoint_x = a.cell.x; p.endpoint_y = a.cell.y; p.endpoint_z = a.cell.z;
+        p.face_axis = a.face_axis;
+        p.brush_size = std::max(1, t.brush_size);
+        p.brush_shape = (t.brush_shape == BrushShape::Circle) ? 1 : 0;
+        p.brush_3d = t.brush_3d ? 1 : 0;
+        p.mode = static_cast<uint32_t>(a.mode);
+        p.palette_idx = t.palette_idx;
+        p.shape_kind = 0;
+        p.shape_fill = 1;
+        p.shape_even = 0;
+        p.line_straight = 0;
+        p.dispatch_lo_x = x0 - vol.x0;
+        p.dispatch_lo_y = y0 - vol.y0;
+        p.dispatch_lo_z = z0 - vol.z0;
+        p.dispatch_size_x = x1 - x0 + 1;
+        p.dispatch_size_y = y1 - y0 + 1;
+        p.dispatch_size_z = z1 - z0 + 1;
+        p.vol_min_x = vol.x0; p.vol_min_y = vol.y0; p.vol_min_z = vol.z0;
+        p.vol_max_x = vol.x1; p.vol_max_y = vol.y1; p.vol_max_z = vol.z1;
+        p.tex_origin_x = vol.x0; p.tex_origin_y = vol.y0; p.tex_origin_z = vol.z0;
+
+        last_bbox_x0_ = x0; last_bbox_y0_ = y0; last_bbox_z0_ = z0;
+        last_bbox_x1_ = x1; last_bbox_y1_ = y1; last_bbox_z1_ = z1;
+        union_bbox_x0_ = std::min(union_bbox_x0_, x0);
+        union_bbox_y0_ = std::min(union_bbox_y0_, y0);
+        union_bbox_z0_ = std::min(union_bbox_z0_, z0);
+        union_bbox_x1_ = std::max(union_bbox_x1_, x1);
+        union_bbox_y1_ = std::max(union_bbox_y1_, y1);
+        union_bbox_z1_ = std::max(union_bbox_z1_, z1);
+
+        engine.ShapeLineProjectPreview(p, cells.empty() ? nullptr : cells.data(),
+                                       cell_count);
+        return;
+    }
+
+    // Analytic path (straight line / circle / square / box).
+    const shapes::Vec3i endpoint = ResolveEndpoint(state, vc, e);
+
+    int fill = 1, even = 0, line_straight = 1;
+    GetShapeFlags(t, a.tool, &fill, &even, &line_straight);
+
+    int32_t x0, y0, z0, x1, y1, z1;
+    ComputeShapeBbox(t, a.tool, a.cell, endpoint, a.face_axis, vol,
+                     &x0, &y0, &z0, &x1, &y1, &z1);
+    if (last_bbox_x0_ != INT32_MAX) {
+        x0 = std::min(x0, last_bbox_x0_);
+        y0 = std::min(y0, last_bbox_y0_);
+        z0 = std::min(z0, last_bbox_z0_);
+        x1 = std::max(x1, last_bbox_x1_);
+        y1 = std::max(y1, last_bbox_y1_);
+        z1 = std::max(z1, last_bbox_z1_);
+    }
+    x0 = std::max(x0, vol.x0); y0 = std::max(y0, vol.y0); z0 = std::max(z0, vol.z0);
+    x1 = std::min(x1, vol.x1); y1 = std::min(y1, vol.y1); z1 = std::min(z1, vol.z1);
+
+    ShapeParams p{};
+    p.anchor_x = a.cell.x; p.anchor_y = a.cell.y; p.anchor_z = a.cell.z;
+    p.endpoint_x = endpoint.x; p.endpoint_y = endpoint.y; p.endpoint_z = endpoint.z;
+    p.face_axis = a.face_axis;
+    p.brush_size = std::max(1, t.brush_size);
+    p.brush_shape = (t.brush_shape == BrushShape::Circle) ? 1 : 0;
+    p.brush_3d = t.brush_3d ? 1 : 0;
+    p.mode = static_cast<uint32_t>(a.mode);
+    p.palette_idx = t.palette_idx;
+    p.shape_kind = kind;
+    p.shape_fill = fill;
+    p.shape_even = even;
+    p.line_straight = line_straight;
+    p.dispatch_lo_x = x0 - vol.x0;
+    p.dispatch_lo_y = y0 - vol.y0;
+    p.dispatch_lo_z = z0 - vol.z0;
+    p.dispatch_size_x = x1 - x0 + 1;
+    p.dispatch_size_y = y1 - y0 + 1;
+    p.dispatch_size_z = z1 - z0 + 1;
+    p.vol_min_x = vol.x0; p.vol_min_y = vol.y0; p.vol_min_z = vol.z0;
+    p.vol_max_x = vol.x1; p.vol_max_y = vol.y1; p.vol_max_z = vol.z1;
+    p.tex_origin_x = vol.x0; p.tex_origin_y = vol.y0; p.tex_origin_z = vol.z0;
+
+    last_bbox_x0_ = x0; last_bbox_y0_ = y0; last_bbox_z0_ = z0;
+    last_bbox_x1_ = x1; last_bbox_y1_ = y1; last_bbox_z1_ = z1;
+    union_bbox_x0_ = std::min(union_bbox_x0_, x0);
+    union_bbox_y0_ = std::min(union_bbox_y0_, y0);
+    union_bbox_z0_ = std::min(union_bbox_z0_, z0);
+    union_bbox_x1_ = std::max(union_bbox_x1_, x1);
+    union_bbox_y1_ = std::max(union_bbox_y1_, y1);
+    union_bbox_z1_ = std::max(union_bbox_z1_, z1);
+
+    engine.ShapePreview(p);
+}
+
+bool ShapeTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
+                            const ViewContext& vc, const MouseEvent& e,
+                            EditEngine& engine) {
     const ToolMode mode = e.mods.command ? ToolMode::Remove : ctx.tool.mode;
-    if (!BeginAnchor(ctx, state, vc, e, mode)) return false;
+    if (!BeginShapeAnchor(ctx, state, vc, e, mode)) return false;
     const int kind = ShapeKindForTool(state.anchor.tool);
     if (kind < 0) {
         state.anchor.has_anchor = false;
@@ -399,35 +351,32 @@ bool OnMouseDown(EditorContext& ctx, InteractionState& state,
     }
     state.drag_mode = DragMode::Shape;
     ctx.preview_active = true;
+    dragging_ = true;
+    ResetBboxes();
     ctx.history.BeginOp();
-    DispatchPreview(ctx, state, vc, e, kind, preview, preview_project);
+    DispatchPreview(ctx, state, vc, e, kind, engine);
     return true;
 }
 
-void OnMouseDragged(EditorContext& ctx, InteractionState& state,
-                    const ViewContext& vc, const MouseEvent& e,
-                    const PreviewFn& preview,
-                    const PreviewLineProjectFn& preview_project) {
+void ShapeTool::OnMouseDragged(EditorContext& ctx, InteractionState& state,
+                                const ViewContext& vc, const MouseEvent& e,
+                                EditEngine& engine) {
     if (!state.anchor.has_anchor) return;
     const int kind = ShapeKindForTool(state.anchor.tool);
     if (kind < 0) return;
-    DispatchPreview(ctx, state, vc, e, kind, preview, preview_project);
+    DispatchPreview(ctx, state, vc, e, kind, engine);
 }
 
-void OnMouseUp(EditorContext& ctx, InteractionState& state,
-               const CommitFn& commit, const ReadBackFn& readback) {
+void ShapeTool::OnMouseUp(EditorContext& ctx, InteractionState& state,
+                           const ViewContext& /*vc*/, const MouseEvent& /*e*/,
+                           EditEngine& engine) {
+    dragging_ = false;
     if (!state.anchor.has_anchor) {
         ctx.history.AbandonOp();
         return;
     }
 
-    // Build commit params over the stroke's union bbox. The shape /
-    // mode / brush fields are immaterial to the commit kernel — only
-    // the dispatch bbox + mode + tex_origin / vol fields are read.
-    const auto& a = state.anchor;
-    if (a.union_bbox_x0 == INT32_MAX) {
-        // No stamps actually fired (e.g. anchor click that didn't
-        // dispatch). Treat as a no-op.
+    if (union_bbox_x0_ == INT32_MAX) {
         ctx.preview_active = false;
         state.anchor.has_anchor = false;
         ctx.history.AbandonOp();
@@ -436,13 +385,13 @@ void OnMouseUp(EditorContext& ctx, InteractionState& state,
 
     Document& doc = ctx.document;
     const EditVolume& vol = doc.volume;
-    Bbox3 bb;
-    bb.x0 = std::max(a.union_bbox_x0, vol.x0);
-    bb.y0 = std::max(a.union_bbox_y0, vol.y0);
-    bb.z0 = std::max(a.union_bbox_z0, vol.z0);
-    bb.x1 = std::min(a.union_bbox_x1, vol.x1);
-    bb.y1 = std::min(a.union_bbox_y1, vol.y1);
-    bb.z1 = std::min(a.union_bbox_z1, vol.z1);
+    Bbox3 bb{};
+    bb.x0 = std::max(union_bbox_x0_, vol.x0);
+    bb.y0 = std::max(union_bbox_y0_, vol.y0);
+    bb.z0 = std::max(union_bbox_z0_, vol.z0);
+    bb.x1 = std::min(union_bbox_x1_, vol.x1);
+    bb.y1 = std::min(union_bbox_y1_, vol.y1);
+    bb.z1 = std::min(union_bbox_z1_, vol.z1);
     if (bb.x0 > bb.x1 || bb.y0 > bb.y1 || bb.z0 > bb.z1) {
         ctx.preview_active = false;
         state.anchor.has_anchor = false;
@@ -450,6 +399,7 @@ void OnMouseUp(EditorContext& ctx, InteractionState& state,
         return;
     }
 
+    const auto& a = state.anchor;
     ShapeParams cp{};
     cp.mode = static_cast<uint32_t>(a.mode);
     cp.palette_idx = ctx.tool.palette_idx;
@@ -462,11 +412,10 @@ void OnMouseUp(EditorContext& ctx, InteractionState& state,
     cp.vol_min_x = vol.x0; cp.vol_min_y = vol.y0; cp.vol_min_z = vol.z0;
     cp.vol_max_x = vol.x1; cp.vol_max_y = vol.y1; cp.vol_max_z = vol.z1;
     cp.tex_origin_x = vol.x0; cp.tex_origin_y = vol.y0; cp.tex_origin_z = vol.z0;
-    commit(cp);
+    engine.CommitShape(cp);
 
-    // readback() waits for the queue + blits tex_a[bb] into `post`.
     std::vector<uint8_t> post;
-    readback(bb, &post);
+    engine.Readback(bb, &post);
     const size_t bw = static_cast<size_t>(bb.x1 - bb.x0 + 1);
     const size_t bh = static_cast<size_t>(bb.y1 - bb.y0 + 1);
     const size_t bd = static_cast<size_t>(bb.z1 - bb.z0 + 1);
@@ -500,7 +449,26 @@ void OnMouseUp(EditorContext& ctx, InteractionState& state,
 
     ctx.preview_active = false;
     state.anchor.has_anchor = false;
+    ResetBboxes();
     ctx.history.CommitOp();
 }
 
-}  // namespace macvoxel::shape_controller
+void ShapeTool::Cancel(EditorContext& ctx, InteractionState& state,
+                       EditEngine& engine) {
+    if (!dragging_ && !state.anchor.has_anchor) return;
+    // Clear any preview cells the kernel wrote, then abandon the op so
+    // nothing lands in history.
+    if (union_bbox_x0_ != INT32_MAX) {
+        Bbox3 bb{};
+        bb.x0 = union_bbox_x0_; bb.y0 = union_bbox_y0_; bb.z0 = union_bbox_z0_;
+        bb.x1 = union_bbox_x1_; bb.y1 = union_bbox_y1_; bb.z1 = union_bbox_z1_;
+        engine.ClearPreviewBbox(bb);
+    }
+    ctx.history.AbandonOp();
+    ctx.preview_active = false;
+    state.anchor.has_anchor = false;
+    dragging_ = false;
+    ResetBboxes();
+}
+
+}  // namespace macvoxel

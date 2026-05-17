@@ -40,7 +40,7 @@
 #include "SelectionOps.h"
 #include "SelectionOverlay.h"
 #include "EditEngine.h"
-#include "ShapeController.h"
+#include "ShapeTool.h"
 #include "Shapes.h"
 #include "ToolState.h"
 #include "ViewContext.h"
@@ -104,12 +104,12 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     // `_generatorEngine` / `_docVolumeTex` are alive.
     std::unique_ptr<macvoxel::EditEngine> _editEngine;
 
-    // Migrated tools (Phase 1). Shape / Face still flow through their
-    // controller namespaces + closures until their own Phase 1.x
-    // commits land. Selection tools (Marquee / BoxSelect / etc.) are
-    // out of scope for this refactor.
+    // Migrated tools (Phase 1). Face still flows through its controller
+    // namespace + closures until Phase 1.4 lands. Selection tools
+    // (Marquee / BoxSelect / etc.) are out of scope for this refactor.
     std::unique_ptr<macvoxel::BrushTool> _brushTool;
     std::unique_ptr<macvoxel::GeneratorTool> _generatorTool;
+    std::unique_ptr<macvoxel::ShapeTool> _shapeTool;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame
@@ -185,6 +185,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                                            _ctx->document.volume);
     _brushTool = std::make_unique<macvoxel::BrushTool>();
     _generatorTool = std::make_unique<macvoxel::GeneratorTool>();
+    _shapeTool = std::make_unique<macvoxel::ShapeTool>();
 
     _lastRenderMode = macvoxel::RenderMode::Edit;
     _lastToolForFB = _ctx->tool.tool;
@@ -410,60 +411,6 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         macvoxel::Bbox3 local{};
         local.x0 = x0 - vol.x0; local.y0 = y0 - vol.y0; local.z0 = z0 - vol.z0;
         local.x1 = x1 - vol.x0; local.y1 = y1 - vol.y0; local.z1 = z1 - vol.z0;
-        [brushEngine readTextureRegion:out target:texture bbox:local];
-    };
-}
-
-- (macvoxel::shape_controller::PreviewFn)shapePreviewFn {
-    ShapeEngine *engine = _shapeEngine;
-    VolumeTexture *texture = _docVolumeTex;
-    return [engine, texture](const macvoxel::ShapeParams &params) {
-        [engine dispatchPreview:params target:texture];
-    };
-}
-
-- (macvoxel::shape_controller::PreviewLineProjectFn)shapeProjectFn {
-    ShapeEngine *engine = _shapeEngine;
-    VolumeTexture *texture = _docVolumeTex;
-    return [engine, texture](const macvoxel::ShapeParams &params,
-                              const int32_t *cells_xyz, size_t cell_count) {
-        [engine dispatchLineProjectPreview:params
-                                      cells:cells_xyz
-                                 cellCount:cell_count
-                                     target:texture];
-    };
-}
-
-- (macvoxel::shape_controller::CommitFn)shapeCommitFn {
-    ShapeEngine *engine = _shapeEngine;
-    VolumeTexture *texture = _docVolumeTex;
-    return [engine, texture](const macvoxel::ShapeParams &params) {
-        [engine commitShape:params target:texture];
-    };
-}
-
-- (macvoxel::shape_controller::ReadBackFn)shapeReadBackFn {
-    // Same readback contract as brushReadBackFn — wait for the shape
-    // engine's queue, then blit the bbox region of the doc tex.
-    // (Shape engine shares brush's command queue, but we'd waitForPendingWork
-    // on whichever ran last; the brush engine's wait is sufficient
-    // because it waits on the queue's most recent buffer.)
-    ShapeEngine *shapeEngine = _shapeEngine;
-    BrushEngine *brushEngine = _brushEngine;
-    VolumeTexture *texture = _docVolumeTex;
-    macvoxel::EditorContext *ctx = _ctx;
-    return [shapeEngine, brushEngine, texture, ctx](
-                const macvoxel::Bbox3 &world_bbox,
-                std::vector<uint8_t> *out) {
-        [shapeEngine waitForPendingWork];
-        const macvoxel::EditVolume &vol = ctx->document.volume;
-        macvoxel::Bbox3 local{};
-        local.x0 = world_bbox.x0 - vol.x0;
-        local.y0 = world_bbox.y0 - vol.y0;
-        local.z0 = world_bbox.z0 - vol.z0;
-        local.x1 = world_bbox.x1 - vol.x0;
-        local.y1 = world_bbox.y1 - vol.y0;
-        local.z1 = world_bbox.z1 - vol.z0;
         [brushEngine readTextureRegion:out target:texture bbox:local];
     };
 }
@@ -713,9 +660,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                _ctx->tool.tool == macvoxel::ToolKind::Box) {
         [self autoCommitFloatingBuffer];
         const macvoxel::MouseEvent me = [self mouseEventFromNSEvent:event];
-        if (macvoxel::shape_controller::OnMouseDown(
-                *_ctx, _interaction, [self viewContext], me,
-                [self shapePreviewFn], [self shapeProjectFn])) {
+        if (_shapeTool->OnMouseDown(*_ctx, _interaction, [self viewContext],
+                                     me, *_editEngine)) {
             _interaction.hover.local = [self localFromWindow:event.locationInWindow];
             _interaction.hover.has_point = YES;
         } else {
@@ -794,10 +740,10 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                 _interaction.anchor.tool == macvoxel::ToolKind::Circle ||
                 _interaction.anchor.tool == macvoxel::ToolKind::Square ||
                 _interaction.anchor.tool == macvoxel::ToolKind::Box) {
-                macvoxel::shape_controller::OnMouseDragged(
-                    *_ctx, _interaction, [self viewContext],
-                    [self mouseEventFromNSEvent:event],
-                    [self shapePreviewFn], [self shapeProjectFn]);
+                _shapeTool->OnMouseDragged(*_ctx, _interaction,
+                                            [self viewContext],
+                                            [self mouseEventFromNSEvent:event],
+                                            *_editEngine);
             } else if (_interaction.anchor.tool == macvoxel::ToolKind::Face) {
                 macvoxel::face_controller::OnMouseDragged(
                     *_ctx, _interaction, [self viewContext],
@@ -854,9 +800,9 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
             case macvoxel::ToolKind::Circle:
             case macvoxel::ToolKind::Square:
             case macvoxel::ToolKind::Box:
-                macvoxel::shape_controller::OnMouseUp(
-                    *_ctx, _interaction,
-                    [self shapeCommitFn], [self shapeReadBackFn]);
+                _shapeTool->OnMouseUp(*_ctx, _interaction, [self viewContext],
+                                       [self mouseEventFromNSEvent:event],
+                                       *_editEngine);
                 break;
             case macvoxel::ToolKind::Face:
                 macvoxel::face_controller::OnMouseUp(

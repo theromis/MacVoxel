@@ -9,8 +9,8 @@
 #include "Input.h"
 #include "InteractionState.h"
 #include "OverlayDraw.h"
-#include "ShapeController.h"  // BeginAnchor still lives here
 #include "ShapeEngine.h"      // ShapeParams (commit kernel)
+#include "ShapeTool.h"        // BeginShapeAnchor (shared with Shape)
 #include "ViewContext.h"
 #include "VoxelGrid.h"
 #include "VoxelVolume.h"
@@ -138,7 +138,7 @@ bool GeneratorTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
     }
 
     const ToolMode mode = e.mods.command ? ToolMode::Remove : ctx.tool.mode;
-    if (!shape_controller::BeginAnchor(ctx, state, vc, e, mode)) {
+    if (!BeginShapeAnchor(ctx, state, vc, e, mode)) {
         return false;
     }
     state.drag_mode = DragMode::Shape;
