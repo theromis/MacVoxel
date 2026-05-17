@@ -252,4 +252,63 @@ void FloodCoplanarFace(const VoxelGrid& grid, Vec3i seed, int axis, int sign,
     }
 }
 
+void FloodCoplanarEmpty(const VoxelGrid& grid, Vec3i seed, int axis,
+                        int u_min, int u_max, int v_min, int v_max,
+                        bool eight_conn, std::vector<Vec3i>& out) {
+    out.clear();
+    const int u_axis = (axis == 0) ? 1 : 0;
+    const int v_axis = (axis == 2) ? 1 : 2;
+    const int seed_xyz[3] = {seed.x, seed.y, seed.z};
+    auto cell_at = [&](int u, int v) -> Vec3i {
+        int xyz[3] = {0, 0, 0};
+        xyz[axis] = seed_xyz[axis];
+        xyz[u_axis] = u;
+        xyz[v_axis] = v;
+        return Vec3i{xyz[0], xyz[1], xyz[2]};
+    };
+    auto in_rect = [&](int u, int v) {
+        return u >= u_min && u <= u_max && v >= v_min && v <= v_max;
+    };
+    auto is_empty = [&](const Vec3i& c) -> bool {
+        return grid.Get(c.x, c.y, c.z) == 0;
+    };
+
+    const int seed_u = seed_xyz[u_axis];
+    const int seed_v = seed_xyz[v_axis];
+    if (!in_rect(seed_u, seed_v)) return;
+    if (!is_empty(seed)) return;
+
+    std::unordered_set<int64_t> visited;
+    std::vector<std::pair<int, int>> stack;
+    stack.push_back({seed_u, seed_v});
+    visited.insert(PackCellKey(seed_u, seed_v, 0));
+    while (!stack.empty()) {
+        const std::pair<int, int> top = stack.back();
+        stack.pop_back();
+        const int u = top.first;
+        const int v = top.second;
+        if (!in_rect(u, v)) continue;
+        const Vec3i c = cell_at(u, v);
+        if (!is_empty(c)) continue;
+        out.push_back(c);
+        const std::pair<int, int> cardinals[4] = {
+            {u + 1, v}, {u - 1, v}, {u, v + 1}, {u, v - 1}
+        };
+        for (const auto& n : cardinals) {
+            const int64_t key = PackCellKey(n.first, n.second, 0);
+            if (visited.insert(key).second) stack.push_back(n);
+        }
+        if (eight_conn) {
+            const std::pair<int, int> diagonals[4] = {
+                {u + 1, v + 1}, {u + 1, v - 1},
+                {u - 1, v + 1}, {u - 1, v - 1}
+            };
+            for (const auto& n : diagonals) {
+                const int64_t key = PackCellKey(n.first, n.second, 0);
+                if (visited.insert(key).second) stack.push_back(n);
+            }
+        }
+    }
+}
+
 }  // namespace macvoxel::shapes

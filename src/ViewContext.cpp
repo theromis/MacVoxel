@@ -349,16 +349,41 @@ bool ViewContext::PickFace(float local_x, float local_y,
         got_buf = Raycast(fb.grid, origin_buf, ray_dir_grid,
                           4096.0f, &hit_buf);
     }
-    if (!got_doc && !got_buf) return false;
-    const bool from_buf = got_buf && (!got_doc || hit_buf.t < hit_doc.t);
-    const RayHit& hit = from_buf ? hit_buf : hit_doc;
-    if (hit.axis < 0) return false;  // ray started inside a voxel — no face
-    out_cell->x = hit.x + (from_buf ? fb.offset_x : 0);
-    out_cell->y = hit.y + (from_buf ? fb.offset_y : 0);
-    out_cell->z = hit.z + (from_buf ? fb.offset_z : 0);
-    *out_axis = hit.axis;
-    *out_sign = hit.sign;
-    if (out_color) *out_color = hit.color;
+    if (got_doc || got_buf) {
+        const bool from_buf = got_buf && (!got_doc || hit_buf.t < hit_doc.t);
+        const RayHit& hit = from_buf ? hit_buf : hit_doc;
+        if (hit.axis < 0) return false;  // ray started inside a voxel
+        out_cell->x = hit.x + (from_buf ? fb.offset_x : 0);
+        out_cell->y = hit.y + (from_buf ? fb.offset_y : 0);
+        out_cell->z = hit.z + (from_buf ? fb.offset_z : 0);
+        *out_axis = hit.axis;
+        *out_sign = hit.sign;
+        if (out_color) *out_color = hit.color;
+        return true;
+    }
+
+    // No voxel hit — fall back to a volume-wall pick so the Face tool
+    // can flood-fill the empty cells on the floor / walls. The wall's
+    // outward normal points OUT of the volume; the Face tool wants to
+    // extrude INTO the volume, so invert sign. `color == 0` signals
+    // to the caller that this is a wall pick (the seed cell is empty)
+    // and the wall flood-fill should fire instead of the same-color
+    // voxel one.
+    shapes::Vec3i wall_cell;
+    int wall_axis = 0;
+    if (!IntersectVolumeWall(doc.volume, ray_origin_grid, ray_dir_grid,
+                             &wall_cell, &wall_axis)) {
+        return false;
+    }
+    // Determine sign from which side of the volume the wall is on.
+    int wall_sign = 0;
+    if (wall_axis == 0) wall_sign = (wall_cell.x == doc.volume.x0) ? -1 : +1;
+    else if (wall_axis == 1) wall_sign = (wall_cell.y == doc.volume.y0) ? -1 : +1;
+    else wall_sign = (wall_cell.z == doc.volume.z0) ? -1 : +1;
+    *out_cell = wall_cell;
+    *out_axis = wall_axis;
+    *out_sign = -wall_sign;  // INWARD into the volume
+    if (out_color) *out_color = 0;
     return true;
 }
 

@@ -26,6 +26,9 @@
     _sizeX = volume.size_x();
     _sizeY = volume.size_y();
     _sizeZ = volume.size_z();
+    _originX = volume.edit_volume().x0;
+    _originY = volume.edit_volume().y0;
+    _originZ = volume.edit_volume().z0;
     _chunksX = volume.chunks_x();
     _chunksY = volume.chunks_y();
     _chunksZ = volume.chunks_z();

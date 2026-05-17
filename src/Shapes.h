@@ -62,5 +62,15 @@ void FloodCoplanarFace(const VoxelGrid& grid, Vec3i seed, int axis, int sign,
                        uint8_t match_color, bool eight_conn,
                        std::vector<Vec3i>& out);
 
+// Flood-fill EMPTY cells in the plane perpendicular to `axis` through
+// `seed`, bounded by the per-axis [`u_min`, `u_max`] × [`v_min`, `v_max`]
+// rectangle (in the two in-plane axes). Used by the Face tool when the
+// user clicks on a volume wall — the seed plane has no voxels to flood
+// against, so we instead fill the available empty cells inside the
+// volume's bounding rect.
+void FloodCoplanarEmpty(const VoxelGrid& grid, Vec3i seed, int axis,
+                        int u_min, int u_max, int v_min, int v_max,
+                        bool eight_conn, std::vector<Vec3i>& out);
+
 }  // namespace shapes
 }  // namespace macvoxel

@@ -32,6 +32,14 @@ struct Uniforms {
 };
 static_assert(sizeof(Uniforms) == 160, "ShapeUniforms layout drift");
 
+// Mirror of ShapeKernel.metal's `StampCellsUniforms`. Just an int3 +
+// pad — 16 bytes.
+struct StampCellsUniforms {
+    int32_t tex_origin[4];
+};
+static_assert(sizeof(StampCellsUniforms) == 16,
+              "StampCellsUniforms layout drift");
+
 NSString* LoadShapeLibrarySource() {
     NSURL* url = [NSBundle.mainBundle URLForResource:@"ShapeKernel"
                                        withExtension:@"metal"];
@@ -103,12 +111,18 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     id<MTLComputePipelineState> _projectPSO;
     id<MTLComputePipelineState> _clearPSO;
     id<MTLComputePipelineState> _commitPSO;
+    id<MTLComputePipelineState> _stampCellsPSO;
+    id<MTLComputePipelineState> _commitCellsPSO;
     id<MTLCommandBuffer> _lastBuffer;
     // Project-mode cell buffer — grows as needed to hold the picked
     // cell list. Packed (x, y, z, _pad) per cell to align with MSL's
     // PackedCellXYZ struct.
     id<MTLBuffer> _projectCellBuffer;
     NSUInteger _projectCellCapacity;
+    // (cell, palette) buffer for Face's stamp/commit hot path. Same
+    // grow-only policy as the project cell buffer.
+    id<MTLBuffer> _cellPaletteBuffer;
+    NSUInteger _cellPaletteCapacity;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -151,11 +165,24 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     _projectPSO = makePso(@"shape_line_project_main");
     _clearPSO   = makePso(@"shape_clear");
     _commitPSO  = makePso(@"shape_commit");
+    _stampCellsPSO  = makePso(@"shape_stamp_cells");
+    _commitCellsPSO = makePso(@"shape_commit_cells");
     if (_previewPSO == nil || _projectPSO == nil || _clearPSO == nil ||
-        _commitPSO == nil) {
+        _commitPSO == nil || _stampCellsPSO == nil ||
+        _commitCellsPSO == nil) {
         return nil;
     }
     return self;
+}
+
+- (void)ensureCellPaletteCapacity:(NSUInteger)cells {
+    if (_cellPaletteCapacity >= cells && _cellPaletteBuffer != nil) return;
+    NSUInteger newCap = std::max<NSUInteger>(_cellPaletteCapacity * 2, 1024);
+    while (newCap < cells) newCap *= 2;
+    _cellPaletteBuffer = [_device newBufferWithLength:newCap * 16
+                                              options:MTLResourceStorageModeShared];
+    _cellPaletteBuffer.label = @"ShapeCellPalette";
+    _cellPaletteCapacity = newCap;
 }
 
 - (void)ensureProjectCellCapacity:(NSUInteger)cells {
@@ -288,6 +315,75 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     [enc setTexture:texture.previewTexture atIndex:1];
     [enc setTexture:texture.oracleTexture atIndex:2];
     Dispatch(enc, p);
+    [enc endEncoding];
+    [cmd commit];
+    _lastBuffer = cmd;
+}
+
+- (void)dispatchStampCells:(const macvoxel::CellPalette*)cells
+                 cellCount:(NSUInteger)cell_count
+                    target:(VolumeTexture*)texture {
+    if (_stampCellsPSO == nil || texture == nil || cell_count == 0) return;
+    [self ensureCellPaletteCapacity:cell_count];
+    std::memcpy(_cellPaletteBuffer.contents, cells,
+                cell_count * sizeof(macvoxel::CellPalette));
+
+    StampCellsUniforms u{};
+    u.tex_origin[0] = texture.originX;
+    u.tex_origin[1] = texture.originY;
+    u.tex_origin[2] = texture.originZ;
+
+    id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+    cmd.label = @"ShapeStampCellsDispatch";
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:_stampCellsPSO];
+    [enc setBytes:&u length:sizeof(u) atIndex:0];
+    [enc setBuffer:_cellPaletteBuffer offset:0 atIndex:1];
+    uint32_t cc = static_cast<uint32_t>(cell_count);
+    [enc setBytes:&cc length:sizeof(cc) atIndex:2];
+    [enc setTexture:texture.previewTexture atIndex:0];
+    [enc setTexture:texture.previewOracleTexture atIndex:1];
+
+    const NSUInteger tg = std::min<NSUInteger>(64, cell_count);
+    const MTLSize threadsPerThreadgroup = MTLSizeMake(tg, 1, 1);
+    const MTLSize threadgroups = MTLSizeMake((cell_count + tg - 1) / tg, 1, 1);
+    [enc dispatchThreadgroups:threadgroups
+        threadsPerThreadgroup:threadsPerThreadgroup];
+    [enc endEncoding];
+    [cmd commit];
+    _lastBuffer = cmd;
+}
+
+- (void)dispatchCommitCells:(const macvoxel::CellPalette*)cells
+                  cellCount:(NSUInteger)cell_count
+                     target:(VolumeTexture*)texture {
+    if (_commitCellsPSO == nil || texture == nil || cell_count == 0) return;
+    [self ensureCellPaletteCapacity:cell_count];
+    std::memcpy(_cellPaletteBuffer.contents, cells,
+                cell_count * sizeof(macvoxel::CellPalette));
+
+    StampCellsUniforms u{};
+    u.tex_origin[0] = texture.originX;
+    u.tex_origin[1] = texture.originY;
+    u.tex_origin[2] = texture.originZ;
+
+    id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+    cmd.label = @"ShapeCommitCellsDispatch";
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:_commitCellsPSO];
+    [enc setBytes:&u length:sizeof(u) atIndex:0];
+    [enc setBuffer:_cellPaletteBuffer offset:0 atIndex:1];
+    uint32_t cc = static_cast<uint32_t>(cell_count);
+    [enc setBytes:&cc length:sizeof(cc) atIndex:2];
+    [enc setTexture:texture.texture atIndex:0];
+    [enc setTexture:texture.previewTexture atIndex:1];
+    [enc setTexture:texture.oracleTexture atIndex:2];
+
+    const NSUInteger tg = std::min<NSUInteger>(64, cell_count);
+    const MTLSize threadsPerThreadgroup = MTLSizeMake(tg, 1, 1);
+    const MTLSize threadgroups = MTLSizeMake((cell_count + tg - 1) / tg, 1, 1);
+    [enc dispatchThreadgroups:threadgroups
+        threadsPerThreadgroup:threadsPerThreadgroup];
     [enc endEncoding];
     [cmd commit];
     _lastBuffer = cmd;

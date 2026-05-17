@@ -166,7 +166,26 @@ struct InteractionState {
         bool observed_drag = false;
         int applied_d = 0;
         FaceWithColor applied_with = FaceWithColor::Geometry;
+        // True when the seed plane came from a volume-wall pick
+        // rather than a voxel-face pick. Forces `face_with =
+        // Palette` regardless of the user's selection (there's no
+        // geometry color to source from — the seed cells are shifted
+        // outside the volume), and skips the "no preview if source
+        // cell is 0" no-op that Geometry mode would otherwise emit.
+        bool from_wall = false;
         std::vector<shapes::Vec3i> seed_cells;
+        // Per-frame bbox bookkeeping for the tex_t preview. last_bbox
+        // is what we wrote last frame (cleared on next Refresh);
+        // union_bbox accumulates across the stroke for the commit
+        // readback. INT32_MAX/MIN = empty.
+        int32_t last_bbox_x0 = INT32_MAX, last_bbox_y0 = INT32_MAX,
+                last_bbox_z0 = INT32_MAX;
+        int32_t last_bbox_x1 = INT32_MIN, last_bbox_y1 = INT32_MIN,
+                last_bbox_z1 = INT32_MIN;
+        int32_t union_bbox_x0 = INT32_MAX, union_bbox_y0 = INT32_MAX,
+                union_bbox_z0 = INT32_MAX;
+        int32_t union_bbox_x1 = INT32_MIN, union_bbox_y1 = INT32_MIN,
+                union_bbox_z1 = INT32_MIN;
     } face;
 
     // Generator gizmo. After the user releases the mouse from a
@@ -190,6 +209,22 @@ struct InteractionState {
         int active_drag_face = -1;
         simd::float2 handle_start_local{0.0f, 0.0f};
         generators::Bounds3i handle_start_bounds{};
+        // Bbox of the PREVIOUSLY-DISPATCHED bounds (used to union with
+        // the new dispatch so shrinking-bounds cells naturally clear).
+        // Distinct from `last_bounds` only briefly across the Tick
+        // dirty check — `last_bounds` is updated at end of Regenerate
+        // for next frame's dirty compare, while
+        // `last_bounds_dispatched` is read at the start of the next
+        // Regenerate. `_valid=false` on first dispatch in a session.
+        generators::Bounds3i last_bounds_dispatched{};
+        bool last_bounds_dispatched_valid = false;
+        // Union of every dispatch's bbox across the gesture. OnMouseUp
+        // reads this to know how much of tex_a to blit back for diff.
+        // INT32_MAX/MIN = empty.
+        int32_t union_bounds_x0 = INT32_MAX, union_bounds_y0 = INT32_MAX,
+                union_bounds_z0 = INT32_MAX;
+        int32_t union_bounds_x1 = INT32_MIN, union_bounds_y1 = INT32_MIN,
+                union_bounds_z1 = INT32_MIN;
     } gen_gizmo;
 };
 

@@ -1,21 +1,26 @@
 #include "GeneratorController.h"
 
-#include "BrushOps.h"
+#include "BrushEngine.h"      // for Bbox3
 #include "Document.h"
+#include "EditHistory.h"
 #include "EditorContext.h"
 #include "GeneratorState.h"
 #include "Input.h"
 #include "OverlayDraw.h"
-#include "PreviewOps.h"
-#include "PreviewOverlay.h"
+#include "PreviewOverlay.h"   // ctx.preview.active flag
 #include "ShapeController.h"
+#include "ShapeEngine.h"      // ShapeParams (for commit kernel)
 #include "ViewContext.h"
 #include "VoxelGrid.h"
+#include "VoxelVolume.h"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <simd/simd.h>
+#include <vector>
 
 namespace macvoxel::generator_controller {
 namespace {
@@ -63,49 +68,71 @@ void FaceWorldGeom(const generators::Bounds3i& b, int face,
     *out_normal = simd::float3{n_grid.x, n_grid.z, -n_grid.y};
 }
 
-// Single-cell stamp pipeline. Each cell from the engine is "fill this
-// exact cell with the kernel-chosen palette" — brush size / shape / 2D
-// / 3D options must NOT apply (the kernel already produced the final
-// cell list). Stages into PreviewOverlay; Commit / Cancel close the
-// gesture.
-void StampCellsToOverlay(EditorContext& ctx,
-                         const std::vector<generators::CellOut>& cells,
-                         ToolMode mode) {
-    if (cells.empty()) return;
-    Document& doc = ctx.document;
-    PreviewOverlay& overlay = ctx.preview;
-    for (const auto& c : cells) {
-        const uint8_t old_val = doc.grid.Get(c.x, c.y, c.z);
-        const uint8_t cell_palette = static_cast<uint8_t>(c.palette);
-        const uint8_t new_val = ComputeNewCellValue(old_val, mode, cell_palette);
-        if (new_val != 0 && old_val == 0 &&
-            !doc.volume.Contains(c.x, c.y, c.z)) continue;
-        overlay.Stamp(c.x, c.y, c.z, new_val, old_val);
-    }
-    ++overlay.version;
+constexpr generators::Bounds3i kEmptyBounds{0, 0, 0, -1, -1, -1};
+
+inline bool IsEmpty(generators::Bounds3i b) {
+    return b.x1 < b.x0 || b.y1 < b.y0 || b.z1 < b.z0;
 }
 
-// Run the engine for `bounds` + the live params/kind, stamp the
-// resulting cells through the overlay, and sync the gen_gizmo cache
-// fields so DrawOverlay sees the new bounds and Tick's change
-// detector doesn't redundantly re-fire next frame.
-void RegenerateAndStamp(EditorContext& ctx, InteractionState& state,
-                        generators::Bounds3i bounds, ToolMode mode,
-                        const GenerateFn& generate) {
-    PreviewOverlay& overlay = ctx.preview;
-    overlay.Clear();
-    overlay.active = true;
+// Track the bbox of every dispatch made so far in this gesture, so
+// OnMouseUp can blit exactly that region of tex_a back to CPU for the
+// diff against shadow. gen_gizmo.last_bounds already records the
+// previous dispatch (Tick reads it for dirty detection); we expand a
+// union into gen_gizmo.{union_bounds_*} as the user drags.
+void ExtendUnion(InteractionState& state, generators::Bounds3i b) {
+    if (IsEmpty(b)) return;
+    auto& g = state.gen_gizmo;
+    if (g.union_bounds_x0 == INT32_MAX) {
+        g.union_bounds_x0 = b.x0; g.union_bounds_y0 = b.y0;
+        g.union_bounds_z0 = b.z0;
+        g.union_bounds_x1 = b.x1; g.union_bounds_y1 = b.y1;
+        g.union_bounds_z1 = b.z1;
+        return;
+    }
+    g.union_bounds_x0 = std::min(g.union_bounds_x0, b.x0);
+    g.union_bounds_y0 = std::min(g.union_bounds_y0, b.y0);
+    g.union_bounds_z0 = std::min(g.union_bounds_z0, b.z0);
+    g.union_bounds_x1 = std::max(g.union_bounds_x1, b.x1);
+    g.union_bounds_y1 = std::max(g.union_bounds_y1, b.y1);
+    g.union_bounds_z1 = std::max(g.union_bounds_z1, b.z1);
+}
+
+// Dispatch the generator kernel into tex_t. The kernel covers the
+// union of `bounds` and the gen_gizmo's previously-dispatched bounds,
+// so cells the old preview wrote that the new one doesn't cover get
+// zeroed in the same dispatch. Sync gen_gizmo cache fields so
+// DrawOverlay sees the new bounds and Tick's change detector doesn't
+// redundantly re-fire next frame.
+void Regenerate(EditorContext& ctx, InteractionState& state,
+                generators::Bounds3i bounds,
+                const GenerateFn& generate) {
+    ctx.preview.active = true;
 
     generators::Params p = ctx.generator.params;
     p.palette_idx = ctx.tool.palette_idx;
-    std::vector<generators::CellOut> cells;
-    generate(ctx.generator.active_kind, bounds, p, cells);
-    StampCellsToOverlay(ctx, cells, mode);
+
+    const generators::Bounds3i prev =
+        state.gen_gizmo.last_bounds_dispatched_valid
+            ? state.gen_gizmo.last_bounds_dispatched
+            : kEmptyBounds;
+    generate(ctx.generator.active_kind, bounds, prev, p);
+    state.gen_gizmo.last_bounds_dispatched = bounds;
+    state.gen_gizmo.last_bounds_dispatched_valid = true;
+    ExtendUnion(state, bounds);
 
     state.gen_gizmo.bounds = bounds;
     state.gen_gizmo.last_kind = ctx.generator.active_kind;
     state.gen_gizmo.last_bounds = bounds;
     state.gen_gizmo.last_params = p;
+}
+
+void ResetUnion(InteractionState& state) {
+    auto& g = state.gen_gizmo;
+    g.union_bounds_x0 = INT32_MAX; g.union_bounds_y0 = INT32_MAX;
+    g.union_bounds_z0 = INT32_MAX;
+    g.union_bounds_x1 = INT32_MIN; g.union_bounds_y1 = INT32_MIN;
+    g.union_bounds_z1 = INT32_MIN;
+    g.last_bounds_dispatched_valid = false;
 }
 
 }  // namespace
@@ -123,7 +150,9 @@ bool BeginDragOut(EditorContext& ctx, InteractionState& state,
         state.anchor.cell.x, state.anchor.cell.y, state.anchor.cell.z,
     };
     state.gen_gizmo.active = true;
-    RegenerateAndStamp(ctx, state, b, state.anchor.mode, generate);
+    ResetUnion(state);
+    ctx.history.BeginOp();
+    Regenerate(ctx, state, b, generate);
     return true;
 }
 
@@ -144,7 +173,7 @@ void UpdateDragOut(EditorContext& ctx, InteractionState& state,
         std::max(state.anchor.cell.y, endpoint.y),
         std::max(state.anchor.cell.z, endpoint.z),
     };
-    RegenerateAndStamp(ctx, state, b, state.anchor.mode, generate);
+    Regenerate(ctx, state, b, generate);
 }
 
 void EndDragOut(InteractionState& state) {
@@ -152,7 +181,8 @@ void EndDragOut(InteractionState& state) {
 }
 
 void OnGizmoClick(EditorContext& ctx, InteractionState& state,
-                  const ViewContext& vc, const MouseEvent& e) {
+                  const ViewContext& vc, const MouseEvent& e,
+                  const CommitFn& commit, const ReadBackFn& readback) {
     const int face = vc.PickGenHandle(e.local.x, e.local.y,
                                       state.gen_gizmo.bounds);
     if (face >= 0) {
@@ -161,7 +191,7 @@ void OnGizmoClick(EditorContext& ctx, InteractionState& state,
         state.gen_gizmo.handle_start_bounds = state.gen_gizmo.bounds;
         state.drag_mode = DragMode::GenHandle;
     } else {
-        Commit(ctx, state);
+        Commit(ctx, state, commit, readback);
         state.drag_mode = DragMode::None;
     }
 }
@@ -203,7 +233,7 @@ void Tick(EditorContext& ctx, InteractionState& state,
     if (!state.gen_gizmo.active) return;
 
     if (active_tool != ToolKind::Generator || escape_pressed) {
-        Cancel(ctx, state);
+        Cancel(ctx, state, generate);
         return;
     }
 
@@ -229,21 +259,97 @@ void Tick(EditorContext& ctx, InteractionState& state,
         gs.params.perlin_palette_hi != last.perlin_palette_hi;
     if (!dirty) return;
 
-    RegenerateAndStamp(ctx, state, state.gen_gizmo.bounds,
-                       ctx.tool.mode, generate);
+    Regenerate(ctx, state, state.gen_gizmo.bounds, generate);
 }
 
-void Commit(EditorContext& ctx, InteractionState& state) {
+void Commit(EditorContext& ctx, InteractionState& state,
+            const CommitFn& commit, const ReadBackFn& readback) {
     if (!state.gen_gizmo.active) return;
-    CommitPreviewOverlayThroughHistory(ctx);
-    state.gen_gizmo.active = false;
-}
+    const auto& g = state.gen_gizmo;
+    Document& doc = ctx.document;
+    const EditVolume& vol = doc.volume;
+    if (g.union_bounds_x0 != INT32_MAX) {
+        Bbox3 bb{};
+        bb.x0 = std::max(g.union_bounds_x0, vol.x0);
+        bb.y0 = std::max(g.union_bounds_y0, vol.y0);
+        bb.z0 = std::max(g.union_bounds_z0, vol.z0);
+        bb.x1 = std::min(g.union_bounds_x1, vol.x1);
+        bb.y1 = std::min(g.union_bounds_y1, vol.y1);
+        bb.z1 = std::min(g.union_bounds_z1, vol.z1);
+        if (bb.x0 <= bb.x1 && bb.y0 <= bb.y1 && bb.z0 <= bb.z1) {
+            ShapeParams cp{};
+            cp.mode = static_cast<uint32_t>(state.anchor.mode);
+            cp.palette_idx = ctx.tool.palette_idx;
+            cp.dispatch_lo_x = bb.x0 - vol.x0;
+            cp.dispatch_lo_y = bb.y0 - vol.y0;
+            cp.dispatch_lo_z = bb.z0 - vol.z0;
+            cp.dispatch_size_x = bb.x1 - bb.x0 + 1;
+            cp.dispatch_size_y = bb.y1 - bb.y0 + 1;
+            cp.dispatch_size_z = bb.z1 - bb.z0 + 1;
+            cp.vol_min_x = vol.x0; cp.vol_min_y = vol.y0; cp.vol_min_z = vol.z0;
+            cp.vol_max_x = vol.x1; cp.vol_max_y = vol.y1; cp.vol_max_z = vol.z1;
+            cp.tex_origin_x = vol.x0; cp.tex_origin_y = vol.y0;
+            cp.tex_origin_z = vol.z0;
+            commit(cp);
 
-void Cancel(EditorContext& ctx, InteractionState& state) {
-    if (!state.gen_gizmo.active) return;
-    ctx.preview.Clear();
+            std::vector<uint8_t> post;
+            readback(bb, &post);
+            const size_t bw = static_cast<size_t>(bb.x1 - bb.x0 + 1);
+            const size_t bh = static_cast<size_t>(bb.y1 - bb.y0 + 1);
+            const size_t bd = static_cast<size_t>(bb.z1 - bb.z0 + 1);
+            if (post.size() >= bw * bh * bd) {
+                std::vector<CellChange> diff;
+                diff.reserve(bw * bh);
+                for (size_t lz = 0; lz < bd; ++lz) {
+                    for (size_t ly = 0; ly < bh; ++ly) {
+                        const size_t row_base = lz * bw * bh + ly * bw;
+                        for (size_t lx = 0; lx < bw; ++lx) {
+                            const int32_t x = bb.x0 + static_cast<int32_t>(lx);
+                            const int32_t y = bb.y0 + static_cast<int32_t>(ly);
+                            const int32_t z = bb.z0 + static_cast<int32_t>(lz);
+                            const uint8_t pre = doc.volume_shadow.Get(x, y, z);
+                            const uint8_t cur = post[row_base + lx];
+                            if (pre == cur) continue;
+                            CellChange c{};
+                            c.x = x; c.y = y; c.z = z;
+                            c.old_val = pre; c.new_val = cur;
+                            diff.push_back(c);
+                        }
+                    }
+                }
+                if (!diff.empty()) {
+                    doc.ApplyChanges(diff.data(), diff.size());
+                    ctx.history.RecordBatch(diff.data(), diff.size());
+                    (void)doc.volume_shadow.TakeDirtyChunks();
+                    doc.BumpGeometry();
+                }
+            }
+        }
+    }
+
+    ctx.history.CommitOp();
+    ctx.preview.active = false;
     state.gen_gizmo.active = false;
     state.gen_gizmo.active_drag_face = -1;
+    ResetUnion(state);
+}
+
+void Cancel(EditorContext& ctx, InteractionState& state,
+            const GenerateFn& generate) {
+    if (!state.gen_gizmo.active) return;
+    // Dispatch with empty bounds + last dispatched bounds → kernel
+    // zeros every cell in the previous bbox (no shape cells fill).
+    if (state.gen_gizmo.last_bounds_dispatched_valid) {
+        generators::Params p = ctx.generator.params;
+        p.palette_idx = ctx.tool.palette_idx;
+        generate(ctx.generator.active_kind, kEmptyBounds,
+                 state.gen_gizmo.last_bounds_dispatched, p);
+    }
+    ctx.history.AbandonOp();
+    ctx.preview.active = false;
+    state.gen_gizmo.active = false;
+    state.gen_gizmo.active_drag_face = -1;
+    ResetUnion(state);
     if (state.drag_mode == DragMode::GenHandle) {
         state.drag_mode = DragMode::None;
     }

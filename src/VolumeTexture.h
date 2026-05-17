@@ -61,4 +61,11 @@ class VoxelVolume;
 @property(nonatomic, readonly) int sizeY;
 @property(nonatomic, readonly) int sizeZ;
 
+// Texture origin in world cell coords (== EditVolume.x0/y0/z0). World
+// cell (x, y, z) maps to texture-local (x - originX, y - originY,
+// z - originZ).
+@property(nonatomic, readonly) int originX;
+@property(nonatomic, readonly) int originY;
+@property(nonatomic, readonly) int originZ;
+
 @end

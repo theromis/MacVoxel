@@ -12,6 +12,8 @@ class OverlayDraw;
 struct EditorContext;
 struct MouseEvent;
 struct ViewContext;
+struct Bbox3;
+struct ShapeParams;
 }
 
 // Generator tool: parameterized shape primitives laid out via a
@@ -24,11 +26,20 @@ struct ViewContext;
 namespace macvoxel::generator_controller {
 
 // Pure-C++ binding for the Obj-C++ GeneratorEngine. The dispatcher
-// (VoxelView) wraps the engine in a closure; the controller never
-// sees AppKit / Metal types and stays portable.
+// (MetalScene) wraps the engine in a closure; the controller never
+// sees AppKit / Metal types and stays portable. The kernel writes
+// preview cells directly into the doc's tex_t (and clears stale
+// cells from the previous frame's bounds in the same dispatch).
 using GenerateFn = std::function<
-    void(generators::Kind, generators::Bounds3i, generators::Params,
-         std::vector<generators::CellOut>&)>;
+    void(generators::Kind, generators::Bounds3i bounds,
+         generators::Bounds3i last_bounds, generators::Params)>;
+
+// Commit + readback closures, reusing the shape engine's shape_commit
+// kernel (mode-aware Add/Paint/Remove + clears preview) and the
+// shared bbox-to-CPU readback.
+using CommitFn = std::function<void(const ShapeParams& params)>;
+using ReadBackFn =
+    std::function<void(const Bbox3& world_bbox, std::vector<uint8_t>* out_bytes)>;
 
 // mouseDown when tool=Generator and gizmo isn't active. Picks the
 // anchor cell, activates the gizmo at that cell (single-cell box),
@@ -53,9 +64,11 @@ void EndDragOut(InteractionState& state);
 // mouseDown while gizmo is active. Picks a face arrow → enter
 // face-handle scale drag; click outside any handle → commit through
 // history. Always consumes the click (drag_mode is set or the gizmo
-// exits).
+// exits). `commit` + `readback` are only invoked on the outside-
+// handle path.
 void OnGizmoClick(EditorContext& ctx, InteractionState& state,
-                  const ViewContext& vc, const MouseEvent& e);
+                  const ViewContext& vc, const MouseEvent& e,
+                  const CommitFn& commit, const ReadBackFn& readback);
 
 // mouseDragged during DragMode::GenHandle. Projects cursor delta
 // onto the dragged face's normal in NDC, scales gizmo.bounds.
@@ -80,13 +93,18 @@ void Tick(EditorContext& ctx, InteractionState& state,
           const GenerateFn& generate);
 
 // Commit the live preview through history as one undo step; exit
-// gizmo state.
-void Commit(EditorContext& ctx, InteractionState& state);
+// gizmo state. The commit kernel + readback come from MetalScene
+// (same pattern the shape tools use for mouseUp).
+void Commit(EditorContext& ctx, InteractionState& state,
+            const CommitFn& commit, const ReadBackFn& readback);
 
-// Discard the gizmo without writing to history. Drops the overlay
+// Discard the gizmo without writing to history. Drops the preview
 // (the doc was never touched). Also clears any in-progress
-// face-handle drag so the next mouse event lands cleanly.
-void Cancel(EditorContext& ctx, InteractionState& state);
+// face-handle drag so the next mouse event lands cleanly. Issues a
+// generate dispatch with an empty `bounds` so the kernel zeros
+// every cell in the last dispatch's bbox.
+void Cancel(EditorContext& ctx, InteractionState& state,
+            const GenerateFn& generate);
 
 // Gizmo overlay: 12-edge AABB outline + 6 face-normal arrow handles.
 // mouse_captured_by_ui suppresses hover-tinting when an overlaying

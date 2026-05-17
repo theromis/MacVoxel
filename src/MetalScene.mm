@@ -249,7 +249,9 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     if (kc == kKeyCodeReturn || kc == kKeyCodeKeypadEnter) {
         if (_ctx->tool.tool == macvoxel::ToolKind::Generator &&
             _interaction.gen_gizmo.active) {
-            macvoxel::generator_controller::Commit(*_ctx, _interaction);
+            macvoxel::generator_controller::Commit(
+                *_ctx, _interaction,
+                [self generatorCommitFn], [self generatorReadBackFn]);
             _interaction.drag_mode = macvoxel::DragMode::None;
             return;
         }
@@ -341,11 +343,84 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 
 - (macvoxel::generator_controller::GenerateFn)generateFn {
     GeneratorEngine *engine = _generatorEngine;
-    return [engine](macvoxel::generators::Kind kind,
-                    macvoxel::generators::Bounds3i bounds,
-                    macvoxel::generators::Params params,
-                    std::vector<macvoxel::generators::CellOut> &out) {
-        [engine generateInto:out kind:kind bounds:bounds params:params];
+    VolumeTexture *texture = _docVolumeTex;
+    return [engine, texture](macvoxel::generators::Kind kind,
+                              macvoxel::generators::Bounds3i bounds,
+                              macvoxel::generators::Bounds3i last_bounds,
+                              macvoxel::generators::Params params) {
+        [engine dispatchInto:texture
+                        kind:kind
+                      bounds:bounds
+                  lastBounds:last_bounds
+                      params:params];
+    };
+}
+
+- (macvoxel::generator_controller::CommitFn)generatorCommitFn {
+    // The generator's commit shares the shape commit kernel — both
+    // promote tex_t cells into tex_a + clear tex_t (mode-aware).
+    return [self shapeCommitFn];
+}
+
+- (macvoxel::generator_controller::ReadBackFn)generatorReadBackFn {
+    return [self shapeReadBackFn];
+}
+
+- (macvoxel::face_controller::StampCellsFn)faceStampFn {
+    ShapeEngine *engine = _shapeEngine;
+    VolumeTexture *texture = _docVolumeTex;
+    return [engine, texture](const macvoxel::CellPalette *cells,
+                              std::size_t count) {
+        [engine dispatchStampCells:cells
+                          cellCount:(NSUInteger)count
+                             target:texture];
+    };
+}
+
+- (macvoxel::face_controller::CommitCellsFn)faceCommitFn {
+    ShapeEngine *engine = _shapeEngine;
+    VolumeTexture *texture = _docVolumeTex;
+    return [engine, texture](const macvoxel::CellPalette *cells,
+                              std::size_t count) {
+        [engine dispatchCommitCells:cells
+                           cellCount:(NSUInteger)count
+                              target:texture];
+    };
+}
+
+- (macvoxel::face_controller::ClearBboxFn)faceClearBboxFn {
+    ShapeEngine *engine = _shapeEngine;
+    VolumeTexture *texture = _docVolumeTex;
+    macvoxel::EditorContext *ctx = _ctx;
+    return [engine, texture, ctx](int32_t x0, int32_t y0, int32_t z0,
+                                  int32_t x1, int32_t y1, int32_t z1) {
+        // Translate world cell bbox to texture-local.
+        const macvoxel::EditVolume &vol = ctx->document.volume;
+        [engine clearPreviewBbox:(x0 - vol.x0)
+                              y0:(y0 - vol.y0)
+                              z0:(z0 - vol.z0)
+                              x1:(x1 - vol.x0)
+                              y1:(y1 - vol.y0)
+                              z1:(z1 - vol.z0)
+                          target:texture];
+    };
+}
+
+- (macvoxel::face_controller::ReadBackFn)faceReadBackFn {
+    ShapeEngine *shapeEngine = _shapeEngine;
+    BrushEngine *brushEngine = _brushEngine;
+    VolumeTexture *texture = _docVolumeTex;
+    macvoxel::EditorContext *ctx = _ctx;
+    return [shapeEngine, brushEngine, texture, ctx](
+                int32_t x0, int32_t y0, int32_t z0,
+                int32_t x1, int32_t y1, int32_t z1,
+                std::vector<uint8_t> *out) {
+        [shapeEngine waitForPendingWork];
+        const macvoxel::EditVolume &vol = ctx->document.volume;
+        macvoxel::Bbox3 local{};
+        local.x0 = x0 - vol.x0; local.y0 = y0 - vol.y0; local.z0 = z0 - vol.z0;
+        local.x1 = x1 - vol.x0; local.y1 = y1 - vol.y0; local.z1 = z1 - vol.z0;
+        [brushEngine readTextureRegion:out target:texture bbox:local];
     };
 }
 
@@ -642,7 +717,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     if (_interaction.gen_gizmo.active) {
         macvoxel::generator_controller::OnGizmoClick(
             *_ctx, _interaction, [self viewContext],
-            [self mouseEventFromNSEvent:event]);
+            [self mouseEventFromNSEvent:event],
+            [self generatorCommitFn], [self generatorReadBackFn]);
     } else if (macvoxel::xform_handle_controller::OnMouseDown(
                    *_ctx, _interaction, [self viewContext],
                    [self mouseEventFromNSEvent:event])) {
@@ -700,7 +776,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         [self autoCommitFloatingBuffer];
         if (macvoxel::face_controller::OnMouseDown(
                 *_ctx, _interaction, [self viewContext],
-                [self mouseEventFromNSEvent:event])) {
+                [self mouseEventFromNSEvent:event],
+                [self faceStampFn], [self faceClearBboxFn])) {
             _interaction.hover.local = [self localFromWindow:event.locationInWindow];
             _interaction.hover.has_point = YES;
         } else {
@@ -763,7 +840,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
             } else if (_interaction.anchor.tool == macvoxel::ToolKind::Face) {
                 macvoxel::face_controller::OnMouseDragged(
                     *_ctx, _interaction, [self viewContext],
-                    [self mouseEventFromNSEvent:event]);
+                    [self mouseEventFromNSEvent:event],
+                    [self faceStampFn], [self faceClearBboxFn]);
             } else if (_interaction.anchor.tool == macvoxel::ToolKind::Generator) {
                 macvoxel::generator_controller::UpdateDragOut(
                     *_ctx, _interaction, [self viewContext],
@@ -818,7 +896,9 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
             case macvoxel::ToolKind::Face:
                 macvoxel::face_controller::OnMouseUp(
                     *_ctx, _interaction, [self viewContext],
-                    [self mouseEventFromNSEvent:event]);
+                    [self mouseEventFromNSEvent:event],
+                    [self faceStampFn], [self faceCommitFn],
+                    [self faceClearBboxFn], [self faceReadBackFn]);
                 break;
             case macvoxel::ToolKind::Generator:
                 macvoxel::generator_controller::EndDragOut(_interaction);

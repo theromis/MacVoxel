@@ -1,21 +1,15 @@
 #import "GeneratorEngine.h"
+#import "VolumeTexture.h"
 
 #import <cstdio>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 
 namespace gen = macvoxel::generators;
 
 namespace {
 
-// MSL source for every generator kernel lives in src/Generators.metal,
-// shipped in the app bundle's Resources directory. Loaded as a string at
-// engine init via newLibraryWithSource: — same runtime-compile path the
-// eventual user-authored shader generator will use, just with the
-// built-in source coming from the bundle. Read the .metal file for the
-// kernel-output protocol and the Uniforms layout.
 NSString* LoadGeneratorLibrarySource() {
     NSURL* url = [NSBundle.mainBundle URLForResource:@"Generators"
                                        withExtension:@"metal"];
@@ -50,24 +44,28 @@ NSString* KernelNameForKind(gen::Kind k) {
     return nil;
 }
 
+// Mirror of Generators.metal's `Uniforms`. int3 fields are 16-byte aligned
+// in MSL; the [4]-sized arrays here carry the trailing pad.
 struct Uniforms {
-    int32_t lo[4];        // x0, y0, z0, pad
-    int32_t dims[4];      // dx, dy, dz, pad
+    int32_t lo[4];
+    int32_t dims[4];
     uint32_t palette_idx;
     uint32_t axis;
     uint32_t apex_at_max;
-    uint32_t pad;
-    float noise_scale;
-    float noise_threshold;
+    uint32_t pad0;
+    float    noise_scale;
+    float    noise_threshold;
     uint32_t noise_octaves;
     uint32_t noise_seed;
-    float torus_tube;
+    float    torus_tube;
     uint32_t perlin_palette_lo;
     uint32_t perlin_palette_hi;
+    uint32_t pad1;
+    int32_t  dispatch_lo[4];
+    int32_t  dispatch_size[4];
+    int32_t  tex_origin[4];
 };
-static_assert(sizeof(Uniforms) == 76, "Uniforms layout mismatch");
-static_assert(sizeof(macvoxel::generators::CellOut) == 16,
-              "PackedCell layout must match CellOut");
+static_assert(sizeof(Uniforms) == 128, "GeneratorUniforms layout drift");
 
 }  // namespace
 
@@ -75,13 +73,7 @@ static_assert(sizeof(macvoxel::generators::CellOut) == 16,
     id<MTLDevice> _device;
     id<MTLCommandQueue> _queue;
     id<MTLComputePipelineState> _pipelines[static_cast<size_t>(gen::Kind::Count_)];
-    // Grow-only output buffer; doubles when a request needs more cells
-    // than the current capacity.
-    id<MTLBuffer> _outBuffer;
-    NSUInteger _outCapacityCells;
-    // Single-uint atomic counter, shared storage so the host can zero
-    // it before each dispatch and read the count back without a blit.
-    id<MTLBuffer> _counterBuffer;
+    id<MTLCommandBuffer> _lastBuffer;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -125,60 +117,58 @@ static_assert(sizeof(macvoxel::generators::CellOut) == 16,
         }
     }
 
-    _counterBuffer =
-        [_device newBufferWithLength:sizeof(uint32_t)
-                              options:MTLResourceStorageModeShared];
-    _counterBuffer.label = @"GeneratorCounter";
     return self;
 }
 
-- (void)ensureOutCapacity:(NSUInteger)cells {
-    if (_outCapacityCells >= cells && _outBuffer != nil) return;
-    // Double-when-needed growth so a drag through bigger and bigger
-    // bounds doesn't realloc every frame: start from twice the current
-    // capacity (or a 4096-cell floor for first allocation), then keep
-    // doubling until it covers the request.
-    NSUInteger newCap = std::max<NSUInteger>(_outCapacityCells * 2, 4096);
-    while (newCap < cells) newCap *= 2;
-    _outBuffer = [_device newBufferWithLength:newCap * 16  // PackedCell = 4×int32
-                                       options:MTLResourceStorageModeShared];
-    _outBuffer.label = @"GeneratorOutput";
-    _outCapacityCells = newCap;
-}
-
-- (void)generateInto:(std::vector<gen::CellOut>&)out
+- (void)dispatchInto:(VolumeTexture*)texture
                 kind:(gen::Kind)kind
               bounds:(gen::Bounds3i)bounds
+          lastBounds:(gen::Bounds3i)last_bounds
               params:(const gen::Params&)params {
-    out.clear();
+    if (texture == nil) return;
     const NSUInteger ki = static_cast<NSUInteger>(kind);
     if (ki >= static_cast<NSUInteger>(gen::Kind::Count_)) return;
     id<MTLComputePipelineState> pso = _pipelines[ki];
     if (pso == nil) return;
 
-    const int32_t dx = bounds.x1 - bounds.x0 + 1;
-    const int32_t dy = bounds.y1 - bounds.y0 + 1;
-    const int32_t dz = bounds.z1 - bounds.z0 + 1;
-    if (dx <= 0 || dy <= 0 || dz <= 0) return;
-    const NSUInteger volume =
-        static_cast<NSUInteger>(dx) *
-        static_cast<NSUInteger>(dy) *
-        static_cast<NSUInteger>(dz);
-    [self ensureOutCapacity:volume];
+    // Dispatch bbox = union(bounds, last_bounds) in WORLD coords,
+    // clamped to the texture's extent, then translated to texture-local.
+    const int32_t tex_lo_x = texture.originX;
+    const int32_t tex_lo_y = texture.originY;
+    const int32_t tex_lo_z = texture.originZ;
+    const int32_t tex_hi_x = tex_lo_x + texture.sizeX - 1;
+    const int32_t tex_hi_y = tex_lo_y + texture.sizeY - 1;
+    const int32_t tex_hi_z = tex_lo_z + texture.sizeZ - 1;
 
-    // Zero the atomic counter via shared-storage CPU write — no blit
-    // needed on Apple Silicon's unified memory. The kernel reads/writes
-    // it via atomic_fetch_add, so the value visible at dispatch time is
-    // 0 and the value visible after waitUntilCompleted is the count.
-    *static_cast<uint32_t*>(_counterBuffer.contents) = 0u;
+    int32_t ux0 = bounds.x0, uy0 = bounds.y0, uz0 = bounds.z0;
+    int32_t ux1 = bounds.x1, uy1 = bounds.y1, uz1 = bounds.z1;
+    if (last_bounds.x1 >= last_bounds.x0) {
+        ux0 = std::min(ux0, last_bounds.x0);
+        uy0 = std::min(uy0, last_bounds.y0);
+        uz0 = std::min(uz0, last_bounds.z0);
+        ux1 = std::max(ux1, last_bounds.x1);
+        uy1 = std::max(uy1, last_bounds.y1);
+        uz1 = std::max(uz1, last_bounds.z1);
+    }
+    ux0 = std::max(ux0, tex_lo_x);
+    uy0 = std::max(uy0, tex_lo_y);
+    uz0 = std::max(uz0, tex_lo_z);
+    ux1 = std::min(ux1, tex_hi_x);
+    uy1 = std::min(uy1, tex_hi_y);
+    uz1 = std::min(uz1, tex_hi_z);
+    if (ux0 > ux1 || uy0 > uy1 || uz0 > uz1) return;
+
+    const int32_t dx = ux1 - ux0 + 1;
+    const int32_t dy = uy1 - uy0 + 1;
+    const int32_t dz = uz1 - uz0 + 1;
 
     Uniforms u{};
     u.lo[0] = bounds.x0;
     u.lo[1] = bounds.y0;
     u.lo[2] = bounds.z0;
-    u.dims[0] = dx;
-    u.dims[1] = dy;
-    u.dims[2] = dz;
+    u.dims[0] = bounds.x1 - bounds.x0 + 1;
+    u.dims[1] = bounds.y1 - bounds.y0 + 1;
+    u.dims[2] = bounds.z1 - bounds.z0 + 1;
     u.palette_idx = params.palette_idx;
     u.axis = params.axis;
     u.apex_at_max = params.apex_at_max;
@@ -189,14 +179,23 @@ static_assert(sizeof(macvoxel::generators::CellOut) == 16,
     u.torus_tube = params.torus_tube;
     u.perlin_palette_lo = params.perlin_palette_lo;
     u.perlin_palette_hi = params.perlin_palette_hi;
+    u.dispatch_lo[0] = ux0 - tex_lo_x;
+    u.dispatch_lo[1] = uy0 - tex_lo_y;
+    u.dispatch_lo[2] = uz0 - tex_lo_z;
+    u.dispatch_size[0] = dx;
+    u.dispatch_size[1] = dy;
+    u.dispatch_size[2] = dz;
+    u.tex_origin[0] = tex_lo_x;
+    u.tex_origin[1] = tex_lo_y;
+    u.tex_origin[2] = tex_lo_z;
 
     id<MTLCommandBuffer> cmd = [_queue commandBuffer];
     cmd.label = @"GeneratorDispatch";
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
     [enc setComputePipelineState:pso];
     [enc setBytes:&u length:sizeof(u) atIndex:0];
-    [enc setBuffer:_counterBuffer offset:0 atIndex:1];
-    [enc setBuffer:_outBuffer offset:0 atIndex:2];
+    [enc setTexture:texture.previewTexture atIndex:0];
+    [enc setTexture:texture.previewOracleTexture atIndex:1];
 
     const NSUInteger tgX = std::min<NSUInteger>(8, static_cast<NSUInteger>(dx));
     const NSUInteger tgY = std::min<NSUInteger>(8, static_cast<NSUInteger>(dy));
@@ -210,16 +209,13 @@ static_assert(sizeof(macvoxel::generators::CellOut) == 16,
         threadsPerThreadgroup:threadsPerThreadgroup];
     [enc endEncoding];
     [cmd commit];
-    [cmd waitUntilCompleted];
+    _lastBuffer = cmd;
+}
 
-    const uint32_t count = *static_cast<uint32_t*>(_counterBuffer.contents);
-    out.resize(count);
-    if (count > 0) {
-        // PackedCell == { int32, int32, int32, uint32 } == 16 bytes,
-        // matching macvoxel::generators::CellOut. Bulk copy is safe.
-        std::memcpy(out.data(), _outBuffer.contents,
-                    static_cast<size_t>(count) * sizeof(gen::CellOut));
-    }
+- (void)waitForPendingWork {
+    if (_lastBuffer == nil) return;
+    [_lastBuffer waitUntilCompleted];
+    _lastBuffer = nil;
 }
 
 @end

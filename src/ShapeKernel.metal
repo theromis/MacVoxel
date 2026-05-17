@@ -332,6 +332,73 @@ kernel void shape_line_project_main(
     }
 }
 
+// "Stamp a list of (cell, palette) entries into tex_t" — one thread
+// per buffer entry. Used by the Face tool, where CPU does the
+// flood-fill + mode-aware enumeration (per-cell target palette,
+// 0 meaning "remove this cell on commit") and the kernel just writes
+// the resulting palette into tex_t. Cells with palette == 0 are
+// stamped as 0 too; the preview won't render them but the commit
+// kernel still touches them so a Face-Remove stroke writes 0 into
+// the doc on commit.
+struct StampCellsUniforms {
+    int3 tex_origin;
+    int  _pad;
+};
+
+struct CellPalette { int x, y, z; uint palette; };
+
+kernel void shape_stamp_cells(
+    constant StampCellsUniforms& u                  [[buffer(0)]],
+    constant CellPalette* cells                     [[buffer(1)]],
+    constant uint&        cell_count                [[buffer(2)]],
+    texture3d<uint, access::write> preview          [[texture(0)]],
+    texture3d<uint, access::write> preview_oracle   [[texture(1)]],
+    uint gid                                        [[thread_position_in_grid]])
+{
+    if (gid >= cell_count) return;
+    CellPalette c = cells[gid];
+    int3 cell_local = int3(c.x, c.y, c.z) - u.tex_origin;
+    int3 dims = int3(preview.get_width(),
+                     preview.get_height(),
+                     preview.get_depth());
+    if (any(cell_local < 0) || any(cell_local >= dims)) return;
+    preview.write(uint4(c.palette, 0u, 0u, 0u), uint3(cell_local));
+    if (c.palette != 0u) {
+        preview_oracle.write(uint4(1u, 0u, 0u, 0u),
+                             uint3(uint3(cell_local) >> uint3(4u)));
+    }
+}
+
+// Per-cell commit: write each buffer entry's `palette` directly to
+// tex_a and clear the corresponding tex_t cell. Unlike `shape_commit`
+// (which iterates a bbox + applies u.mode), this kernel acts on a
+// CPU-provided cell list and writes whatever the CPU chose as the
+// target value — so it handles all four Face modes uniformly
+// (Add/Paint/Remove all collapse into "set tex_a[cell] = palette").
+kernel void shape_commit_cells(
+    constant StampCellsUniforms& u                          [[buffer(0)]],
+    constant CellPalette* cells                             [[buffer(1)]],
+    constant uint&        cell_count                        [[buffer(2)]],
+    texture3d<uint, access::read_write> tex_a               [[texture(0)]],
+    texture3d<uint, access::read_write> preview             [[texture(1)]],
+    texture3d<uint, access::write>      doc_oracle          [[texture(2)]],
+    uint gid                                                [[thread_position_in_grid]])
+{
+    if (gid >= cell_count) return;
+    CellPalette c = cells[gid];
+    int3 cell_local = int3(c.x, c.y, c.z) - u.tex_origin;
+    int3 dims = int3(tex_a.get_width(),
+                     tex_a.get_height(),
+                     tex_a.get_depth());
+    if (any(cell_local < 0) || any(cell_local >= dims)) return;
+    tex_a.write(uint4(c.palette, 0u, 0u, 0u), uint3(cell_local));
+    preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+    if (c.palette != 0u) {
+        doc_oracle.write(uint4(1u, 0u, 0u, 0u),
+                         uint3(uint3(cell_local) >> uint3(4u)));
+    }
+}
+
 // Clear-bbox kernel — zeros a 3D region of tex_t. Called between
 // strokes (and at the start of each stamp to drop the previous
 // frame's preview).

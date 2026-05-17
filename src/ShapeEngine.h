@@ -31,6 +31,15 @@ struct ShapeParams {
     int32_t tex_origin_x, tex_origin_y, tex_origin_z;
 };
 
+// One entry of the (cell, palette) buffer consumed by Face's stamp /
+// commit kernels. World cell coords. palette == 0 means "this cell
+// should become empty on commit" — the stamp kernel writes 0 to
+// tex_t (silent preview); the commit kernel writes 0 to tex_a.
+struct CellPalette {
+    int32_t x, y, z;
+    uint32_t palette;
+};
+
 }  // namespace macvoxel
 
 #ifdef __OBJC__
@@ -78,6 +87,21 @@ struct ShapeParams {
 // + a doc-texture readback to compute the per-cell history diff.
 - (void)commitShape:(const macvoxel::ShapeParams&)params
              target:(nonnull VolumeTexture*)texture;
+
+// Per-cell stamp: write each entry's palette into tex_t. The Face
+// controller's hot path uses this — CPU does the flood-fill +
+// mode-aware extrusion enumeration, the kernel just splats palettes.
+- (void)dispatchStampCells:(nonnull const macvoxel::CellPalette*)cells
+                 cellCount:(NSUInteger)cell_count
+                    target:(nonnull VolumeTexture*)texture;
+
+// Per-cell commit: write each entry's palette directly into tex_a
+// (clearing the corresponding tex_t cell). Used by the Face tool at
+// OnMouseUp — handles Add / Remove / Paint uniformly because the
+// CPU pre-computed the target value per cell.
+- (void)dispatchCommitCells:(nonnull const macvoxel::CellPalette*)cells
+                  cellCount:(NSUInteger)cell_count
+                     target:(nonnull VolumeTexture*)texture;
 
 - (void)waitForPendingWork;
 
