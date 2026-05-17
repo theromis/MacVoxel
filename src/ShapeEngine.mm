@@ -123,7 +123,6 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     id<MTLComputePipelineState> _previewPSO;
     id<MTLComputePipelineState> _projectPSO;
     id<MTLComputePipelineState> _clearPSO;
-    id<MTLComputePipelineState> _commitPSO;
     id<MTLComputePipelineState> _stampCellsPSO;
     id<MTLComputePipelineState> _commitCellsPSO;
     id<MTLComputePipelineState> _commitGenericPSO;
@@ -178,13 +177,12 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     _previewPSO = makePso(@"shape_main");
     _projectPSO = makePso(@"shape_line_project_main");
     _clearPSO   = makePso(@"shape_clear");
-    _commitPSO  = makePso(@"shape_commit");
     _stampCellsPSO  = makePso(@"shape_stamp_cells");
     _commitCellsPSO = makePso(@"shape_commit_cells");
     _commitGenericPSO = makePso(@"commit_generic");
     if (_previewPSO == nil || _projectPSO == nil || _clearPSO == nil ||
-        _commitPSO == nil || _stampCellsPSO == nil ||
-        _commitCellsPSO == nil || _commitGenericPSO == nil) {
+        _stampCellsPSO == nil || _commitCellsPSO == nil ||
+        _commitGenericPSO == nil) {
         return nil;
     }
     return self;
@@ -307,29 +305,6 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
         ((NSUInteger)u.dispatch_size[2] + tgZ - 1) / tgZ);
     [enc dispatchThreadgroups:threadgroups
         threadsPerThreadgroup:threadsPerThreadgroup];
-    [enc endEncoding];
-    [cmd commit];
-    _lastBuffer = cmd;
-}
-
-- (void)commitShape:(const macvoxel::ShapeParams&)p
-             target:(VolumeTexture*)texture {
-    if (_commitPSO == nil || texture == nil) return;
-    if (p.dispatch_size_x <= 0 || p.dispatch_size_y <= 0 ||
-        p.dispatch_size_z <= 0) return;
-
-    Uniforms u{};
-    FillUniforms(u, p);
-
-    id<MTLCommandBuffer> cmd = [_queue commandBuffer];
-    cmd.label = @"ShapeCommitDispatch";
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-    [enc setComputePipelineState:_commitPSO];
-    [enc setBytes:&u length:sizeof(u) atIndex:0];
-    [enc setTexture:texture.texture atIndex:0];
-    [enc setTexture:texture.previewTexture atIndex:1];
-    [enc setTexture:texture.oracleTexture atIndex:2];
-    Dispatch(enc, p);
     [enc endEncoding];
     [cmd commit];
     _lastBuffer = cmd;

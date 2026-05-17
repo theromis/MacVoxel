@@ -77,10 +77,6 @@ public:
                           params:params];
     }
 
-    void CommitShape(const ShapeParams& params) override {
-        [shape_ commitShape:params target:texture_];
-    }
-
     void CommitGeneric(const CommitGenericParams& params) override {
         [shape_ dispatchCommitGeneric:params target:texture_];
     }

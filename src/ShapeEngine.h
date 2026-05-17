@@ -100,14 +100,6 @@ struct CommitGenericParams {
                        x1:(int)x1 y1:(int)y1 z1:(int)z1
                    target:(nonnull VolumeTexture*)texture;
 
-// Promote the preview cells inside the dispatch bbox into the doc
-// texture + doc oracle, applying the mode rule (Add only fills
-// empty, Paint only repaints occupied, Remove zeroes any). Clears
-// the preview cells. Async; caller follows with `waitForPendingWork`
-// + a doc-texture readback to compute the per-cell history diff.
-- (void)commitShape:(const macvoxel::ShapeParams&)params
-             target:(nonnull VolumeTexture*)texture;
-
 // Per-cell stamp: write each entry's palette into tex_t. The Face
 // controller's hot path uses this — CPU does the flood-fill +
 // mode-aware extrusion enumeration, the kernel just splats palettes.

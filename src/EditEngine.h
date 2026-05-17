@@ -74,15 +74,10 @@ public:
                           const generators::Bounds3i& last_bounds,
                           const generators::Params& params) = 0;
 
-    // Promote shape/generator preview cells into tex_a + clear tex_t
-    // cells; applies the mode rule (Add only fills empty, Paint only
-    // repaints occupied, Remove zeroes any).
-    virtual void CommitShape(const ShapeParams& params) = 0;
-
-    // Generic commit — the Magica `shader_0018.glsl` pipeline.
-    // Phase 2.2+ routes Shape, Generator, Face, and Brush commits
-    // through this one method (and the underlying commit_generic
-    // MSL kernel) parameterized by `bm` + `brush` selectors.
+    // Unified commit — the Magica `shader_0018.glsl` pipeline.
+    // Phase 2.2 wired Shape + Generator onto this; Face and Brush
+    // migrations are deferred behind a `preview_rem` mask refactor
+    // (see plan note on Phase 2.3 / 2.4 visual regression).
     virtual void CommitGeneric(const CommitGenericParams& params) = 0;
 
     // Wait for every previously-enqueued kernel to drain, then blit the

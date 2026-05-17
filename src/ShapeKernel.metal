@@ -425,46 +425,6 @@ kernel void shape_clear(
     preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
 }
 
-// Commit kernel — copies non-zero preview cells into the doc texture
-// + the doc oracle, and clears the preview cells as it goes. Run at
-// OnMouseUp, dispatched over the union bbox the stroke touched.
-kernel void shape_commit(
-    constant ShapeUniforms& u                           [[buffer(0)]],
-    texture3d<uint, access::read_write> tex_a           [[texture(0)]],
-    texture3d<uint, access::read_write> preview         [[texture(1)]],
-    texture3d<uint, access::write>      doc_oracle      [[texture(2)]],
-    uint3 gid                                           [[thread_position_in_grid]])
-{
-    int3 d = int3(gid);
-    if (any(d >= u.dispatch_size)) return;
-    int3 cell_local = u.dispatch_lo + d;
-    uint p = preview.read(uint3(cell_local)).r;
-    if (p == 0u) return;
-    // Magica's mode rule applies here too. Paint can only modify
-    // existing non-empty cells; Add can only fill empty ones. The
-    // preview already filtered on these rules; we re-check defensively
-    // in case the doc changed (it shouldn't, since the preview is
-    // strictly during a stroke).
-    uint old_val = tex_a.read(uint3(cell_local)).r;
-    uint new_val = old_val;
-    if (u.mode == kModeAdd) {
-        if (old_val == 0u) new_val = p;
-    } else if (u.mode == kModeRemove) {
-        new_val = 0u;
-    } else if (u.mode == kModePaint) {
-        if (old_val != 0u) new_val = p;
-    }
-    if (new_val != old_val) {
-        tex_a.write(uint4(new_val, 0u, 0u, 0u), uint3(cell_local));
-        if (new_val != 0u) {
-            doc_oracle.write(uint4(1u, 0u, 0u, 0u),
-                             uint3(uint3(cell_local) >> uint3(4u)));
-        }
-    }
-    // Clear the preview cell either way — stroke is committed.
-    preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
-}
-
 // Generic commit kernel — the Magica `shader_0018.glsl` shape. Loops
 // over a dispatch bbox, reads doc + a source value (tex_t or constant
 // fill), blends via `bm`, writes the result to tex_a. Clears tex_t in
