@@ -259,20 +259,17 @@ void GeneratorTool::Commit(EditorContext& ctx, InteractionState& state,
         bb.y1 = std::min(union_y1_, vol.y1);
         bb.z1 = std::min(union_z1_, vol.z1);
         if (bb.x0 <= bb.x1 && bb.y0 <= bb.y1 && bb.z0 <= bb.z1) {
-            ShapeParams cp{};
-            cp.mode = static_cast<uint32_t>(state.anchor.mode);
-            cp.palette_idx = ctx.tool.palette_idx;
+            CommitGenericParams cp{};
             cp.dispatch_lo_x = bb.x0 - vol.x0;
             cp.dispatch_lo_y = bb.y0 - vol.y0;
             cp.dispatch_lo_z = bb.z0 - vol.z0;
             cp.dispatch_size_x = bb.x1 - bb.x0 + 1;
             cp.dispatch_size_y = bb.y1 - bb.y0 + 1;
             cp.dispatch_size_z = bb.z1 - bb.z0 + 1;
-            cp.vol_min_x = vol.x0; cp.vol_min_y = vol.y0; cp.vol_min_z = vol.z0;
-            cp.vol_max_x = vol.x1; cp.vol_max_y = vol.y1; cp.vol_max_z = vol.z1;
-            cp.tex_origin_x = vol.x0; cp.tex_origin_y = vol.y0;
-            cp.tex_origin_z = vol.z0;
-            engine.CommitShape(cp);
+            cp.bm = static_cast<uint32_t>(state.anchor.mode) + 1u;
+            cp.brush = 0u;  // source = tex_t (preview)
+            cp.fill_palette = ctx.tool.palette_idx;
+            engine.CommitGeneric(cp);
 
             std::vector<uint8_t> post;
             engine.Readback(bb, &post);
