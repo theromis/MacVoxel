@@ -224,7 +224,12 @@ bool FaceTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
     ctx.preview_active = true;
     ctx.history.BeginOp();
 
+    ResetDispatchHash();
     const int d = ComputeFaceVoxels(state, vc, e);
+    // First frame: prime the hash to whatever we're about to dispatch.
+    uint64_t h = (static_cast<uint64_t>(static_cast<uint32_t>(d)) << 32) |
+                 static_cast<uint64_t>(static_cast<uint32_t>(ctx.tool.face_with));
+    ShouldDispatch(h | 1ULL);
     Refresh(ctx, state, d, engine);
     return true;
 }
@@ -233,7 +238,9 @@ void FaceTool::OnMouseDragged(EditorContext& ctx, InteractionState& state,
                                const ViewContext& vc, const MouseEvent& e,
                                EditEngine& engine) {
     const int d = ComputeFaceVoxels(state, vc, e);
-    if (d == applied_d_ && ctx.tool.face_with == applied_with_) return;
+    uint64_t h = (static_cast<uint64_t>(static_cast<uint32_t>(d)) << 32) |
+                 static_cast<uint64_t>(static_cast<uint32_t>(ctx.tool.face_with));
+    if (!ShouldDispatch(h | 1ULL)) return;
     Refresh(ctx, state, d, engine);
 }
 

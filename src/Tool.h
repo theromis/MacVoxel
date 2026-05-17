@@ -74,11 +74,13 @@ public:
 
 protected:
     // Subclasses override to produce a stable hash of "what would the
-    // next kernel dispatch write." OnMouseDragged calls ShouldDispatch
-    // with that hash; identical hash → no work to do, early-return.
-    // Returning 0 disables the check (always dispatch). 2^-64 collision
-    // rate is fine in practice.
+    // next kernel dispatch write." OnMouseDragged (or Tick, for tools
+    // whose dirty checking is per-frame rather than per-event) calls
+    // ShouldDispatch with that hash; identical hash → no work to do,
+    // early-return. Returning 0 disables the check (always dispatch).
+    // 2^-64 collision rate is fine in practice.
     virtual uint64_t DispatchParamsHash(const EditorContext& /*ctx*/,
+                                        const InteractionState& /*state*/,
                                         const ViewContext& /*vc*/,
                                         const MouseEvent& /*e*/) const {
         return 0;

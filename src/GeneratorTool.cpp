@@ -112,9 +112,6 @@ void GeneratorTool::Regenerate(EditorContext& ctx, InteractionState& /*state*/,
     ExtendUnion(bounds);
 
     bounds_ = bounds;
-    last_kind_ = ctx.generator.active_kind;
-    last_bounds_ = bounds;
-    last_params_ = p;
 }
 
 bool GeneratorTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
@@ -150,6 +147,7 @@ bool GeneratorTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
     active_ = true;
     state.gen_gizmo.active = true;  // mirrored for SelectionOverlay
     ResetUnion();
+    ResetDispatchHash();
     ctx.history.BeginOp();
     Regenerate(ctx, state, b, engine);
     return true;
@@ -222,25 +220,36 @@ void GeneratorTool::Tick(EditorContext& ctx, InteractionState& state,
         return;
     }
 
-    // Dirty check: bounds (memcmp-safe — Bounds3i is a POD), kind,
-    // palette, and the per-kind params we care about. Param changes
-    // flow in from the panel UI.
+    // Dirty check: hash bounds + kind + palette + the per-kind params
+    // we care about, route through the base class's ShouldDispatch.
+    // Param changes flow in from the panel UI.
     const auto& gs = ctx.generator;
-    const uint8_t cur_palette = ctx.tool.palette_idx;
-    const bool dirty =
-        gs.active_kind != last_kind_ ||
-        std::memcmp(&bounds_, &last_bounds_, sizeof(bounds_)) != 0 ||
-        cur_palette != last_params_.palette_idx ||
-        gs.params.axis != last_params_.axis ||
-        gs.params.apex_at_max != last_params_.apex_at_max ||
-        gs.params.noise_scale != last_params_.noise_scale ||
-        gs.params.noise_threshold != last_params_.noise_threshold ||
-        gs.params.noise_octaves != last_params_.noise_octaves ||
-        gs.params.noise_seed != last_params_.noise_seed ||
-        gs.params.torus_tube != last_params_.torus_tube ||
-        gs.params.perlin_palette_lo != last_params_.perlin_palette_lo ||
-        gs.params.perlin_palette_hi != last_params_.perlin_palette_hi;
-    if (!dirty) return;
+    auto mix = [](uint64_t h, uint64_t v) {
+        return h ^ (v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+    };
+    auto mix_f = [&](uint64_t h, float f) {
+        union { float fv; uint32_t uv; } u{}; u.fv = f;
+        return mix(h, u.uv);
+    };
+    uint64_t h = 0xcbf29ce484222325ULL;
+    h = mix(h, static_cast<uint64_t>(gs.active_kind));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(bounds_.x0)));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(bounds_.y0)));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(bounds_.z0)));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(bounds_.x1)));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(bounds_.y1)));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(bounds_.z1)));
+    h = mix(h, ctx.tool.palette_idx);
+    h = mix(h, gs.params.axis);
+    h = mix(h, gs.params.apex_at_max ? 1u : 0u);
+    h = mix_f(h, gs.params.noise_scale);
+    h = mix_f(h, gs.params.noise_threshold);
+    h = mix(h, static_cast<uint32_t>(gs.params.noise_octaves));
+    h = mix(h, static_cast<uint32_t>(gs.params.noise_seed));
+    h = mix_f(h, gs.params.torus_tube);
+    h = mix(h, gs.params.perlin_palette_lo);
+    h = mix(h, gs.params.perlin_palette_hi);
+    if (!ShouldDispatch(h | 1ULL)) return;
 
     Regenerate(ctx, state, bounds_, engine);
 }

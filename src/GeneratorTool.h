@@ -68,9 +68,6 @@ private:
     // Persistent gizmo state.
     bool active_ = false;
     generators::Bounds3i bounds_{};
-    generators::Kind last_kind_ = generators::Kind::Ellipsoid;
-    generators::Bounds3i last_bounds_{};
-    generators::Params last_params_{};
     // Last bounds we actually dispatched to the GPU. Read at the start
     // of the next Regenerate to compute the kernel's clear-union.
     generators::Bounds3i last_bounds_dispatched_{};

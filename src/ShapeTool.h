@@ -36,6 +36,12 @@ public:
     void Cancel(EditorContext& ctx, InteractionState& state,
                 EditEngine& engine) override;
 
+protected:
+    uint64_t DispatchParamsHash(const EditorContext& ctx,
+                                const InteractionState& state,
+                                const ViewContext& vc,
+                                const MouseEvent& e) const override;
+
 private:
     void DispatchPreview(EditorContext& ctx, InteractionState& state,
                          const ViewContext& vc, const MouseEvent& e,

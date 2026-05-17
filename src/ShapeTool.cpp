@@ -353,7 +353,10 @@ bool ShapeTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
     ctx.preview_active = true;
     dragging_ = true;
     ResetBboxes();
+    ResetDispatchHash();
     ctx.history.BeginOp();
+    // First frame always dispatches — the hash starts cleared.
+    ShouldDispatch(DispatchParamsHash(ctx, state, vc, e));
     DispatchPreview(ctx, state, vc, e, kind, engine);
     return true;
 }
@@ -364,7 +367,55 @@ void ShapeTool::OnMouseDragged(EditorContext& ctx, InteractionState& state,
     if (!state.anchor.has_anchor) return;
     const int kind = ShapeKindForTool(state.anchor.tool);
     if (kind < 0) return;
+    // Skip the kernel dispatch when nothing the kernel cares about has
+    // changed since the previous mouseDragged event (CLAUDE.md:339-347
+    // perf rule). Endpoint cell is the dominant signal — most events
+    // produce duplicate hashes during a slow drag.
+    if (!ShouldDispatch(DispatchParamsHash(ctx, state, vc, e))) return;
     DispatchPreview(ctx, state, vc, e, kind, engine);
+}
+
+uint64_t ShapeTool::DispatchParamsHash(const EditorContext& ctx,
+                                       const InteractionState& state,
+                                       const ViewContext& vc,
+                                       const MouseEvent& e) const {
+    const auto& a = ctx.tool;
+    auto mix = [](uint64_t h, uint64_t v) {
+        return h ^ (v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+    };
+
+    shapes::Vec3i endpoint{0, 0, 0};
+    int face_axis = 0;
+    if (state.anchor.has_anchor) {
+        endpoint = state.anchor.cell;
+        int axis = state.anchor.face_axis;
+        vc.ComputeLineEndpoint(e.local.x, e.local.y, state.anchor.mode,
+                               &endpoint, &axis);
+        face_axis = axis;
+    }
+    uint64_t h = 0xcbf29ce484222325ULL;  // FNV offset
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(endpoint.x)));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(endpoint.y)));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(endpoint.z)));
+    h = mix(h, static_cast<uint64_t>(face_axis));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(a.tool)));
+    h = mix(h, static_cast<uint64_t>(a.brush_size));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(a.brush_shape)));
+    h = mix(h, static_cast<uint64_t>(a.brush_3d ? 1 : 0));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(a.mode)));
+    h = mix(h, static_cast<uint64_t>(a.circle_fill | (a.circle_even << 1) |
+                                      (a.square_fill << 2) | (a.square_even << 3) |
+                                      (a.box_fill << 4)));
+    h = mix(h, static_cast<uint64_t>(static_cast<uint32_t>(a.line_mode)));
+    // For project-mode line the kernel reads CPU-enumerated cells
+    // derived from the screen-space segment; sub-cell cursor movement
+    // changes the cell set so include raw pixels.
+    if (a.tool == ToolKind::Line && a.line_mode == LineMode::Project) {
+        union { float f; uint32_t u; } pe{};
+        pe.f = e.local.x; h = mix(h, pe.u);
+        pe.f = e.local.y; h = mix(h, pe.u);
+    }
+    return h | 1ULL;  // never 0 (Tool::ShouldDispatch treats 0 as "always dispatch")
 }
 
 void ShapeTool::OnMouseUp(EditorContext& ctx, InteractionState& state,
