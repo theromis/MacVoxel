@@ -6,7 +6,6 @@
 #include "EditHistory.h"
 #include "EditorContext.h"
 #include "Input.h"
-#include "PreviewOverlay.h"  // ctx.preview.active flag
 #include "Shapes.h"
 #include "ShapeEngine.h"
 #include "ViewContext.h"
@@ -399,7 +398,7 @@ bool OnMouseDown(EditorContext& ctx, InteractionState& state,
         return false;
     }
     state.drag_mode = DragMode::Shape;
-    ctx.preview.active = true;
+    ctx.preview_active = true;
     ctx.history.BeginOp();
     DispatchPreview(ctx, state, vc, e, kind, preview, preview_project);
     return true;
@@ -429,7 +428,7 @@ void OnMouseUp(EditorContext& ctx, InteractionState& state,
     if (a.union_bbox_x0 == INT32_MAX) {
         // No stamps actually fired (e.g. anchor click that didn't
         // dispatch). Treat as a no-op.
-        ctx.preview.active = false;
+        ctx.preview_active = false;
         state.anchor.has_anchor = false;
         ctx.history.AbandonOp();
         return;
@@ -445,7 +444,7 @@ void OnMouseUp(EditorContext& ctx, InteractionState& state,
     bb.y1 = std::min(a.union_bbox_y1, vol.y1);
     bb.z1 = std::min(a.union_bbox_z1, vol.z1);
     if (bb.x0 > bb.x1 || bb.y0 > bb.y1 || bb.z0 > bb.z1) {
-        ctx.preview.active = false;
+        ctx.preview_active = false;
         state.anchor.has_anchor = false;
         ctx.history.AbandonOp();
         return;
@@ -499,7 +498,7 @@ void OnMouseUp(EditorContext& ctx, InteractionState& state,
         }
     }
 
-    ctx.preview.active = false;
+    ctx.preview_active = false;
     state.anchor.has_anchor = false;
     ctx.history.CommitOp();
 }

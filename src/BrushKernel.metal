@@ -48,7 +48,8 @@ struct Uniforms {
     float r2;           // (max_dim * 0.5)^2 — circle/sphere radius squared
 };
 
-// Apply the mode's value-rewrite rule. Mirrors BrushOps::ComputeNewCellValue.
+// Apply the mode's value-rewrite rule: Add fills empty cells with the
+// palette index, Remove clears any cell, Paint repaints non-empty cells.
 static uint compute_new_value(uint old_val, uint mode, uint palette_idx) {
     if (mode == kModeAdd)    return old_val == 0u ? palette_idx : old_val;
     if (mode == kModeRemove) return 0u;
@@ -105,7 +106,9 @@ kernel void brush_main(
     uint old_val = tex_a.read(uint3(tex_coord)).r;
     uint new_val = compute_new_value(old_val, u.mode, u.palette_idx);
 
-    // Out-of-volume create-non-empty drop (matches BrushOps::apply policy).
+    // Out-of-volume create-non-empty drop (EditVolume policy: creating a
+    // new non-empty cell outside the volume is silently ignored; in-place
+    // deletes / repaints of cells that already exist outside are allowed).
     bool in_vol = all(cell >= u.vol_min) && all(cell <= u.vol_max);
     if (new_val != 0u && old_val == 0u && !in_vol) return;
     if (new_val == old_val) return;

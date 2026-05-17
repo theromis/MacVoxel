@@ -157,9 +157,9 @@ struct InteractionState {
     // distance from the anchor; while it's still false, a d=0 commit
     // is treated as d=1 so a click without drag applies a single
     // 1-voxel layer. `applied_d` and `applied_with` snapshot the
-    // d/face_with values currently materialised into the
-    // PreviewOverlay so each frame only does O(seed_cells × Δd) work
-    // as the user drags through layer boundaries.
+    // d/face_with values currently materialised into the preview
+    // texture so each frame only does O(seed_cells × Δd) work as the
+    // user drags through layer boundaries.
     struct FaceTool {
         int sign = 0;
         uint8_t seed_color = 0;
@@ -190,7 +190,7 @@ struct InteractionState {
 
     // Generator gizmo. After the user releases the mouse from a
     // Generator-tool drag-out, the box stays visible (along with the
-    // PreviewOverlay cells) until they confirm. Clicking outside the
+    // preview-texture cells) until they confirm. Clicking outside the
     // box commits the preview through EditHistory; Esc drops the
     // overlay without a commit. The bounds + active-kind cache lets
     // the per-frame loop detect param/kind changes from the panel

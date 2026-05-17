@@ -6,7 +6,6 @@
 #include "FloatingBuffer.h"
 #include "GeneratorState.h"
 #include "PanelState.h"
-#include "PreviewOverlay.h"
 #include "RenderState.h"
 #include "Selection.h"
 #include "ToolState.h"
@@ -31,7 +30,12 @@ struct EditorContext {
     RenderProgress render_progress;
     GeneratorState generator;
     FloatingBuffer floating_buffer;
-    PreviewOverlay preview;
+    // True while a tool is actively writing the GPU preview texture
+    // (tex_t) — gates the rasterizer's `preview_active` uniform so the
+    // composite pass only runs during a live shape/face/generator
+    // gesture. Tools set this on gesture-begin and clear it on commit
+    // or cancel.
+    bool preview_active = false;
     EditHistory history;
     Clipboard clipboard;
     PanelState panel;

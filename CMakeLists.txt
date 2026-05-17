@@ -56,7 +56,6 @@ set(APP_SOURCES
     src/ViewContext.cpp
     src/BoxSelectController.cpp
     src/BrushController.cpp
-    src/BrushOps.cpp
     src/FaceController.cpp
     src/FloodSelectController.cpp
     src/GeneratorController.cpp
@@ -64,7 +63,6 @@ set(APP_SOURCES
     src/MetalScene.mm
     src/MoveSelectController.cpp
     src/OverlayDraw.cpp
-    src/PreviewOps.cpp
     src/ShapeController.cpp
     src/XformHandleController.cpp
     # SwiftUI shell — Obj-C++ bridge over EditorContext. Swift code in

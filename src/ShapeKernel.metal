@@ -15,9 +15,8 @@
 //   * Shape: Line, Circle, Square, Box  (kinds 0..3)
 //   * Fill: filled OR shell (`shape_fill`)
 //   * Brush footprint: Square (L_inf) or Circle (L_2 / Euclidean)
-//   * Brush dim: 3D only — 2D-slice variants fall back to the CPU
-//     PreviewOverlay path in ShapeController (kernel returns nothing
-//     when `brush_3d == 0`).
+//   * Brush dim: 3D only — kernel returns nothing when `brush_3d == 0`
+//     (2D-slice variants are not yet implemented).
 //   * Mode: Add, Paint, Remove (Remove writes 0 to tex_t for now;
 //     end-of-stroke commit handles the actual cell removal).
 

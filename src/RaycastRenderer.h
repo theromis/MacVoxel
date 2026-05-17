@@ -16,11 +16,13 @@ namespace macvoxel { struct EditorContext; }
 //     (default 256³). Per-cell lookup is a direct `tex.read(uint3)`.
 //     Maintained by the `VolumeTexture` helper, which uploads dirty
 //     16³ chunks from `doc.volume_shadow` on geometry_version change.
-//   * Overlay slots: coarse-grid + chunk-pool buffers for the floating-
-//     buffer (selection lift/paste/move) and preview-removals
-//     (Remove/Paint preview). Those stay sparse — they're small (one
-//     brush footprint) and can wander outside the edit volume during
-//     a drag, which the dense doc texture can't represent.
+//   * FloatingBuffer slot: coarse-grid + chunk-pool buffers for the
+//     selection lift/paste/move. Stays sparse because the FB can wander
+//     outside the edit volume during a drag, which the dense doc
+//     texture can't represent.
+//   * Preview texture: dense R8Uint, same dims as the doc. Composited
+//     over the doc by the fragment shader when `preview_active != 0`.
+//     Filled by ShapeEngine / GeneratorEngine kernels during a gesture.
 //   * Palette: 256 RGBA floats.
 @interface RaycastRenderer : NSObject
 

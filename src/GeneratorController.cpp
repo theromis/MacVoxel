@@ -7,7 +7,6 @@
 #include "GeneratorState.h"
 #include "Input.h"
 #include "OverlayDraw.h"
-#include "PreviewOverlay.h"   // ctx.preview.active flag
 #include "ShapeController.h"
 #include "ShapeEngine.h"      // ShapeParams (for commit kernel)
 #include "ViewContext.h"
@@ -106,7 +105,7 @@ void ExtendUnion(InteractionState& state, generators::Bounds3i b) {
 void Regenerate(EditorContext& ctx, InteractionState& state,
                 generators::Bounds3i bounds,
                 const GenerateFn& generate) {
-    ctx.preview.active = true;
+    ctx.preview_active = true;
 
     generators::Params p = ctx.generator.params;
     p.palette_idx = ctx.tool.palette_idx;
@@ -328,7 +327,7 @@ void Commit(EditorContext& ctx, InteractionState& state,
     }
 
     ctx.history.CommitOp();
-    ctx.preview.active = false;
+    ctx.preview_active = false;
     state.gen_gizmo.active = false;
     state.gen_gizmo.active_drag_face = -1;
     ResetUnion(state);
@@ -346,7 +345,7 @@ void Cancel(EditorContext& ctx, InteractionState& state,
                  state.gen_gizmo.last_bounds_dispatched, p);
     }
     ctx.history.AbandonOp();
-    ctx.preview.active = false;
+    ctx.preview_active = false;
     state.gen_gizmo.active = false;
     state.gen_gizmo.active_drag_face = -1;
     ResetUnion(state);

@@ -14,8 +14,8 @@ namespace macvoxel {
 //   z ∈ [0, 255]      (the floor grid lives at z=0)
 //
 // Edits that would create a non-empty cell outside the volume are
-// silently dropped at the cell level (BrushOps, PreviewOps commit,
-// FloatingBuffer commit, paste). Deletes are unrestricted so any cells
+// silently dropped at the cell level (brush / shape / face / generator
+// kernels, FloatingBuffer commit, paste). Deletes are unrestricted so any cells
 // that exist outside the volume — e.g. opened from a .vox with an
 // unusual scene-graph translation — can still be cleaned up by the user.
 struct EditVolume {

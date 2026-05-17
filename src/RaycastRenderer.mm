@@ -11,7 +11,6 @@
 
 #include "Document.h"
 #include "FloatingBuffer.h"
-#include "PreviewOverlay.h"
 
 namespace {
 
@@ -21,36 +20,26 @@ struct Uniforms {
     float _pad0;
     simd::float3 light_dir;
     float _pad1;
-    // Overlay additions slot — a sparse grid the shader DDA samples
+    // FloatingBuffer slot — a sparse grid the shader DDA samples
     // alongside the doc texture. Renders "on top of" the doc wherever
-    // non-zero. Two mutually-exclusive sources share the slot:
-    //   1. FloatingBuffer.grid for selection lift / paste / move-drag /
-    //      rotate / flip — `buf_offset` is the running drag delta.
-    //   2. PreviewOverlay.additions for shape / face / generator tool
-    //      previews — no offset; cells are at their final coords.
-    // When `buf_active == 0` all buf_* fields are ignored.
-    simd::int3 buf_coarse_min;
+    // non-zero. Used for selection lift / paste / move-drag / rotate /
+    // flip; `fb_offset` is the running drag delta (which can place the
+    // FB outside the edit volume, hence the sparse representation).
+    // When `fb_active == 0` all fb_* fields are ignored.
+    simd::int3 fb_coarse_min;
     int _pad2;
-    simd::int3 buf_coarse_dim;
+    simd::int3 fb_coarse_dim;
     int _pad3;
-    simd::int3 buf_offset;
-    int buf_active;
-    // Preview removals slot — only set during a tool preview. Marks doc
-    // cells the preview wants to appear empty (Remove / Paint / Add-inset
-    // strokes). Same coarse-grid + chunk-pool layout as the additions
-    // slot; any non-zero byte means "hide the doc cell here".
-    simd::int3 rem_coarse_min;
-    int _pad4;
-    simd::int3 rem_coarse_dim;
-    int rem_active;
+    simd::int3 fb_offset;
+    int fb_active;
     // Edit-volume bounds in cell coords. `box_min` is inclusive, `box_max`
     // is exclusive (e.g. EditVolume{x0=-128, x1=127} → box_min.x=-128,
     // box_max.x=128). Doubles as the doc texture's index space:
     // `tex_a.read(uint3(cell - int3(box_min)))`.
     simd::float3 box_min;
-    float _pad5;
+    float _pad4;
     simd::float3 box_max;
-    float _pad6;
+    float _pad5;
     // Preview-tex slot. When `preview_active != 0` the fragment
     // shader samples `preview_tex` (dense, same dims as the doc tex)
     // for each cell after the doc lookup; non-zero preview cells
@@ -58,9 +47,9 @@ struct Uniforms {
     // oracle (`preview_oracle`) so we don't pay a per-cell read
     // through chunks the preview hasn't touched.
     int preview_active;
+    int _pad6;
     int _pad7;
     int _pad8;
-    int _pad9;
 };
 
 NSString* const kShaderSource = @R"MSL(
@@ -78,24 +67,20 @@ struct Uniforms {
     float    _pad0;
     float3   light_dir;
     float    _pad1;
-    int3     buf_coarse_min;
+    int3     fb_coarse_min;
     int      _pad2;
-    int3     buf_coarse_dim;
+    int3     fb_coarse_dim;
     int      _pad3;
-    int3     buf_offset;
-    int      buf_active;
-    int3     rem_coarse_min;
-    int      _pad4;
-    int3     rem_coarse_dim;
-    int      rem_active;
+    int3     fb_offset;
+    int      fb_active;
     float3   box_min;
-    float    _pad5;
+    float    _pad4;
     float3   box_max;
-    float    _pad6;
+    float    _pad5;
     int      preview_active;
+    int      _pad6;
     int      _pad7;
     int      _pad8;
-    int      _pad9;
 };
 
 struct Chunk {
@@ -208,10 +193,8 @@ fragment float4 raycast_fragment(
     VertOut in [[stage_in]],
     constant Uniforms& u [[buffer(0)]],
     constant float4* palette [[buffer(1)]],
-    device const uint* buf_coarse_grid [[buffer(2)]],
-    device const Chunk* buf_chunk_pool [[buffer(3)]],
-    device const uint* rem_coarse_grid [[buffer(4)]],
-    device const Chunk* rem_chunk_pool [[buffer(5)]],
+    device const uint* fb_coarse_grid [[buffer(2)]],
+    device const Chunk* fb_chunk_pool [[buffer(3)]],
     texture3d<uint, access::read> tex_a [[texture(0)]],
     texture3d<uint, access::read> doc_oracle [[texture(1)]],
     texture3d<uint, access::read> preview_tex [[texture(2)]],
@@ -243,11 +226,11 @@ fragment float4 raycast_fragment(
     // geometry from spinning the DDA in pure void.
     float3 aabb_min = u.box_min;
     float3 aabb_max = u.box_max;
-    if (u.buf_active != 0) {
-        float3 b_min = float3(u.buf_coarse_min) * float(kChunkSize)
-                     + float3(u.buf_offset);
-        float3 b_max = float3(u.buf_coarse_min + u.buf_coarse_dim) * float(kChunkSize)
-                     + float3(u.buf_offset);
+    if (u.fb_active != 0) {
+        float3 b_min = float3(u.fb_coarse_min) * float(kChunkSize)
+                     + float3(u.fb_offset);
+        float3 b_max = float3(u.fb_coarse_min + u.fb_coarse_dim) * float(kChunkSize)
+                     + float3(u.fb_offset);
         aabb_min = min(aabb_min, b_min);
         aabb_max = max(aabb_max, b_max);
     }
@@ -334,36 +317,37 @@ fragment float4 raycast_fragment(
             }
         }
 
-        // Buffer-side lookup (unchanged — overlay slots stay sparse).
-        uint pool_idx_buf = 0u;
-        int3 chunk_c_buf = int3(0);
-        bool buf_in = false;
-        if (u.buf_active != 0) {
-            int3 cell_buf = cell - u.buf_offset;
-            chunk_c_buf.x = cell_buf.x >> int(kChunkBits);
-            chunk_c_buf.y = cell_buf.y >> int(kChunkBits);
-            chunk_c_buf.z = cell_buf.z >> int(kChunkBits);
-            int3 cgb = chunk_c_buf - u.buf_coarse_min;
-            buf_in = (cgb.x >= 0 && cgb.y >= 0 && cgb.z >= 0 &&
-                      cgb.x < u.buf_coarse_dim.x &&
-                      cgb.y < u.buf_coarse_dim.y &&
-                      cgb.z < u.buf_coarse_dim.z);
-            if (buf_in) {
+        // FloatingBuffer-side lookup (sparse — FB can wander outside the
+        // edit volume during a drag, so it stays in the coarse+pool form).
+        uint pool_idx_fb = 0u;
+        int3 chunk_c_fb = int3(0);
+        bool fb_in = false;
+        if (u.fb_active != 0) {
+            int3 cell_fb = cell - u.fb_offset;
+            chunk_c_fb.x = cell_fb.x >> int(kChunkBits);
+            chunk_c_fb.y = cell_fb.y >> int(kChunkBits);
+            chunk_c_fb.z = cell_fb.z >> int(kChunkBits);
+            int3 cgb = chunk_c_fb - u.fb_coarse_min;
+            fb_in = (cgb.x >= 0 && cgb.y >= 0 && cgb.z >= 0 &&
+                    cgb.x < u.fb_coarse_dim.x &&
+                    cgb.y < u.fb_coarse_dim.y &&
+                    cgb.z < u.fb_coarse_dim.z);
+            if (fb_in) {
                 uint b_idx = uint(cgb.x) +
-                             uint(cgb.y) * uint(u.buf_coarse_dim.x) +
-                             uint(cgb.z) * uint(u.buf_coarse_dim.x) * uint(u.buf_coarse_dim.y);
-                pool_idx_buf = buf_coarse_grid[b_idx];
+                             uint(cgb.y) * uint(u.fb_coarse_dim.x) +
+                             uint(cgb.z) * uint(u.fb_coarse_dim.x) * uint(u.fb_coarse_dim.y);
+                pool_idx_fb = fb_coarse_grid[b_idx];
             }
         }
 
-        // Outside the union of doc volume + buf extent: ray has exited.
-        if (!doc_in && !buf_in) {
+        // Outside the union of doc volume + FB extent: ray has exited.
+        if (!doc_in && !fb_in) {
             float3 bg = float3(0.118, 0.118, 0.18);
             return float4(bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max), 1.0);
         }
 
         // Hit detection. Preview-tex wins over everything when active,
-        // then buf (FB / legacy preview), then doc.
+        // then FB, then doc.
         if (val_preview != 0u) {
             float3 grid_normal = float3(0.0);
             if (last_axis == 0) grid_normal.x = -float(step_dir.x);
@@ -375,13 +359,13 @@ fragment float4 raycast_fragment(
             float3 base = palette[val_preview].rgb;
             return float4(base * lambert, 1.0);
         }
-        if (pool_idx_buf != 0u) {
-            int3 cell_buf = cell - u.buf_offset;
-            uint lx = uint(cell_buf.x) & kChunkMask;
-            uint ly = uint(cell_buf.y) & kChunkMask;
-            uint lz = uint(cell_buf.z) & kChunkMask;
+        if (pool_idx_fb != 0u) {
+            int3 cell_fb = cell - u.fb_offset;
+            uint lx = uint(cell_fb.x) & kChunkMask;
+            uint ly = uint(cell_fb.y) & kChunkMask;
+            uint lz = uint(cell_fb.z) & kChunkMask;
             uint local_idx = lx + ly * kChunkSize + lz * kChunkSize * kChunkSize;
-            uint val = uint(buf_chunk_pool[pool_idx_buf - 1u].cells[local_idx]);
+            uint val = uint(fb_chunk_pool[pool_idx_fb - 1u].cells[local_idx]);
             if (val != 0u) {
                 float3 grid_normal = float3(0.0);
                 if (last_axis == 0) grid_normal.x = -float(step_dir.x);
@@ -395,55 +379,23 @@ fragment float4 raycast_fragment(
             }
         }
         if (val_doc != 0u) {
-            // Preview removals: skip doc cells the active preview wants to
-            // appear empty (Remove / Paint / Add-inset previews stage their
-            // hidden cells here so the doc texture stays untouched).
-            if (u.rem_active != 0) {
-                int3 chunk_c;
-                chunk_c.x = cell.x >> int(kChunkBits);
-                chunk_c.y = cell.y >> int(kChunkBits);
-                chunk_c.z = cell.z >> int(kChunkBits);
-                int3 rgc = chunk_c - u.rem_coarse_min;
-                if (rgc.x >= 0 && rgc.y >= 0 && rgc.z >= 0 &&
-                    rgc.x < u.rem_coarse_dim.x &&
-                    rgc.y < u.rem_coarse_dim.y &&
-                    rgc.z < u.rem_coarse_dim.z) {
-                    uint r_idx = uint(rgc.x) +
-                                 uint(rgc.y) * uint(u.rem_coarse_dim.x) +
-                                 uint(rgc.z) * uint(u.rem_coarse_dim.x) *
-                                               uint(u.rem_coarse_dim.y);
-                    uint pool_idx_rem = rem_coarse_grid[r_idx];
-                    if (pool_idx_rem != 0u) {
-                        uint lx = uint(cell.x) & kChunkMask;
-                        uint ly = uint(cell.y) & kChunkMask;
-                        uint lz = uint(cell.z) & kChunkMask;
-                        uint local_idx = lx + ly * kChunkSize +
-                                         lz * kChunkSize * kChunkSize;
-                        if (rem_chunk_pool[pool_idx_rem - 1u].cells[local_idx] != 0u) {
-                            val_doc = 0u;
-                        }
-                    }
-                }
-            }
-            if (val_doc != 0u) {
-                float3 grid_normal = float3(0.0);
-                if (last_axis == 0) grid_normal.x = -float(step_dir.x);
-                else if (last_axis == 1) grid_normal.y = -float(step_dir.y);
-                else if (last_axis == 2) grid_normal.z = -float(step_dir.z);
-                float3 world_normal = float3(grid_normal.x, grid_normal.z, -grid_normal.y);
-                float ndl = max(dot(world_normal, u.light_dir), 0.0);
-                float lambert = 0.3 + 0.7 * ndl;
-                float3 base = palette[val_doc].rgb;
-                return float4(base * lambert, 1.0);
-            }
+            float3 grid_normal = float3(0.0);
+            if (last_axis == 0) grid_normal.x = -float(step_dir.x);
+            else if (last_axis == 1) grid_normal.y = -float(step_dir.y);
+            else if (last_axis == 2) grid_normal.z = -float(step_dir.z);
+            float3 world_normal = float3(grid_normal.x, grid_normal.z, -grid_normal.y);
+            float ndl = max(dot(world_normal, u.light_dir), 0.0);
+            float lambert = 0.3 + 0.7 * ndl;
+            float3 base = palette[val_doc].rgb;
+            return float4(base * lambert, 1.0);
         }
 
         // No hit at this cell. If both the doc oracle says this chunk
-        // is empty AND the buf pool slot here is empty, coarse-skip to
+        // is empty AND the FB pool slot here is empty, coarse-skip to
         // whichever chunk boundary comes first along the ray. Otherwise
-        // cell-step (the chunk we're in has either doc or buf cells
+        // cell-step (the chunk we're in has either doc or FB cells
         // and we need to keep sampling per cell).
-        if (doc_chunk_empty && pool_idx_buf == 0u && preview_chunk_empty) {
+        if (doc_chunk_empty && pool_idx_fb == 0u && preview_chunk_empty) {
             float3 chunk_min_doc = float3(doc_chunk_c) * float(kChunkSize);
             float3 chunk_max_doc = chunk_min_doc + float(kChunkSize);
             float3 exit_face_doc = select(chunk_min_doc, chunk_max_doc, step_dir > 0);
@@ -453,22 +405,22 @@ fragment float4 raycast_fragment(
             if (step_dir.z == 0) t_face_doc.z = INFINITY;
             float t_exit_doc = min(min(t_face_doc.x, t_face_doc.y), t_face_doc.z);
 
-            float t_exit_buf = INFINITY;
-            float3 t_face_buf = float3(INFINITY);
-            if (u.buf_active != 0) {
-                float3 chunk_min_buf = float3(chunk_c_buf) * float(kChunkSize)
-                                     + float3(u.buf_offset);
-                float3 chunk_max_buf = chunk_min_buf + float(kChunkSize);
-                float3 exit_face_buf = select(chunk_min_buf, chunk_max_buf, step_dir > 0);
-                t_face_buf = (exit_face_buf - ray_origin) * inv_dir;
-                if (step_dir.x == 0) t_face_buf.x = INFINITY;
-                if (step_dir.y == 0) t_face_buf.y = INFINITY;
-                if (step_dir.z == 0) t_face_buf.z = INFINITY;
-                t_exit_buf = min(min(t_face_buf.x, t_face_buf.y), t_face_buf.z);
+            float t_exit_fb = INFINITY;
+            float3 t_face_fb = float3(INFINITY);
+            if (u.fb_active != 0) {
+                float3 chunk_min_fb = float3(chunk_c_fb) * float(kChunkSize)
+                                    + float3(u.fb_offset);
+                float3 chunk_max_fb = chunk_min_fb + float(kChunkSize);
+                float3 exit_face_fb = select(chunk_min_fb, chunk_max_fb, step_dir > 0);
+                t_face_fb = (exit_face_fb - ray_origin) * inv_dir;
+                if (step_dir.x == 0) t_face_fb.x = INFINITY;
+                if (step_dir.y == 0) t_face_fb.y = INFINITY;
+                if (step_dir.z == 0) t_face_fb.z = INFINITY;
+                t_exit_fb = min(min(t_face_fb.x, t_face_fb.y), t_face_fb.z);
             }
 
-            float t_skip = min(t_exit_doc, t_exit_buf);
-            float3 t_face = (t_exit_doc <= t_exit_buf) ? t_face_doc : t_face_buf;
+            float t_skip = min(t_exit_doc, t_exit_fb);
+            float3 t_face = (t_exit_doc <= t_exit_fb) ? t_face_doc : t_face_fb;
             int exit_axis = (t_face.x <= t_face.y && t_face.x <= t_face.z) ? 0
                           : (t_face.y <= t_face.z) ? 1 : 2;
             last_axis = exit_axis;
@@ -520,38 +472,18 @@ fragment float4 raycast_fragment(
     id<MTLBuffer> _paletteBuffer;
     uint64_t _cachedPaletteVersion;
     BOOL _cacheValid;
-    // Overlay-additions resources. The slot is shared by FloatingBuffer
-    // (selection lift / paste / move-drag) and PreviewOverlay (shape /
-    // face / generator preview); the two are mutually exclusive at the
-    // gesture level. _bufSource records which kind currently populates
-    // the slot so a switch (e.g. ending a preview, starting a move)
-    // forces a rebuild instead of mistakenly reusing version numbers.
-    enum class OverlaySource : uint8_t {
-        None = 0,
-        FloatingBuffer = 1,
-        Preview = 2,
-    };
-    id<MTLBuffer> _bufCoarseBuffer;
-    id<MTLBuffer> _bufPoolBuffer;
-    uint64_t _bufLastVersion;
-    BOOL _bufBuilt;
-    simd::int3 _bufCoarseMin;
-    simd::int3 _bufCoarseDim;
-    OverlaySource _bufSource;
-    // Preview-removals resources. Mirrors the additions slot's coarse-grid
-    // + chunk-pool layout. Only populated while a PreviewOverlay is active
-    // (FloatingBuffer doesn't need removals — its lift mechanism cleared
-    // the source cells in the doc grid up front). _remBuilt + version
-    // gate rebuilds the same way the additions slot does.
-    id<MTLBuffer> _remCoarseBuffer;
-    id<MTLBuffer> _remPoolBuffer;
-    uint64_t _remLastVersion;
-    BOOL _remBuilt;
-    simd::int3 _remCoarseMin;
-    simd::int3 _remCoarseDim;
-    // Stub buffers always bound at fragment slots 4–7 — Metal needs a
-    // valid backing for every declared fragment buffer even when the
-    // corresponding {buf,rem}_active flag is 0 in the uniforms.
+    // FloatingBuffer GPU mirror. Sparse coarse-grid + chunk-pool because
+    // FB can wander outside the edit volume during a drag, so a dense
+    // texture won't represent it. Rebuilt when fb.version bumps.
+    id<MTLBuffer> _fbCoarseBuffer;
+    id<MTLBuffer> _fbPoolBuffer;
+    uint64_t _fbLastVersion;
+    BOOL _fbBuilt;
+    simd::int3 _fbCoarseMin;
+    simd::int3 _fbCoarseDim;
+    // Stub buffer bound at the FB slots whenever no FB is active —
+    // Metal needs a non-nil backing for every declared fragment buffer
+    // even when `fb_active == 0` in the uniforms.
     id<MTLBuffer> _stubBuffer;
 }
 
@@ -620,11 +552,10 @@ fragment float4 raycast_fragment(
 // extents) — there the coarse grid itself has to be reshaped.
 // ---------------------------------------------------------------------------
 
-// Build (or rebuild) one of the overlay slots' GPU mirror from a sparse
+// Build (or rebuild) the FloatingBuffer GPU mirror from a sparse
 // VoxelGrid. Same coarse-grid + chunk-pool layout as the document, just
-// smaller. Used for both the additions slot (FloatingBuffer.grid OR
-// PreviewOverlay.additions) and the removals slot
-// (PreviewOverlay.removals). Caller picks the slot's ivars.
+// smaller — kept sparse because the FB can wander outside the edit
+// volume during a drag, which the dense doc texture can't represent.
 - (void)rebuildSparseSlotFromGrid:(const macvoxel::VoxelGrid&)grid
                            coarse:(__strong id<MTLBuffer>* _Nonnull)coarseOut
                              pool:(__strong id<MTLBuffer>* _Nonnull)poolOut
@@ -724,76 +655,25 @@ fragment float4 raycast_fragment(
     if (_paletteBuffer == nil) return;
     _cacheValid = YES;
 
-    // Resolve which overlay (if any) feeds the additions slot this frame.
-    // FloatingBuffer (selection move/paste/transform) and PreviewOverlay
-    // (shape/face/generator preview) are mutually exclusive at the gesture
-    // level, so they share one slot — the source tag tracks which one
-    // last filled it so a switch invalidates the cache cleanly.
+    // FloatingBuffer: rebuild GPU mirror whenever the version bumps,
+    // drop it whenever FB goes inactive.
     const macvoxel::FloatingBuffer& fb = ctx->floating_buffer;
-    const macvoxel::PreviewOverlay& prev = ctx->preview;
-    const OverlaySource active_source =
-        fb.active ? OverlaySource::FloatingBuffer
-        : (prev.active ? OverlaySource::Preview : OverlaySource::None);
-
-    if (active_source == OverlaySource::FloatingBuffer) {
-        if (!_bufBuilt || _bufSource != active_source ||
-            _bufLastVersion != fb.version) {
+    if (fb.active) {
+        if (!_fbBuilt || _fbLastVersion != fb.version) {
             [self rebuildSparseSlotFromGrid:fb.grid
-                                     coarse:&_bufCoarseBuffer
-                                       pool:&_bufPoolBuffer
-                                  coarseMin:&_bufCoarseMin
-                                  coarseDim:&_bufCoarseDim
-                                 coarseName:@"RaycastBufCoarse"
-                                   poolName:@"RaycastBufPool"];
-            _bufBuilt = (_bufCoarseBuffer != nil);
-            _bufLastVersion = fb.version;
-            _bufSource = active_source;
+                                     coarse:&_fbCoarseBuffer
+                                       pool:&_fbPoolBuffer
+                                  coarseMin:&_fbCoarseMin
+                                  coarseDim:&_fbCoarseDim
+                                 coarseName:@"RaycastFbCoarse"
+                                   poolName:@"RaycastFbPool"];
+            _fbBuilt = (_fbCoarseBuffer != nil);
+            _fbLastVersion = fb.version;
         }
-    } else if (active_source == OverlaySource::Preview) {
-        if (!_bufBuilt || _bufSource != active_source ||
-            _bufLastVersion != prev.version) {
-            [self rebuildSparseSlotFromGrid:prev.additions
-                                     coarse:&_bufCoarseBuffer
-                                       pool:&_bufPoolBuffer
-                                  coarseMin:&_bufCoarseMin
-                                  coarseDim:&_bufCoarseDim
-                                 coarseName:@"RaycastBufCoarse"
-                                   poolName:@"RaycastBufPool"];
-            _bufBuilt = (_bufCoarseBuffer != nil);
-            _bufLastVersion = prev.version;
-            _bufSource = active_source;
-        }
-        if (!_remBuilt || _remLastVersion != prev.version) {
-            [self rebuildSparseSlotFromGrid:prev.removals
-                                     coarse:&_remCoarseBuffer
-                                       pool:&_remPoolBuffer
-                                  coarseMin:&_remCoarseMin
-                                  coarseDim:&_remCoarseDim
-                                 coarseName:@"RaycastRemCoarse"
-                                   poolName:@"RaycastRemPool"];
-            _remBuilt = (_remCoarseBuffer != nil);
-            _remLastVersion = prev.version;
-        }
-    } else {
-        if (_bufBuilt) {
-            _bufCoarseBuffer = nil;
-            _bufPoolBuffer = nil;
-            _bufBuilt = NO;
-            _bufSource = OverlaySource::None;
-        }
-        if (_remBuilt) {
-            _remCoarseBuffer = nil;
-            _remPoolBuffer = nil;
-            _remBuilt = NO;
-        }
-    }
-    // Removals are preview-only — drop them whenever the active overlay
-    // isn't a preview, so a leftover removal mask never bleeds into a
-    // floating-buffer or no-overlay frame.
-    if (active_source != OverlaySource::Preview && _remBuilt) {
-        _remCoarseBuffer = nil;
-        _remPoolBuffer = nil;
-        _remBuilt = NO;
+    } else if (_fbBuilt) {
+        _fbCoarseBuffer = nil;
+        _fbPoolBuffer = nil;
+        _fbBuilt = NO;
     }
 
     Uniforms u;
@@ -803,34 +683,20 @@ fragment float4 raycast_fragment(
     u.light_dir = simd::normalize(simd::float3{0.4f, 0.7f, 0.5f});
     u._pad1 = 0.0f;
 
-    const bool buffer_drawable = _bufBuilt && _bufCoarseBuffer != nil;
-    if (buffer_drawable) {
-        u.buf_coarse_min = _bufCoarseMin;
-        u.buf_coarse_dim = _bufCoarseDim;
-        u.buf_offset = (active_source == OverlaySource::FloatingBuffer)
-            ? simd::int3{fb.offset_x, fb.offset_y, fb.offset_z}
-            : simd::int3{0, 0, 0};
-        u.buf_active = 1;
+    const bool fb_drawable = _fbBuilt && _fbCoarseBuffer != nil;
+    if (fb_drawable) {
+        u.fb_coarse_min = _fbCoarseMin;
+        u.fb_coarse_dim = _fbCoarseDim;
+        u.fb_offset = simd::int3{fb.offset_x, fb.offset_y, fb.offset_z};
+        u.fb_active = 1;
     } else {
-        u.buf_coarse_min = simd::int3{0, 0, 0};
-        u.buf_coarse_dim = simd::int3{0, 0, 0};
-        u.buf_offset = simd::int3{0, 0, 0};
-        u.buf_active = 0;
+        u.fb_coarse_min = simd::int3{0, 0, 0};
+        u.fb_coarse_dim = simd::int3{0, 0, 0};
+        u.fb_offset = simd::int3{0, 0, 0};
+        u.fb_active = 0;
     }
     u._pad2 = 0;
     u._pad3 = 0;
-
-    const bool removals_drawable = _remBuilt && _remCoarseBuffer != nil;
-    if (removals_drawable) {
-        u.rem_coarse_min = _remCoarseMin;
-        u.rem_coarse_dim = _remCoarseDim;
-        u.rem_active = 1;
-    } else {
-        u.rem_coarse_min = simd::int3{0, 0, 0};
-        u.rem_coarse_dim = simd::int3{0, 0, 0};
-        u.rem_active = 0;
-    }
-    u._pad4 = 0;
 
     const macvoxel::EditVolume& vol = doc->volume;
     u.box_min = simd::float3{static_cast<float>(vol.x0),
@@ -839,34 +705,28 @@ fragment float4 raycast_fragment(
     u.box_max = simd::float3{static_cast<float>(vol.x1 + 1),
                              static_cast<float>(vol.y1 + 1),
                              static_cast<float>(vol.z1 + 1)};
+    u._pad4 = 0.0f;
     u._pad5 = 0.0f;
-    u._pad6 = 0.0f;
-    // Preview-tex is active when a shape stroke is mid-flight. The
-    // ShapeController flips ctx->preview.active true on first stamp,
-    // false on commit/cancel; the rasterizer pays exactly the cost
-    // of one oracle byte per pixel when inactive.
-    u.preview_active = ctx->preview.active ? 1 : 0;
+    // Preview-tex is active when a shape/face/generator stroke is
+    // mid-flight. Tools flip ctx->preview_active true on first stamp,
+    // false on commit/cancel; the rasterizer pays exactly one oracle
+    // byte per pixel when inactive.
+    u.preview_active = ctx->preview_active ? 1 : 0;
+    u._pad6 = 0;
     u._pad7 = 0;
     u._pad8 = 0;
-    u._pad9 = 0;
 
     [encoder pushDebugGroup:@"Voxels (raycast)"];
     [encoder setRenderPipelineState:_pipeline];
     [encoder setCullMode:MTLCullModeNone];
     [encoder setFragmentBytes:&u length:sizeof(u) atIndex:0];
     [encoder setFragmentBuffer:_paletteBuffer offset:0 atIndex:1];
-    [encoder setFragmentBuffer:(buffer_drawable ? _bufCoarseBuffer : _stubBuffer)
+    [encoder setFragmentBuffer:(fb_drawable ? _fbCoarseBuffer : _stubBuffer)
                         offset:0
                        atIndex:2];
-    [encoder setFragmentBuffer:(buffer_drawable ? _bufPoolBuffer : _stubBuffer)
+    [encoder setFragmentBuffer:(fb_drawable ? _fbPoolBuffer : _stubBuffer)
                         offset:0
                        atIndex:3];
-    [encoder setFragmentBuffer:(removals_drawable ? _remCoarseBuffer : _stubBuffer)
-                        offset:0
-                       atIndex:4];
-    [encoder setFragmentBuffer:(removals_drawable ? _remPoolBuffer : _stubBuffer)
-                        offset:0
-                       atIndex:5];
     [encoder setFragmentTexture:docVolumeTex.texture atIndex:0];
     [encoder setFragmentTexture:docVolumeTex.oracleTexture atIndex:1];
     [encoder setFragmentTexture:docVolumeTex.previewTexture atIndex:2];

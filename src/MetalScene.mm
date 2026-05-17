@@ -18,7 +18,6 @@
 
 #include "BoxSelectController.h"
 #include "BrushController.h"
-#include "BrushOps.h"
 #include "Camera.h"
 #include "CellKey.h"
 #include "Document.h"
@@ -35,8 +34,6 @@
 #include "MarqueeController.h"
 #include "MoveSelectController.h"
 #include "OverlayDraw.h"
-#include "PreviewOps.h"
-#include "PreviewOverlay.h"
 #include "Raycast.h"
 #include "RenderState.h"
 #include "Selection.h"
@@ -563,7 +560,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     if (_interaction.anchor.has_anchor) {
         if (_ctx->tool.tool != _interaction.anchor.tool || escape_now) {
             if (_interaction.drag_mode == DragMode::Shape) {
-                _ctx->preview.Clear();
+                _ctx->preview_active = false;
                 _interaction.drag_mode = DragMode::None;
             }
             _interaction.anchor.has_anchor = NO;

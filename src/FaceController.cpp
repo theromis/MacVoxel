@@ -6,7 +6,6 @@
 #include "EditVolume.h"
 #include "EditorContext.h"
 #include "Input.h"
-#include "PreviewOverlay.h"   // ctx.preview.active flag
 #include "ShapeEngine.h"      // CellPalette
 #include "Shapes.h"
 #include "ToolState.h"
@@ -252,7 +251,7 @@ bool OnMouseDown(EditorContext& ctx, InteractionState& state,
     }
     state.drag_mode = DragMode::Shape;
 
-    ctx.preview.active = true;
+    ctx.preview_active = true;
     ctx.history.BeginOp();
 
     const int d = ComputeFaceVoxels(state, vc, e);
@@ -354,7 +353,7 @@ void OnMouseUp(EditorContext& ctx, InteractionState& state,
     }
 
     ctx.history.CommitOp();
-    ctx.preview.active = false;
+    ctx.preview_active = false;
     state.anchor.has_anchor = false;
     state.face.seed_cells.clear();
 }
