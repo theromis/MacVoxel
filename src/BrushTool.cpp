@@ -7,6 +7,7 @@
 #include "EditHistory.h"
 #include "EditorContext.h"
 #include "Input.h"
+#include "InteractionState.h"
 #include "Shapes.h"
 #include "ToolState.h"
 #include "ViewContext.h"
@@ -216,13 +217,14 @@ void BrushTool::SyncStrokeFromTexture(EditorContext& ctx,
     doc.BumpGeometry();
 }
 
-bool BrushTool::OnMouseDown(EditorContext& ctx, InteractionState& /*state*/,
+bool BrushTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
                             const ViewContext& vc, const MouseEvent& e,
                             EditEngine& engine) {
     const ToolMode mode = e.mods.command ? ToolMode::Remove : ctx.tool.mode;
     ResetStrokeState();
     paint_mode_ = mode;
     is_dragging_ = true;
+    state.drag_mode = DragMode::Paint;
     ctx.history.BeginOp();
     StampAtCursor(ctx, vc, e, mode, engine);
     return true;

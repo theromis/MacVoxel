@@ -17,7 +17,6 @@
 #include <algorithm>
 
 #include "BoxSelectController.h"
-#include "BrushTool.h"
 #include "Camera.h"
 #include "CellKey.h"
 #include "Document.h"
@@ -29,6 +28,7 @@
 #include "FloodSelectController.h"
 #include "GeneratorState.h"
 #include "GeneratorTool.h"
+#include "ToolRegistry.h"
 #include "Input.h"
 #include "InteractionState.h"
 #include "MarqueeController.h"
@@ -40,7 +40,6 @@
 #include "SelectionOps.h"
 #include "SelectionOverlay.h"
 #include "EditEngine.h"
-#include "ShapeTool.h"
 #include "Shapes.h"
 #include "ToolState.h"
 #include "ViewContext.h"
@@ -104,12 +103,15 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     // `_generatorEngine` / `_docVolumeTex` are alive.
     std::unique_ptr<macvoxel::EditEngine> _editEngine;
 
-    // Migrated tools (Phase 1). Selection tools (Marquee / BoxSelect /
-    // etc.) are out of scope for this refactor.
-    std::unique_ptr<macvoxel::BrushTool> _brushTool;
-    std::unique_ptr<macvoxel::GeneratorTool> _generatorTool;
-    std::unique_ptr<macvoxel::ShapeTool> _shapeTool;
-    std::unique_ptr<macvoxel::FaceTool> _faceTool;
+    // Per-tool gesture dispatch. The registry owns one of each
+    // volume-writing Tool subclass; the dispatcher looks one up via
+    // `ToolFor(_ctx->tool.tool)` at mouseDown and stashes the result
+    // in `_activeTool` so mouseDragged / mouseUp route back to the
+    // same Tool regardless of mid-stroke tool-kind changes. Selection
+    // tools (Marquee / BoxSelect / etc.) are out of scope for this
+    // refactor and keep their own per-controller branches below.
+    std::unique_ptr<macvoxel::ToolRegistry> _toolRegistry;
+    macvoxel::Tool *_activeTool;  // non-owning, may be nullptr
 }
 
 - (instancetype)initWithFrame:(NSRect)frame
@@ -183,10 +185,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     _editEngine = macvoxel::MakeEditEngine(_brushEngine, _shapeEngine,
                                            _generatorEngine, _docVolumeTex,
                                            _ctx->document.volume);
-    _brushTool = std::make_unique<macvoxel::BrushTool>();
-    _generatorTool = std::make_unique<macvoxel::GeneratorTool>();
-    _shapeTool = std::make_unique<macvoxel::ShapeTool>();
-    _faceTool = std::make_unique<macvoxel::FaceTool>();
+    _toolRegistry = std::make_unique<macvoxel::ToolRegistry>();
+    _activeTool = nullptr;
 
     _lastRenderMode = macvoxel::RenderMode::Edit;
     _lastToolForFB = _ctx->tool.tool;
@@ -267,9 +267,11 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     }
     if (kc == kKeyCodeReturn || kc == kKeyCodeKeypadEnter) {
         if (_ctx->tool.tool == macvoxel::ToolKind::Generator &&
-            _generatorTool->HasActiveGizmo()) {
-            _generatorTool->Commit(*_ctx, _interaction, *_editEngine);
+            _toolRegistry->generator()->HasActiveGizmo()) {
+            _toolRegistry->generator()->Commit(*_ctx, _interaction,
+                                                *_editEngine);
             _interaction.drag_mode = macvoxel::DragMode::None;
+            _activeTool = nullptr;
             return;
         }
         if (_ctx->floating_buffer.active) {
@@ -420,14 +422,15 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                 _interaction.drag_mode = DragMode::None;
             }
             _interaction.anchor.has_anchor = NO;
-            _faceTool->Reset();
+            _toolRegistry->face()->Reset();
         }
     }
 
-    // Generator gizmo per-frame tick: cancel on Esc / tool-switch and
-    // re-run the engine on kind / bounds / params / palette dirtying.
-    _generatorTool->Tick(*_ctx, _interaction, _ctx->tool.tool, escape_now,
-                          *_editEngine);
+    // Per-frame Tick on every Tool. Currently only Generator does
+    // anything in Tick (gizmo dirty-check / cancel-on-Esc); others
+    // default to no-op.
+    _toolRegistry->TickAll(*_ctx, _interaction, _ctx->tool.tool, escape_now,
+                            *_editEngine);
 
     // Auto-commit the floating buffer on "user moved on" gestures
     // detectable from the per-frame loop: tool switch and render-mode
@@ -461,7 +464,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     macvoxel::marquee_controller::DrawOverlay(_interaction, vc, _od);
     macvoxel::selection_overlay::DrawHover(
         _interaction, vc, mouse_captured_by_ui, _od);
-    _generatorTool->DrawOverlay(_interaction, vc, _od, mouse_captured_by_ui);
+    _toolRegistry->DrawOverlays(_interaction, vc, _od, mouse_captured_by_ui);
 
     id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
     cmd.label = @"MacVoxel Frame";
@@ -565,79 +568,72 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         _interaction.last_drag_location = event.locationInWindow;
         return;
     }
-    if (_generatorTool->HasActiveGizmo()) {
-        _generatorTool->OnMouseDown(*_ctx, _interaction, [self viewContext],
-                                     [self mouseEventFromNSEvent:event],
-                                     *_editEngine);
-    } else if (macvoxel::xform_handle_controller::OnMouseDown(
-                   *_ctx, _interaction, [self viewContext],
-                   [self mouseEventFromNSEvent:event])) {
-        // Click on a transform-gizmo face arrow.
-    } else if (hasCommand &&
-               (_ctx->tool.tool == macvoxel::ToolKind::Marquee ||
-                _ctx->tool.tool == macvoxel::ToolKind::BoxSelect ||
-                _ctx->tool.tool == macvoxel::ToolKind::FloodSelect) &&
-               macvoxel::move_select_controller::OnMouseDown(
-                   *_ctx, _interaction, [self viewContext],
-                   [self mouseEventFromNSEvent:event])) {
-        // Cmd-drag on a selected voxel.
-    } else if (_ctx->tool.tool == macvoxel::ToolKind::Marquee) {
+    // Active generator gizmo intercepts every click regardless of which
+    // tool is currently selected.
+    if (_toolRegistry->generator()->HasActiveGizmo()) {
+        _toolRegistry->generator()->OnMouseDown(*_ctx, _interaction,
+                                                  [self viewContext],
+                                                  [self mouseEventFromNSEvent:event],
+                                                  *_editEngine);
+        _activeTool = _toolRegistry->generator();
+        return;
+    }
+    if (macvoxel::xform_handle_controller::OnMouseDown(
+            *_ctx, _interaction, [self viewContext],
+            [self mouseEventFromNSEvent:event])) {
+        return;  // click consumed by the transform-gizmo face arrow
+    }
+    if (hasCommand &&
+        (_ctx->tool.tool == macvoxel::ToolKind::Marquee ||
+         _ctx->tool.tool == macvoxel::ToolKind::BoxSelect ||
+         _ctx->tool.tool == macvoxel::ToolKind::FloodSelect) &&
+        macvoxel::move_select_controller::OnMouseDown(
+            *_ctx, _interaction, [self viewContext],
+            [self mouseEventFromNSEvent:event])) {
+        return;  // Cmd-drag on a selected voxel
+    }
+    // Selection tools (Marquee / BoxSelect / FloodSelect) aren't
+    // registered with ToolRegistry; they don't write to the volume,
+    // they manipulate the selection. Out of scope for this refactor.
+    if (_ctx->tool.tool == macvoxel::ToolKind::Marquee) {
         [self autoCommitFloatingBuffer];
         macvoxel::marquee_controller::OnMouseDown(
             _interaction, [self mouseEventFromNSEvent:event]);
-    } else if (_ctx->tool.tool == macvoxel::ToolKind::BoxSelect) {
+        return;
+    }
+    if (_ctx->tool.tool == macvoxel::ToolKind::BoxSelect) {
         [self autoCommitFloatingBuffer];
         if (!macvoxel::box_select_controller::OnMouseDown(
                 *_ctx, _interaction, [self viewContext],
                 [self mouseEventFromNSEvent:event])) {
             _interaction.drag_mode = DragMode::None;
         }
-    } else if (_ctx->tool.tool == macvoxel::ToolKind::FloodSelect) {
+        return;
+    }
+    if (_ctx->tool.tool == macvoxel::ToolKind::FloodSelect) {
         [self autoCommitFloatingBuffer];
         macvoxel::flood_select_controller::OnMouseDown(
             *_ctx, [self viewContext], [self mouseEventFromNSEvent:event]);
         _interaction.drag_mode = DragMode::None;
-    } else if (_ctx->tool.tool == macvoxel::ToolKind::Line ||
-               _ctx->tool.tool == macvoxel::ToolKind::Circle ||
-               _ctx->tool.tool == macvoxel::ToolKind::Square ||
-               _ctx->tool.tool == macvoxel::ToolKind::Box) {
-        [self autoCommitFloatingBuffer];
-        const macvoxel::MouseEvent me = [self mouseEventFromNSEvent:event];
-        if (_shapeTool->OnMouseDown(*_ctx, _interaction, [self viewContext],
-                                     me, *_editEngine)) {
-            _interaction.hover.local = [self localFromWindow:event.locationInWindow];
-            _interaction.hover.has_point = YES;
-        } else {
-            _interaction.drag_mode = DragMode::None;
-        }
-    } else if (_ctx->tool.tool == macvoxel::ToolKind::Generator) {
-        [self autoCommitFloatingBuffer];
-        if (_generatorTool->OnMouseDown(*_ctx, _interaction,
-                                         [self viewContext],
-                                         [self mouseEventFromNSEvent:event],
-                                         *_editEngine)) {
-            _interaction.hover.local = [self localFromWindow:event.locationInWindow];
-            _interaction.hover.has_point = YES;
-        } else {
-            _interaction.drag_mode = DragMode::None;
-        }
-    } else if (_ctx->tool.tool == macvoxel::ToolKind::Face) {
-        [self autoCommitFloatingBuffer];
-        if (_faceTool->OnMouseDown(*_ctx, _interaction, [self viewContext],
-                                    [self mouseEventFromNSEvent:event],
-                                    *_editEngine)) {
-            _interaction.hover.local = [self localFromWindow:event.locationInWindow];
-            _interaction.hover.has_point = YES;
-        } else {
-            _interaction.drag_mode = DragMode::None;
-            return;
-        }
+        return;
+    }
+
+    // Volume-writing tools route through the registry.
+    macvoxel::Tool *tool = _toolRegistry->ToolFor(_ctx->tool.tool);
+    if (tool == nullptr) {
+        _interaction.drag_mode = DragMode::None;
+        return;
+    }
+    [self autoCommitFloatingBuffer];
+    const macvoxel::MouseEvent me = [self mouseEventFromNSEvent:event];
+    if (tool->OnMouseDown(*_ctx, _interaction, [self viewContext], me,
+                          *_editEngine)) {
+        _interaction.hover.local = [self localFromWindow:event.locationInWindow];
+        _interaction.hover.has_point = YES;
+        _activeTool = tool;
     } else {
-        [self autoCommitFloatingBuffer];
-        _interaction.drag_mode = DragMode::Paint;
-        _brushTool->OnMouseDown(*_ctx, _interaction, [self viewContext],
-                                [self mouseEventFromNSEvent:event],
-                                *_editEngine);
+        _interaction.drag_mode = DragMode::None;
+        _activeTool = nullptr;
     }
 }
 
@@ -651,11 +647,6 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     switch (_interaction.drag_mode) {
         case DragMode::Orbit: _camera.Orbit(dx, dy); break;
         case DragMode::Pan:   _camera.Pan(dx, dy);   break;
-        case DragMode::Paint:
-            _brushTool->OnMouseDragged(*_ctx, _interaction, [self viewContext],
-                                        [self mouseEventFromNSEvent:event],
-                                        *_editEngine);
-            break;
         case DragMode::Marquee:
             macvoxel::marquee_controller::OnMouseDragged(
                 _interaction.marquee, [self mouseEventFromNSEvent:event]);
@@ -675,93 +666,57 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                 *_ctx, _interaction.box_select, [self viewContext],
                 [self mouseEventFromNSEvent:event]);
             break;
+        case DragMode::Paint:
         case DragMode::Shape:
-            _interaction.hover.local = [self localFromWindow:p];
-            _interaction.hover.has_point = YES;
-            if (_interaction.anchor.tool == macvoxel::ToolKind::Line ||
-                _interaction.anchor.tool == macvoxel::ToolKind::Circle ||
-                _interaction.anchor.tool == macvoxel::ToolKind::Square ||
-                _interaction.anchor.tool == macvoxel::ToolKind::Box) {
-                _shapeTool->OnMouseDragged(*_ctx, _interaction,
-                                            [self viewContext],
-                                            [self mouseEventFromNSEvent:event],
-                                            *_editEngine);
-            } else if (_interaction.anchor.tool == macvoxel::ToolKind::Face) {
-                _faceTool->OnMouseDragged(*_ctx, _interaction,
-                                           [self viewContext],
-                                           [self mouseEventFromNSEvent:event],
-                                           *_editEngine);
-            } else if (_interaction.anchor.tool == macvoxel::ToolKind::Generator) {
-                _generatorTool->OnMouseDragged(*_ctx, _interaction,
-                                                [self viewContext],
-                                                [self mouseEventFromNSEvent:event],
-                                                *_editEngine);
-            }
-            break;
         case DragMode::GenHandle:
-            _generatorTool->OnMouseDragged(*_ctx, _interaction,
-                                            [self viewContext],
-                                            [self mouseEventFromNSEvent:event],
-                                            *_editEngine);
+            // Hover follow during shape drag (lets DrawOverlay highlight
+            // handles + lets the controller see the live cursor).
+            if (_interaction.drag_mode == DragMode::Shape) {
+                _interaction.hover.local = [self localFromWindow:p];
+                _interaction.hover.has_point = YES;
+            }
+            if (_activeTool) {
+                _activeTool->OnMouseDragged(*_ctx, _interaction,
+                                             [self viewContext],
+                                             [self mouseEventFromNSEvent:event],
+                                             *_editEngine);
+            }
             break;
         case DragMode::None: break;
     }
 }
 
 - (void)mouseUp:(NSEvent *)event {
-    if (_interaction.drag_mode == DragMode::Paint) {
-        _brushTool->OnMouseUp(*_ctx, _interaction, [self viewContext],
-                              [self mouseEventFromNSEvent:event],
-                              *_editEngine);
-    } else if (_interaction.drag_mode == DragMode::Marquee) {
-        macvoxel::marquee_controller::OnMouseUp(
-            *_ctx, _interaction.marquee, [self viewContext],
-            [self mouseEventFromNSEvent:event]);
-        _interaction.drag_mode = DragMode::None;
-        return;
-    } else if (_interaction.drag_mode == DragMode::BoxSelect) {
-        macvoxel::box_select_controller::OnMouseUp(*_ctx);
-        _interaction.drag_mode = DragMode::None;
-        return;
-    } else if (_interaction.drag_mode == DragMode::MoveSelect) {
-        _interaction.drag_mode = DragMode::None;
-        return;
-    } else if (_interaction.drag_mode == DragMode::XformHandle) {
-        macvoxel::xform_handle_controller::OnMouseUp(_interaction);
-        _interaction.drag_mode = DragMode::None;
-        return;
-    } else if (_interaction.drag_mode == DragMode::GenHandle) {
-        _generatorTool->OnMouseUp(*_ctx, _interaction, [self viewContext],
-                                   [self mouseEventFromNSEvent:event],
-                                   *_editEngine);
-        _interaction.drag_mode = DragMode::None;
-    } else if (_interaction.drag_mode == DragMode::Shape) {
-        _interaction.drag_mode = DragMode::None;
-        switch (_interaction.anchor.tool) {
-            case macvoxel::ToolKind::Line:
-            case macvoxel::ToolKind::Circle:
-            case macvoxel::ToolKind::Square:
-            case macvoxel::ToolKind::Box:
-                _shapeTool->OnMouseUp(*_ctx, _interaction, [self viewContext],
-                                       [self mouseEventFromNSEvent:event],
-                                       *_editEngine);
-                break;
-            case macvoxel::ToolKind::Face:
-                _faceTool->OnMouseUp(*_ctx, _interaction, [self viewContext],
-                                      [self mouseEventFromNSEvent:event],
-                                      *_editEngine);
-                break;
-            case macvoxel::ToolKind::Generator:
-                _generatorTool->OnMouseUp(*_ctx, _interaction,
-                                           [self viewContext],
-                                           [self mouseEventFromNSEvent:event],
-                                           *_editEngine);
-                break;
-            default:
-                _interaction.anchor.has_anchor = NO;
-                break;
-        }
+    switch (_interaction.drag_mode) {
+        case DragMode::Marquee:
+            macvoxel::marquee_controller::OnMouseUp(
+                *_ctx, _interaction.marquee, [self viewContext],
+                [self mouseEventFromNSEvent:event]);
+            break;
+        case DragMode::BoxSelect:
+            macvoxel::box_select_controller::OnMouseUp(*_ctx);
+            break;
+        case DragMode::MoveSelect:
+            // No-op — the drag itself was the work; release just ends it.
+            break;
+        case DragMode::XformHandle:
+            macvoxel::xform_handle_controller::OnMouseUp(_interaction);
+            break;
+        case DragMode::Paint:
+        case DragMode::Shape:
+        case DragMode::GenHandle:
+            if (_activeTool) {
+                _activeTool->OnMouseUp(*_ctx, _interaction, [self viewContext],
+                                        [self mouseEventFromNSEvent:event],
+                                        *_editEngine);
+            }
+            break;
+        case DragMode::Orbit:
+        case DragMode::Pan:
+        case DragMode::None:
+            break;
     }
+    _activeTool = nullptr;
     _interaction.drag_mode = DragMode::None;
 }
 

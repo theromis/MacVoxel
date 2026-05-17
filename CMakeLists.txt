@@ -65,6 +65,7 @@ set(APP_SOURCES
     src/MoveSelectController.cpp
     src/OverlayDraw.cpp
     src/ShapeTool.cpp
+    src/ToolRegistry.cpp
     src/XformHandleController.cpp
     # SwiftUI shell — Obj-C++ bridge over EditorContext. Swift code in
     # APP_SWIFT_SOURCES below.
