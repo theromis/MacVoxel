@@ -216,8 +216,9 @@ void BrushTool::SyncStrokeFromTexture(EditorContext& ctx,
     doc.BumpGeometry();
 }
 
-bool BrushTool::OnMouseDown(EditorContext& ctx, const ViewContext& vc,
-                            const MouseEvent& e, EditEngine& engine) {
+bool BrushTool::OnMouseDown(EditorContext& ctx, InteractionState& /*state*/,
+                            const ViewContext& vc, const MouseEvent& e,
+                            EditEngine& engine) {
     const ToolMode mode = e.mods.command ? ToolMode::Remove : ctx.tool.mode;
     ResetStrokeState();
     paint_mode_ = mode;
@@ -227,14 +228,16 @@ bool BrushTool::OnMouseDown(EditorContext& ctx, const ViewContext& vc,
     return true;
 }
 
-void BrushTool::OnMouseDragged(EditorContext& ctx, const ViewContext& vc,
-                                const MouseEvent& e, EditEngine& engine) {
+void BrushTool::OnMouseDragged(EditorContext& ctx, InteractionState& /*state*/,
+                                const ViewContext& vc, const MouseEvent& e,
+                                EditEngine& engine) {
     if (!is_dragging_) return;
     StampAtCursor(ctx, vc, e, paint_mode_, engine);
 }
 
-void BrushTool::OnMouseUp(EditorContext& ctx, const ViewContext& /*vc*/,
-                           const MouseEvent& /*e*/, EditEngine& engine) {
+void BrushTool::OnMouseUp(EditorContext& ctx, InteractionState& /*state*/,
+                           const ViewContext& /*vc*/, const MouseEvent& /*e*/,
+                           EditEngine& engine) {
     if (!is_dragging_) return;
     SyncStrokeFromTexture(ctx, engine);
     ctx.history.CommitOp();
@@ -242,7 +245,8 @@ void BrushTool::OnMouseUp(EditorContext& ctx, const ViewContext& /*vc*/,
     ResetStrokeState();
 }
 
-void BrushTool::Cancel(EditorContext& ctx, EditEngine& engine) {
+void BrushTool::Cancel(EditorContext& ctx, InteractionState& /*state*/,
+                       EditEngine& engine) {
     if (!is_dragging_) return;
     // Treat cancel like a normal commit-by-readback: anything the
     // kernel already wrote to tex_a stays, and we record it as the

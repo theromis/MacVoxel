@@ -59,7 +59,7 @@ set(APP_SOURCES
     src/BrushTool.cpp
     src/FaceController.cpp
     src/FloodSelectController.cpp
-    src/GeneratorController.cpp
+    src/GeneratorTool.cpp
     src/MarqueeController.cpp
     src/MetalScene.mm
     src/MoveSelectController.cpp

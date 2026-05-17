@@ -27,8 +27,8 @@
 #include "FloatingBuffer.h"
 #include "FloatingBufferOps.h"
 #include "FloodSelectController.h"
-#include "GeneratorController.h"
 #include "GeneratorState.h"
+#include "GeneratorTool.h"
 #include "Input.h"
 #include "InteractionState.h"
 #include "MarqueeController.h"
@@ -104,11 +104,12 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     // `_generatorEngine` / `_docVolumeTex` are alive.
     std::unique_ptr<macvoxel::EditEngine> _editEngine;
 
-    // Migrated tools (Phase 1). Shape / Face / Generator still flow
-    // through their controller namespaces + closures until their own
-    // Phase 1.x commits land. Selection tools (Marquee / BoxSelect /
-    // etc.) are out of scope for this refactor.
+    // Migrated tools (Phase 1). Shape / Face still flow through their
+    // controller namespaces + closures until their own Phase 1.x
+    // commits land. Selection tools (Marquee / BoxSelect / etc.) are
+    // out of scope for this refactor.
     std::unique_ptr<macvoxel::BrushTool> _brushTool;
+    std::unique_ptr<macvoxel::GeneratorTool> _generatorTool;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame
@@ -183,8 +184,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                                            _generatorEngine, _docVolumeTex,
                                            _ctx->document.volume);
     _brushTool = std::make_unique<macvoxel::BrushTool>();
+    _generatorTool = std::make_unique<macvoxel::GeneratorTool>();
 
-    _interaction.gen_gizmo.active_drag_face = -1;  // 0 means -X face — explicit nil.
     _lastRenderMode = macvoxel::RenderMode::Edit;
     _lastToolForFB = _ctx->tool.tool;
     _lastModeForFB = _ctx->render_settings.mode;
@@ -264,10 +265,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     }
     if (kc == kKeyCodeReturn || kc == kKeyCodeKeypadEnter) {
         if (_ctx->tool.tool == macvoxel::ToolKind::Generator &&
-            _interaction.gen_gizmo.active) {
-            macvoxel::generator_controller::Commit(
-                *_ctx, _interaction,
-                [self generatorCommitFn], [self generatorReadBackFn]);
+            _generatorTool->HasActiveGizmo()) {
+            _generatorTool->Commit(*_ctx, _interaction, *_editEngine);
             _interaction.drag_mode = macvoxel::DragMode::None;
             return;
         }
@@ -355,31 +354,6 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 - (simd::float2)localFromWindow:(NSPoint)windowPoint {
     const NSPoint p = [self convertPoint:windowPoint fromView:nil];
     return simd::float2{static_cast<float>(p.x), static_cast<float>(p.y)};
-}
-
-- (macvoxel::generator_controller::GenerateFn)generateFn {
-    GeneratorEngine *engine = _generatorEngine;
-    VolumeTexture *texture = _docVolumeTex;
-    return [engine, texture](macvoxel::generators::Kind kind,
-                              macvoxel::generators::Bounds3i bounds,
-                              macvoxel::generators::Bounds3i last_bounds,
-                              macvoxel::generators::Params params) {
-        [engine dispatchInto:texture
-                        kind:kind
-                      bounds:bounds
-                  lastBounds:last_bounds
-                      params:params];
-    };
-}
-
-- (macvoxel::generator_controller::CommitFn)generatorCommitFn {
-    // The generator's commit shares the shape commit kernel — both
-    // promote tex_t cells into tex_a + clear tex_t (mode-aware).
-    return [self shapeCommitFn];
-}
-
-- (macvoxel::generator_controller::ReadBackFn)generatorReadBackFn {
-    return [self shapeReadBackFn];
 }
 
 - (macvoxel::face_controller::StampCellsFn)faceStampFn {
@@ -562,9 +536,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 
     // Generator gizmo per-frame tick: cancel on Esc / tool-switch and
     // re-run the engine on kind / bounds / params / palette dirtying.
-    macvoxel::generator_controller::Tick(
-        *_ctx, _interaction, _ctx->tool.tool, escape_now,
-        [self generateFn]);
+    _generatorTool->Tick(*_ctx, _interaction, _ctx->tool.tool, escape_now,
+                          *_editEngine);
 
     // Auto-commit the floating buffer on "user moved on" gestures
     // detectable from the per-frame loop: tool switch and render-mode
@@ -598,8 +571,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     macvoxel::marquee_controller::DrawOverlay(_interaction, vc, _od);
     macvoxel::selection_overlay::DrawHover(
         _interaction, vc, mouse_captured_by_ui, _od);
-    macvoxel::generator_controller::DrawOverlay(
-        _interaction, vc, _od, mouse_captured_by_ui);
+    _generatorTool->DrawOverlay(_interaction, vc, _od, mouse_captured_by_ui);
 
     id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
     cmd.label = @"MacVoxel Frame";
@@ -703,11 +675,10 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         _interaction.last_drag_location = event.locationInWindow;
         return;
     }
-    if (_interaction.gen_gizmo.active) {
-        macvoxel::generator_controller::OnGizmoClick(
-            *_ctx, _interaction, [self viewContext],
-            [self mouseEventFromNSEvent:event],
-            [self generatorCommitFn], [self generatorReadBackFn]);
+    if (_generatorTool->HasActiveGizmo()) {
+        _generatorTool->OnMouseDown(*_ctx, _interaction, [self viewContext],
+                                     [self mouseEventFromNSEvent:event],
+                                     *_editEngine);
     } else if (macvoxel::xform_handle_controller::OnMouseDown(
                    *_ctx, _interaction, [self viewContext],
                    [self mouseEventFromNSEvent:event])) {
@@ -752,10 +723,10 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         }
     } else if (_ctx->tool.tool == macvoxel::ToolKind::Generator) {
         [self autoCommitFloatingBuffer];
-        if (macvoxel::generator_controller::BeginDragOut(
-                *_ctx, _interaction, [self viewContext],
-                [self mouseEventFromNSEvent:event],
-                [self generateFn])) {
+        if (_generatorTool->OnMouseDown(*_ctx, _interaction,
+                                         [self viewContext],
+                                         [self mouseEventFromNSEvent:event],
+                                         *_editEngine)) {
             _interaction.hover.local = [self localFromWindow:event.locationInWindow];
             _interaction.hover.has_point = YES;
         } else {
@@ -776,7 +747,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     } else {
         [self autoCommitFloatingBuffer];
         _interaction.drag_mode = DragMode::Paint;
-        _brushTool->OnMouseDown(*_ctx, [self viewContext],
+        _brushTool->OnMouseDown(*_ctx, _interaction, [self viewContext],
                                 [self mouseEventFromNSEvent:event],
                                 *_editEngine);
     }
@@ -793,7 +764,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         case DragMode::Orbit: _camera.Orbit(dx, dy); break;
         case DragMode::Pan:   _camera.Pan(dx, dy);   break;
         case DragMode::Paint:
-            _brushTool->OnMouseDragged(*_ctx, [self viewContext],
+            _brushTool->OnMouseDragged(*_ctx, _interaction, [self viewContext],
                                         [self mouseEventFromNSEvent:event],
                                         *_editEngine);
             break;
@@ -833,16 +804,17 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                     [self mouseEventFromNSEvent:event],
                     [self faceStampFn], [self faceClearBboxFn]);
             } else if (_interaction.anchor.tool == macvoxel::ToolKind::Generator) {
-                macvoxel::generator_controller::UpdateDragOut(
-                    *_ctx, _interaction, [self viewContext],
-                    [self mouseEventFromNSEvent:event],
-                    [self generateFn]);
+                _generatorTool->OnMouseDragged(*_ctx, _interaction,
+                                                [self viewContext],
+                                                [self mouseEventFromNSEvent:event],
+                                                *_editEngine);
             }
             break;
         case DragMode::GenHandle:
-            macvoxel::generator_controller::UpdateHandleDrag(
-                _interaction, [self viewContext],
-                [self mouseEventFromNSEvent:event]);
+            _generatorTool->OnMouseDragged(*_ctx, _interaction,
+                                            [self viewContext],
+                                            [self mouseEventFromNSEvent:event],
+                                            *_editEngine);
             break;
         case DragMode::None: break;
     }
@@ -850,7 +822,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 
 - (void)mouseUp:(NSEvent *)event {
     if (_interaction.drag_mode == DragMode::Paint) {
-        _brushTool->OnMouseUp(*_ctx, [self viewContext],
+        _brushTool->OnMouseUp(*_ctx, _interaction, [self viewContext],
                               [self mouseEventFromNSEvent:event],
                               *_editEngine);
     } else if (_interaction.drag_mode == DragMode::Marquee) {
@@ -871,7 +843,9 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         _interaction.drag_mode = DragMode::None;
         return;
     } else if (_interaction.drag_mode == DragMode::GenHandle) {
-        macvoxel::generator_controller::EndHandleDrag(_interaction);
+        _generatorTool->OnMouseUp(*_ctx, _interaction, [self viewContext],
+                                   [self mouseEventFromNSEvent:event],
+                                   *_editEngine);
         _interaction.drag_mode = DragMode::None;
     } else if (_interaction.drag_mode == DragMode::Shape) {
         _interaction.drag_mode = DragMode::None;
@@ -892,7 +866,10 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                     [self faceClearBboxFn], [self faceReadBackFn]);
                 break;
             case macvoxel::ToolKind::Generator:
-                macvoxel::generator_controller::EndDragOut(_interaction);
+                _generatorTool->OnMouseUp(*_ctx, _interaction,
+                                           [self viewContext],
+                                           [self mouseEventFromNSEvent:event],
+                                           *_editEngine);
                 break;
             default:
                 _interaction.anchor.has_anchor = NO;

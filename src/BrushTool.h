@@ -23,16 +23,20 @@ namespace macvoxel {
 // history.
 class BrushTool final : public Tool {
 public:
-    bool OnMouseDown(EditorContext& ctx, const ViewContext& vc,
-                     const MouseEvent& e, EditEngine& engine) override;
-    void OnMouseDragged(EditorContext& ctx, const ViewContext& vc,
-                        const MouseEvent& e, EditEngine& engine) override;
-    void OnMouseUp(EditorContext& ctx, const ViewContext& vc,
-                   const MouseEvent& e, EditEngine& engine) override;
+    bool OnMouseDown(EditorContext& ctx, InteractionState& state,
+                     const ViewContext& vc, const MouseEvent& e,
+                     EditEngine& engine) override;
+    void OnMouseDragged(EditorContext& ctx, InteractionState& state,
+                        const ViewContext& vc, const MouseEvent& e,
+                        EditEngine& engine) override;
+    void OnMouseUp(EditorContext& ctx, InteractionState& state,
+                   const ViewContext& vc, const MouseEvent& e,
+                   EditEngine& engine) override;
 
     bool IsDragging() const override { return is_dragging_; }
 
-    void Cancel(EditorContext& ctx, EditEngine& engine) override;
+    void Cancel(EditorContext& ctx, InteractionState& state,
+                EditEngine& engine) override;
 
 private:
     void StampAtCursor(EditorContext& ctx, const ViewContext& vc,

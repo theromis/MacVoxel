@@ -7,6 +7,7 @@ namespace macvoxel {
 class EditEngine;
 class OverlayDraw;
 struct EditorContext;
+struct InteractionState;
 struct MouseEvent;
 struct ViewContext;
 enum class ToolKind;
@@ -28,26 +29,36 @@ public:
     // Returns true if the click was consumed and a drag (or one-shot
     // commit) was initiated. The dispatcher uses this to decide whether
     // to fall back to camera-orbit / hover / no-op handling.
-    virtual bool OnMouseDown(EditorContext& ctx, const ViewContext& vc,
-                             const MouseEvent& e, EditEngine& engine) = 0;
+    //
+    // `state` is the transitional InteractionState passthrough — Tools
+    // that still share cross-tool fields (e.g. state.anchor between
+    // Shape and Generator) read/write it during Phases 1-3. Phase 4
+    // dissolves the remaining shared fields and the parameter goes away.
+    virtual bool OnMouseDown(EditorContext& ctx, InteractionState& state,
+                             const ViewContext& vc, const MouseEvent& e,
+                             EditEngine& engine) = 0;
 
-    virtual void OnMouseDragged(EditorContext& ctx, const ViewContext& vc,
-                                const MouseEvent& e, EditEngine& engine) = 0;
+    virtual void OnMouseDragged(EditorContext& ctx, InteractionState& state,
+                                const ViewContext& vc, const MouseEvent& e,
+                                EditEngine& engine) = 0;
 
-    virtual void OnMouseUp(EditorContext& ctx, const ViewContext& vc,
-                           const MouseEvent& e, EditEngine& engine) = 0;
+    virtual void OnMouseUp(EditorContext& ctx, InteractionState& state,
+                           const ViewContext& vc, const MouseEvent& e,
+                           EditEngine& engine) = 0;
 
     // Called every frame from `MetalScene drawInMTKView`. Tools use this
     // for time-based work (Generator's persistent gizmo, cancel-on-Esc,
     // tool-switch cleanup). `active_tool` is `EditorContext::tool.tool`;
     // a Tool whose kind no longer matches should Cancel itself.
     // `escape_pressed` is the per-frame edge for Esc handling.
-    virtual void Tick(EditorContext& /*ctx*/, ToolKind /*active_tool*/,
-                      bool /*escape_pressed*/, EditEngine& /*engine*/) {}
+    virtual void Tick(EditorContext& /*ctx*/, InteractionState& /*state*/,
+                      ToolKind /*active_tool*/, bool /*escape_pressed*/,
+                      EditEngine& /*engine*/) {}
 
     // Optional 2D overlay (gizmo handles, anchor markers, preview text).
     // `mouse_captured` is true when *this* Tool currently owns the drag.
-    virtual void DrawOverlay(const ViewContext& /*vc*/,
+    virtual void DrawOverlay(const InteractionState& /*state*/,
+                             const ViewContext& /*vc*/,
                              OverlayDraw& /*out*/,
                              bool /*mouse_captured*/) const {}
 
@@ -58,7 +69,8 @@ public:
 
     // Abort any in-flight drag without committing. Called on tool-switch
     // and Esc. Default no-op for tools without persistent state.
-    virtual void Cancel(EditorContext& /*ctx*/, EditEngine& /*engine*/) {}
+    virtual void Cancel(EditorContext& /*ctx*/, InteractionState& /*state*/,
+                        EditEngine& /*engine*/) {}
 
 protected:
     // Subclasses override to produce a stable hash of "what would the
