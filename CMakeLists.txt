@@ -56,7 +56,7 @@ set(APP_SOURCES
     src/EditorContext.cpp
     src/ViewContext.cpp
     src/BoxSelectController.cpp
-    src/BrushController.cpp
+    src/BrushTool.cpp
     src/FaceController.cpp
     src/FloodSelectController.cpp
     src/GeneratorController.cpp

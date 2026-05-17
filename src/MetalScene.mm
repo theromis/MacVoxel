@@ -17,7 +17,7 @@
 #include <algorithm>
 
 #include "BoxSelectController.h"
-#include "BrushController.h"
+#include "BrushTool.h"
 #include "Camera.h"
 #include "CellKey.h"
 #include "Document.h"
@@ -39,11 +39,14 @@
 #include "Selection.h"
 #include "SelectionOps.h"
 #include "SelectionOverlay.h"
+#include "EditEngine.h"
 #include "ShapeController.h"
 #include "Shapes.h"
 #include "ToolState.h"
 #include "ViewContext.h"
 #include "XformHandleController.h"
+
+#include <memory>
 
 namespace {
 using DragMode = macvoxel::DragMode;
@@ -95,6 +98,17 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 
     // Re-used per frame to avoid allocator churn.
     macvoxel::OverlayDraw _od;
+
+    // GPU façade hiding the four Obj-C engines from pure-C++ Tools.
+    // Constructed in init once `_brushEngine` / `_shapeEngine` /
+    // `_generatorEngine` / `_docVolumeTex` are alive.
+    std::unique_ptr<macvoxel::EditEngine> _editEngine;
+
+    // Migrated tools (Phase 1). Shape / Face / Generator still flow
+    // through their controller namespaces + closures until their own
+    // Phase 1.x commits land. Selection tools (Marquee / BoxSelect /
+    // etc.) are out of scope for this refactor.
+    std::unique_ptr<macvoxel::BrushTool> _brushTool;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame
@@ -164,6 +178,11 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                 volume:_ctx->document.volume_shadow];
     if (_docVolumeTex == nil) return nil;
     _docVolumeTexCachedVersion = 0;
+
+    _editEngine = macvoxel::MakeEditEngine(_brushEngine, _shapeEngine,
+                                           _generatorEngine, _docVolumeTex,
+                                           _ctx->document.volume);
+    _brushTool = std::make_unique<macvoxel::BrushTool>();
 
     _interaction.gen_gizmo.active_drag_face = -1;  // 0 means -X face — explicit nil.
     _lastRenderMode = macvoxel::RenderMode::Edit;
@@ -418,33 +437,6 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         local.x0 = x0 - vol.x0; local.y0 = y0 - vol.y0; local.z0 = z0 - vol.z0;
         local.x1 = x1 - vol.x0; local.y1 = y1 - vol.y0; local.z1 = z1 - vol.z0;
         [brushEngine readTextureRegion:out target:texture bbox:local];
-    };
-}
-
-- (macvoxel::brush_controller::StampFn)brushStampFn {
-    BrushEngine *engine = _brushEngine;
-    VolumeTexture *texture = _docVolumeTex;
-    return [engine, texture](const macvoxel::BrushParams &params) {
-        [engine dispatch:params target:texture];
-    };
-}
-
-- (macvoxel::brush_controller::ReadBackFn)brushReadBackFn {
-    BrushEngine *engine = _brushEngine;
-    VolumeTexture *texture = _docVolumeTex;
-    macvoxel::EditorContext *ctx = _ctx;
-    return [engine, texture, ctx](const macvoxel::Bbox3 &world_bbox,
-                                  std::vector<uint8_t> *out) {
-        [engine waitForPendingWork];
-        const macvoxel::EditVolume &vol = ctx->document.volume;
-        macvoxel::Bbox3 local{};
-        local.x0 = world_bbox.x0 - vol.x0;
-        local.y0 = world_bbox.y0 - vol.y0;
-        local.z0 = world_bbox.z0 - vol.z0;
-        local.x1 = world_bbox.x1 - vol.x0;
-        local.y1 = world_bbox.y1 - vol.y0;
-        local.z1 = world_bbox.z1 - vol.z0;
-        [engine readTextureRegion:out target:texture bbox:local];
     };
 }
 
@@ -708,7 +700,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     // Space + left-click = pan (one-button-mouse alt for middle-click).
     if (_spaceHeld) {
         _interaction.drag_mode = DragMode::Pan;
-        _interaction.brush.last_drag_location = event.locationInWindow;
+        _interaction.last_drag_location = event.locationInWindow;
         return;
     }
     if (_interaction.gen_gizmo.active) {
@@ -783,26 +775,27 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         }
     } else {
         [self autoCommitFloatingBuffer];
-        macvoxel::brush_controller::OnMouseDown(
-            *_ctx, _interaction, [self viewContext],
-            [self mouseEventFromNSEvent:event], [self brushStampFn]);
+        _interaction.drag_mode = DragMode::Paint;
+        _brushTool->OnMouseDown(*_ctx, [self viewContext],
+                                [self mouseEventFromNSEvent:event],
+                                *_editEngine);
     }
 }
 
 - (void)mouseDragged:(NSEvent *)event {
     if (_interaction.drag_mode == DragMode::None) return;
     const NSPoint p = event.locationInWindow;
-    const float dx = static_cast<float>(p.x - _interaction.brush.last_drag_location.x);
-    const float dy = static_cast<float>(p.y - _interaction.brush.last_drag_location.y);
-    _interaction.brush.last_drag_location = p;
+    const float dx = static_cast<float>(p.x - _interaction.last_drag_location.x);
+    const float dy = static_cast<float>(p.y - _interaction.last_drag_location.y);
+    _interaction.last_drag_location = p;
 
     switch (_interaction.drag_mode) {
         case DragMode::Orbit: _camera.Orbit(dx, dy); break;
         case DragMode::Pan:   _camera.Pan(dx, dy);   break;
         case DragMode::Paint:
-            macvoxel::brush_controller::OnMouseDragged(
-                *_ctx, _interaction, [self viewContext],
-                [self mouseEventFromNSEvent:event], [self brushStampFn]);
+            _brushTool->OnMouseDragged(*_ctx, [self viewContext],
+                                        [self mouseEventFromNSEvent:event],
+                                        *_editEngine);
             break;
         case DragMode::Marquee:
             macvoxel::marquee_controller::OnMouseDragged(
@@ -857,8 +850,9 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 
 - (void)mouseUp:(NSEvent *)event {
     if (_interaction.drag_mode == DragMode::Paint) {
-        macvoxel::brush_controller::OnMouseUp(*_ctx, _interaction,
-                                              [self brushReadBackFn]);
+        _brushTool->OnMouseUp(*_ctx, [self viewContext],
+                              [self mouseEventFromNSEvent:event],
+                              *_editEngine);
     } else if (_interaction.drag_mode == DragMode::Marquee) {
         macvoxel::marquee_controller::OnMouseUp(
             *_ctx, _interaction.marquee, [self viewContext],
@@ -906,7 +900,6 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         }
     }
     _interaction.drag_mode = DragMode::None;
-    _interaction.brush.drag_skip_cells.clear();
 }
 
 // Right-click drives camera orbit, middle (other) click drives pan.
@@ -914,7 +907,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 // through _interaction.drag_mode.
 - (void)rightMouseDown:(NSEvent *)event {
     _interaction.drag_mode = DragMode::Orbit;
-    _interaction.brush.last_drag_location = event.locationInWindow;
+    _interaction.last_drag_location = event.locationInWindow;
 }
 
 - (void)rightMouseDragged:(NSEvent *)event { [self mouseDragged:event]; }
@@ -925,7 +918,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
 
 - (void)otherMouseDown:(NSEvent *)event {
     _interaction.drag_mode = DragMode::Pan;
-    _interaction.brush.last_drag_location = event.locationInWindow;
+    _interaction.last_drag_location = event.locationInWindow;
 }
 
 - (void)otherMouseDragged:(NSEvent *)event { [self mouseDragged:event]; }

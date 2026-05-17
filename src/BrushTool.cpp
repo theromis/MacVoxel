@@ -1,8 +1,9 @@
-#include "BrushController.h"
+#include "BrushTool.h"
 
 #include "BrushEngine.h"
 #include "CellKey.h"
 #include "Document.h"
+#include "EditEngine.h"
 #include "EditHistory.h"
 #include "EditorContext.h"
 #include "Input.h"
@@ -13,11 +14,10 @@
 #include "VoxelVolume.h"
 
 #include <algorithm>
-#include <climits>
 #include <cstdint>
 #include <vector>
 
-namespace macvoxel::brush_controller {
+namespace macvoxel {
 namespace {
 
 constexpr shapes::Vec3i kInvalidCell{INT32_MIN, INT32_MIN, INT32_MIN};
@@ -53,6 +53,16 @@ BrushParams BuildParams(const EditorContext& ctx,
     return p;
 }
 
+}  // namespace
+
+void BrushTool::ResetStrokeState() {
+    paint_mode_ = ToolMode::Add;
+    last_drag_edit_cell_ = kInvalidCell;
+    drag_skip_cells_.clear();
+    stroke_bbox_x0_ = stroke_bbox_y0_ = stroke_bbox_z0_ = INT32_MAX;
+    stroke_bbox_x1_ = stroke_bbox_y1_ = stroke_bbox_z1_ = INT32_MIN;
+}
+
 // Replicate the kernel's footprint walk on the CPU to build the
 // drag_skip_cells set + extend the stroke bbox. Doesn't touch
 // doc.grid or doc.volume_shadow — those stay frozen at pre-stroke
@@ -62,26 +72,39 @@ BrushParams BuildParams(const EditorContext& ctx,
 // we don't update grid mid-stroke, so it answers "was this cell empty
 // at the start of the stroke?" Cells that transition from 0→non-0
 // (Add) or non-0→0 (Remove) go into the skip set so the next pick's
-// raycast ignores them. Paint doesn't change occupancy so it skips
+// raycast ignores them. Paint doesn't change occupancy, so it skips
 // nothing.
-void TrackFootprint(const Document& doc, InteractionState& state,
-                    const BrushParams& p, ToolMode mode) {
-    const EditVolume& vol = doc.volume;
+void BrushTool::StampAtCursor(EditorContext& ctx, const ViewContext& vc,
+                              const MouseEvent& e, ToolMode mode,
+                              EditEngine& engine) {
+    shapes::Vec3i target;
+    int face_axis = 2;
+    if (!vc.ComputeTargetCell(e.local.x, e.local.y, mode, &target,
+                              &face_axis, drag_skip_cells_)) {
+        return;
+    }
+    if (SameCell(target, last_drag_edit_cell_)) return;
+    last_drag_edit_cell_ = target;
+
+    const BrushParams p = BuildParams(ctx, target.x, target.y, target.z,
+                                      face_axis, mode);
+
+    const EditVolume& vol = ctx.document.volume;
     const int lo = p.lo_x;
     const int hi = lo + p.size_x - 1;
     const float c = p.center_offset_x10 * 0.1f;
     const float r2 = p.r2;
     const bool is_3d = (p.flags & 1u) != 0;
     const bool is_circle = (p.flags & 2u) != 0;
-    auto& skip = state.brush.drag_skip_cells;
+    const Document& doc = ctx.document;
 
     auto extend_bbox = [&](int x, int y, int z) {
-        state.brush.stroke_bbox_x0 = std::min(state.brush.stroke_bbox_x0, x);
-        state.brush.stroke_bbox_y0 = std::min(state.brush.stroke_bbox_y0, y);
-        state.brush.stroke_bbox_z0 = std::min(state.brush.stroke_bbox_z0, z);
-        state.brush.stroke_bbox_x1 = std::max(state.brush.stroke_bbox_x1, x);
-        state.brush.stroke_bbox_y1 = std::max(state.brush.stroke_bbox_y1, y);
-        state.brush.stroke_bbox_z1 = std::max(state.brush.stroke_bbox_z1, z);
+        stroke_bbox_x0_ = std::min(stroke_bbox_x0_, x);
+        stroke_bbox_y0_ = std::min(stroke_bbox_y0_, y);
+        stroke_bbox_z0_ = std::min(stroke_bbox_z0_, z);
+        stroke_bbox_x1_ = std::max(stroke_bbox_x1_, x);
+        stroke_bbox_y1_ = std::max(stroke_bbox_y1_, y);
+        stroke_bbox_z1_ = std::max(stroke_bbox_z1_, z);
     };
 
     for (int dz = lo; dz <= hi; ++dz) {
@@ -112,58 +135,41 @@ void TrackFootprint(const Document& doc, InteractionState& state,
                     changes_occupancy = (pre != 0);
                 }
                 // Track the bbox of every kernel-touched cell (Paint
-                // included), so the readback covers all post-stroke
-                // changes. Paint changes color but not occupancy, so
-                // it does extend the bbox but doesn't add to skip.
+                // included) so the readback covers all post-stroke
+                // changes. Paint changes color but not occupancy, so it
+                // extends the bbox but doesn't add to skip.
                 extend_bbox(x, y, z);
                 if (changes_occupancy) {
-                    skip.insert(PackCellKey(x, y, z));
+                    drag_skip_cells_.insert(PackCellKey(x, y, z));
                 }
             }
         }
     }
-}
 
-void StampAtCursor(EditorContext& ctx, InteractionState& state,
-                   const ViewContext& vc, const MouseEvent& e,
-                   ToolMode mode, const StampFn& stamp) {
-    shapes::Vec3i target;
-    int face_axis = 2;
-    if (!vc.ComputeTargetCell(e.local.x, e.local.y, mode, &target,
-                              &face_axis, state.brush.drag_skip_cells)) {
-        return;
-    }
-    if (SameCell(target, state.brush.last_drag_edit_cell)) return;
-    state.brush.last_drag_edit_cell = target;
-
-    const BrushParams params = BuildParams(ctx, target.x, target.y, target.z,
-                                           face_axis, mode);
-    TrackFootprint(ctx.document, state, params, mode);
-    stamp(params);
+    engine.BrushStamp(p);
 }
 
 // End-of-stroke sync. Bounds the readback to the stroke's union bbox
-// (clipped to the edit volume — out-of-volume writes are dropped by
-// the kernel anyway). Computes the per-cell diff vs the still-pre-
-// stroke shadow, then batch-applies to doc + history.
-void SyncStrokeFromTexture(EditorContext& ctx, InteractionState& state,
-                           const ReadBackFn& readback) {
-    const auto& s = state.brush;
-    if (s.stroke_bbox_x0 > s.stroke_bbox_x1) return;  // no stamps fired
+// (clipped to the edit volume — out-of-volume writes are dropped by the
+// kernel anyway). Computes the per-cell diff vs the still-pre-stroke
+// shadow, then batch-applies to doc + history.
+void BrushTool::SyncStrokeFromTexture(EditorContext& ctx,
+                                       EditEngine& engine) {
+    if (stroke_bbox_x0_ > stroke_bbox_x1_) return;  // no stamps fired
 
     Document& doc = ctx.document;
     const EditVolume& vol = doc.volume;
-    Bbox3 bb;
-    bb.x0 = std::max(s.stroke_bbox_x0, vol.x0);
-    bb.y0 = std::max(s.stroke_bbox_y0, vol.y0);
-    bb.z0 = std::max(s.stroke_bbox_z0, vol.z0);
-    bb.x1 = std::min(s.stroke_bbox_x1, vol.x1);
-    bb.y1 = std::min(s.stroke_bbox_y1, vol.y1);
-    bb.z1 = std::min(s.stroke_bbox_z1, vol.z1);
+    Bbox3 bb{};
+    bb.x0 = std::max(stroke_bbox_x0_, vol.x0);
+    bb.y0 = std::max(stroke_bbox_y0_, vol.y0);
+    bb.z0 = std::max(stroke_bbox_z0_, vol.z0);
+    bb.x1 = std::min(stroke_bbox_x1_, vol.x1);
+    bb.y1 = std::min(stroke_bbox_y1_, vol.y1);
+    bb.z1 = std::min(stroke_bbox_z1_, vol.z1);
     if (bb.x0 > bb.x1 || bb.y0 > bb.y1 || bb.z0 > bb.z1) return;
 
     std::vector<uint8_t> post;
-    readback(bb, &post);
+    engine.Readback(bb, &post);
 
     const size_t bw = static_cast<size_t>(bb.x1 - bb.x0 + 1);
     const size_t bh = static_cast<size_t>(bb.y1 - bb.y0 + 1);
@@ -171,12 +177,8 @@ void SyncStrokeFromTexture(EditorContext& ctx, InteractionState& state,
     if (post.size() < bw * bh * bd) return;
 
     std::vector<CellChange> diff;
-    diff.reserve(s.drag_skip_cells.size() + 16);
+    diff.reserve(drag_skip_cells_.size() + 16);
 
-    // Iterate the bbox densely and emit per-cell diff entries where the
-    // texture state differs from the still-pre-stroke shadow. The
-    // shadow's Get() is O(1) (dense index); post is laid out
-    // x-fastest, then y, then z (matching VolumeTexture's upload).
     for (size_t lz = 0; lz < bd; ++lz) {
         for (size_t ly = 0; ly < bh; ++ly) {
             const size_t row_base = lz * bw * bh + ly * bw;
@@ -198,7 +200,7 @@ void SyncStrokeFromTexture(EditorContext& ctx, InteractionState& state,
 
     if (diff.empty()) {
         // Texture is still consistent with shadow — bbox was tracked
-        // but no cells actually changed (e.g. Add over fully-filled
+        // but no cells actually changed (e.g. Add over already-filled
         // region). Nothing to record.
         return;
     }
@@ -207,44 +209,50 @@ void SyncStrokeFromTexture(EditorContext& ctx, InteractionState& state,
     doc.ApplyChanges(diff.data(), diff.size());
     history.RecordBatch(diff.data(), diff.size());
 
-    // The Apply above marked the shadow's chunks dirty (via Set's
-    // dirty-bit). Drain — the GPU texture has been authoritative the
-    // whole stroke, so the next render-pass sync should upload nothing.
+    // ApplyChanges marked the shadow's chunks dirty. Drain — the GPU
+    // texture has been authoritative the whole stroke, so the next
+    // render-pass sync should upload nothing.
     (void)doc.volume_shadow.TakeDirtyChunks();
     doc.BumpGeometry();
 }
 
-}  // namespace
-
-void OnMouseDown(EditorContext& ctx, InteractionState& state,
-                 const ViewContext& vc, const MouseEvent& e,
-                 const StampFn& stamp) {
+bool BrushTool::OnMouseDown(EditorContext& ctx, const ViewContext& vc,
+                            const MouseEvent& e, EditEngine& engine) {
     const ToolMode mode = e.mods.command ? ToolMode::Remove : ctx.tool.mode;
-    state.drag_mode = DragMode::Paint;
-    state.brush.paint_mode = mode;
-    state.brush.last_drag_edit_cell = kInvalidCell;
-    state.brush.drag_skip_cells.clear();
-    state.brush.stroke_bbox_x0 = INT32_MAX;
-    state.brush.stroke_bbox_y0 = INT32_MAX;
-    state.brush.stroke_bbox_z0 = INT32_MAX;
-    state.brush.stroke_bbox_x1 = INT32_MIN;
-    state.brush.stroke_bbox_y1 = INT32_MIN;
-    state.brush.stroke_bbox_z1 = INT32_MIN;
+    ResetStrokeState();
+    paint_mode_ = mode;
+    is_dragging_ = true;
     ctx.history.BeginOp();
-    StampAtCursor(ctx, state, vc, e, mode, stamp);
+    StampAtCursor(ctx, vc, e, mode, engine);
+    return true;
 }
 
-void OnMouseDragged(EditorContext& ctx, InteractionState& state,
-                    const ViewContext& vc, const MouseEvent& e,
-                    const StampFn& stamp) {
-    StampAtCursor(ctx, state, vc, e, state.brush.paint_mode, stamp);
+void BrushTool::OnMouseDragged(EditorContext& ctx, const ViewContext& vc,
+                                const MouseEvent& e, EditEngine& engine) {
+    if (!is_dragging_) return;
+    StampAtCursor(ctx, vc, e, paint_mode_, engine);
 }
 
-void OnMouseUp(EditorContext& ctx, InteractionState& state,
-               const ReadBackFn& readback) {
-    SyncStrokeFromTexture(ctx, state, readback);
+void BrushTool::OnMouseUp(EditorContext& ctx, const ViewContext& /*vc*/,
+                           const MouseEvent& /*e*/, EditEngine& engine) {
+    if (!is_dragging_) return;
+    SyncStrokeFromTexture(ctx, engine);
     ctx.history.CommitOp();
-    state.brush.drag_skip_cells.clear();
+    is_dragging_ = false;
+    ResetStrokeState();
 }
 
-}  // namespace macvoxel::brush_controller
+void BrushTool::Cancel(EditorContext& ctx, EditEngine& engine) {
+    if (!is_dragging_) return;
+    // Treat cancel like a normal commit-by-readback: anything the
+    // kernel already wrote to tex_a stays, and we record it as the
+    // stroke's history so the user can undo it. The brush kernel
+    // writes the doc texture *directly* so there's no preview to
+    // discard — the writes are real.
+    SyncStrokeFromTexture(ctx, engine);
+    ctx.history.CommitOp();
+    is_dragging_ = false;
+    ResetStrokeState();
+}
+
+}  // namespace macvoxel

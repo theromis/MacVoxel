@@ -8,9 +8,7 @@
 #include <CoreGraphics/CGGeometry.h>
 #include <simd/simd.h>
 
-#include <climits>
 #include <cstdint>
-#include <unordered_set>
 #include <vector>
 
 namespace macvoxel {
@@ -50,24 +48,16 @@ struct InteractionState {
     // commit/abort path.
     DragMode drag_mode = DragMode::None;
 
-    // Brush stream — drag-paint along the cursor path. Captures the
-    // mode at stroke start so changing the panel mid-stroke doesn't
-    // partway-flip the operation; tracks the last edited cell so the
-    // raycaster can ignore the stroke's own placements (otherwise the
-    // brush marches outward along the face normal).
-    struct BrushStream {
-        ToolMode paint_mode = ToolMode::Add;
-        shapes::Vec3i last_drag_edit_cell{0, 0, 0};
-        CGPoint last_drag_location{};
-        std::unordered_set<int64_t> drag_skip_cells;
-        // Union AABB of every stamp's footprint in this stroke. Used
-        // at OnMouseUp to bound the texture readback. INT32_MAX/MIN
-        // sentinels = empty (no stamps yet).
-        int32_t stroke_bbox_x0 = INT32_MAX, stroke_bbox_y0 = INT32_MAX,
-                stroke_bbox_z0 = INT32_MAX;
-        int32_t stroke_bbox_x1 = INT32_MIN, stroke_bbox_y1 = INT32_MIN,
-                stroke_bbox_z1 = INT32_MIN;
-    } brush;
+    // Last mouse window-coords position, used by every dragging gesture
+    // (Orbit, Pan, Paint, …) to compute per-frame deltas. The drag's
+    // first event seeds this on mouseDown / rightMouseDown / etc.;
+    // mouseDragged reads then overwrites it. Lives at the top level
+    // because it's not tool-specific.
+    CGPoint last_drag_location{};
+
+    // Brush gesture state moved into `BrushTool`; the stub remains so
+    // Phase 4's dissolution commit has something to delete in one go.
+    struct BrushStream {} brush;
 
     // Cursor hover — last known mouse position in view-local coords,
     // and whether the cursor is currently inside the view. Drives
