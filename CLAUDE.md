@@ -30,6 +30,13 @@ commits on `main`. As of 2026-05-16:
   preview texture (`tex_t`) the rasterizer composites over the doc.
   Each tool's kernel writes `tex_t`; commit kernel promotes it into
   the doc + clears `tex_t`.
+- **Tool/EditEngine refactor (2026-05-17)**: closure-bag controllers
+  replaced by a `Tool` base class + `ToolRegistry` + a pure-C++
+  `EditEngine` façade. Unified `commit_generic` MSL kernel covers
+  Shape + Generator commits. Dispatch-on-state-change enforced via
+  `Tool::ShouldDispatch`. Face and Brush stayed on their specialized
+  commit paths pending a `preview_rem` mask refactor — see the
+  "Tool abstraction" section below.
 
 The CPU `PreviewOverlay` is dormant — every active-development tool
 now writes `tex_t` instead. The rasterizer still binds the legacy
@@ -44,9 +51,11 @@ Deferred polish, not yet implemented:
 - Drag-drop a `.vox` onto the running window (cold-launch via Finder
   Open With works through `.onOpenURL`).
 - Theme parity vs the old `ui/Theme.cpp` pro-app dark.
-- Preview visualization of Face Remove / Add-negative-d (cells are
-  committed correctly but appear unchanged during the drag — would
-  need a `preview_rem` mask texture to render "hidden doc cells").
+- **`preview_rem` mask texture**: required to migrate Face commit
+  + Brush kernel onto commit_generic (Phases 2.3 / 2.4 of the Tool
+  refactor — see plan `happy-juggling-volcano.md`). Without the
+  mask, Remove-mode preview cells would render as visible color
+  during the drag instead of as "hidden doc cells".
 - 2D-brush variants of the shape kernels (`brush_3d == 0`) render
   nothing in `shape_main` — would need either an in-plane mask or a
   CPU fallback.
@@ -122,10 +131,13 @@ src/
 │                          mode-on-tex_a checks), shape_line_project_main
 │                          (Line's project mode — iterates CPU-
 │                          enumerated cell list per thread),
-│                          shape_stamp_cells (per-cell-entry thread,
-│                          used by Face), shape_commit_cells (per-cell
-│                          commit, used by Face), shape_clear,
-│                          shape_commit.
+│                          shape_stamp_cells + shape_commit_cells
+│                          (per-cell scatter, used by Face),
+│                          shape_clear, and commit_generic — the
+│                          Magica `shader_0018.glsl` blend
+│                          (bm = 1/Add, 2/Erase, 3/Replace, 4/Intersect;
+│                          source = tex_t or constant fill). Shape and
+│                          Generator route through commit_generic.
 ├── GeneratorEngine.{h,mm} Generator kernel dispatcher. One PSO per
 │                          Kind. dispatchInto writes tex_t directly;
 │                          the union of (current_bounds,
@@ -166,13 +178,20 @@ src/
 │                          GPU-authoritative tools commit via
 │                          ShapeEngine's kernels + diff readback.
 │
-│   Per-tool gesture controllers — see "Controllers" below
-├── InteractionState.h     One struct of every gesture's per-tool
-│                          slice. Tools that own a stroke bbox /
-│                          union bbox for end-of-stroke readback
-│                          carry the INT32_MIN/MAX-sentinel fields
-│                          inline (brush, anchor for shape, face,
-│                          gen_gizmo).
+│   Per-tool gesture state & dispatch — see "Tool abstraction" below
+├── Tool.h                 Abstract base class for volume-writing tools.
+├── ToolRegistry.{h,cpp}   Owns one of each Tool subclass; MetalScene
+│                          dispatches via `ToolFor(ToolKind)`.
+├── EditEngine.{h,mm}      Pure-C++ façade wrapping BrushEngine /
+│                          ShapeEngine / GeneratorEngine / VolumeTexture.
+├── InteractionState.h     Shared gesture state only: drag_mode,
+│                          last_drag_location, hover, selection-tool
+│                          sub-structs, the two-click anchor (shared
+│                          between Shape and Generator), and a single
+│                          bool gen_gizmo_active mirrored from
+│                          GeneratorTool for SelectionOverlay's benefit.
+│                          The per-tool gesture state lives privately
+│                          inside each Tool subclass.
 ├── Input.h                MouseEvent + ModifierFlags — AppKit-free.
 ├── ViewContext.{h,cpp}    Stateless picking + drag-projection.
 │                          PickFace falls back to IntersectVolumeWall
@@ -182,29 +201,31 @@ src/
 │                          actually outside the wall (the midpoint
 │                          heuristic broke when the camera sat
 │                          inside the volume on an axis).
-├── BrushOps.{h,cpp}       LEGACY CPU brush. Still compiles, but
-│                          BrushController no longer calls
-│                          StampBrushFootprint(preview=false). The
-│                          preview=true path is still used by older
-│                          tooling that bypasses tex_t (none active).
-├── BrushController.{h,cpp}        Closure pattern (StampFn /
-│                                  ReadBackFn) around BrushEngine.
-├── ShapeController.{h,cpp}        Line / Circle / Square / Box.
-│                                  PreviewFn + PreviewLineProjectFn
-│                                  + CommitFn + ReadBackFn.
-├── FaceController.{h,cpp}         CPU flood + GPU stamp_cells per
-│                                  mouseDragged. Wall flood-fill via
-│                                  FloodCoplanarEmpty. Mode-aware
-│                                  CPU enumeration with skip-no-ops.
+├── BrushOps.{h,cpp}       LEGACY CPU brush. Still compiles. The
+│                          preview=true path is unused by current
+│                          tooling but `ComputeNewCellValue` is still
+│                          reachable from the brush kernel's CPU-side
+│                          mode rules.
+├── BrushTool.{h,cpp}              Brush — writes tex_a directly
+│                                  (commit_generic migration deferred).
+├── ShapeTool.{h,cpp}              Line / Circle / Square / Box.
+│                                  Writes tex_t, commits via
+│                                  commit_generic. BeginShapeAnchor
+│                                  free function exposed for Generator.
+├── FaceTool.{h,cpp}               CPU flood + GPU stamp_cells per
+│                                  mouseDragged (the specialized
+│                                  scatter path stays until preview_rem
+│                                  unblocks commit_generic migration).
+│                                  Wall flood-fill via FloodCoplanarEmpty.
+├── GeneratorTool.{h,cpp}          Persistent gizmo (drag-out → idle →
+│                                  commit). Tick-time dirty check via
+│                                  ShouldDispatch. Commit() exposed
+│                                  publicly for Enter-key handler.
 ├── MarqueeController.{h,cpp}      Selection (unchanged).
 ├── BoxSelectController.{h,cpp}    Selection (unchanged).
 ├── FloodSelectController.{h,cpp}  Selection (unchanged).
 ├── MoveSelectController.{h,cpp}   Selection-drag (unchanged).
 ├── XformHandleController.{h,cpp}  Transform gizmo (unchanged).
-├── GeneratorController.{h,cpp}    GenerateFn now dispatches kernel
-│                                  into tex_t (no out-cells vector).
-│                                  CommitFn + ReadBackFn at commit
-│                                  time (reuses ShapeEngine).
 │
 │   View shell + renderers
 ├── MetalScene.{h,mm}      MTKView subclass — *thin shell + dispatcher*.
@@ -212,15 +233,12 @@ src/
 │                          queue), RaycastRenderer, PathTraceRenderer,
 │                          SceneOverlayRenderer, GeneratorEngine,
 │                          BrushEngine, ShapeEngine, VolumeTexture,
-│                          Camera, InteractionState. Builds closure
-│                          fns for every controller that needs GPU
-│                          access (brushStampFn, brushReadBackFn,
-│                          shapePreviewFn, shapeProjectFn,
-│                          shapeCommitFn, shapeReadBackFn,
-│                          generateFn, generatorCommitFn,
-│                          generatorReadBackFn, faceStampFn,
-│                          faceCommitFn, faceClearBboxFn,
-│                          faceReadBackFn).
+│                          Camera, InteractionState, ToolRegistry,
+│                          EditEngine. mouseDown/Dragged/Up forward
+│                          to _activeTool (set on mouseDown via
+│                          _toolRegistry->ToolFor(_ctx->tool.tool));
+│                          selection tools and the gen-gizmo intercept
+│                          have their own branches.
 ├── RaycastRenderer.{h,mm} Rasterizer fragment shader. DDA samples
 │                          tex_a directly (with chunk-skip via
 │                          oracle), preview_tex when active (with
@@ -318,35 +336,68 @@ also means: don't read `VoxelGrid` or `volume_shadow` for cells in
 the active stroke's bbox — they're stale until commit. Use the
 texture (or the controller's local state).
 
-## Tool controllers as closures
+## Tool abstraction
 
-Every per-tool gesture controller is pure C++ that calls into
-Obj-C++ engines via `std::function` closures built by `MetalScene`.
-Same pattern the original `GeneratorController` used, now generalized:
+Every volume-writing tool is a `Tool` subclass (`src/Tool.h`) owned
+by `ToolRegistry`. The dispatcher in `MetalScene` looks up
+`_toolRegistry->ToolFor(_ctx->tool.tool)` at `mouseDown`, stashes
+the result in `_activeTool`, and routes subsequent `mouseDragged` /
+`mouseUp` events back to that pointer. Selection tools
+(Marquee / BoxSelect / FloodSelect / MoveSelect / XformHandle) stay
+on their per-controller branches — they don't write to the volume.
 
-| Controller | Closures `MetalScene` builds | What they wrap |
+The `Tool` virtual interface:
+  - `OnMouseDown` / `OnMouseDragged` / `OnMouseUp` (with
+    `EditorContext`, `InteractionState`, `ViewContext`, `MouseEvent`,
+    `EditEngine&`)
+  - `Tick` (per-frame, used by Generator for dirty-checking the gizmo)
+  - `DrawOverlay` (overlay rendering — only Generator has one today)
+  - `IsDragging` / `Cancel`
+  - `DispatchParamsHash` + `ShouldDispatch` (the dispatch-on-state-change
+    helper — see "Tool perf rule" below)
+
+| Tool | File | Notes |
 | --- | --- | --- |
-| Brush | `StampFn`, `ReadBackFn` | `BrushEngine.dispatch:` / `.readTextureRegion:` |
-| Shape | `PreviewFn`, `PreviewLineProjectFn`, `CommitFn`, `ReadBackFn` | `ShapeEngine.dispatchPreview:` / `.dispatchLineProjectPreview:` / `.commitShape:` / brush's readback |
-| Generator | `GenerateFn`, `CommitFn`, `ReadBackFn` | `GeneratorEngine.dispatchInto:` / shape's `commitShape:` |
-| Face | `StampCellsFn`, `CommitCellsFn`, `ClearBboxFn`, `ReadBackFn` | `ShapeEngine.dispatchStampCells:` / `.dispatchCommitCells:` / `.clearPreviewBbox:` / brush's readback |
+| Brush | `BrushTool.{h,cpp}` | Writes `tex_a` directly (no commit pass yet — Phase 2.4 deferred behind `preview_rem`). |
+| Shape | `ShapeTool.{h,cpp}` | Line/Circle/Square/Box. Writes `tex_t`, commits via `commit_generic`. `BeginShapeAnchor` is a free function here, also called by Generator. |
+| Face | `FaceTool.{h,cpp}` | Still on the per-cell scatter path (`shape_stamp_cells` + `shape_commit_cells`) — Phase 2.3 migration deferred behind `preview_rem`. |
+| Generator | `GeneratorTool.{h,cpp}` | Persistent gizmo (drag-out → idle-with-handles → commit). Public `Commit` so MetalScene's Enter-key handler can fire it. `HasActiveGizmo` for the dispatcher's special-case intercept. |
 
-The pure-C++ controllers never see Metal types, and the Obj-C++
-engines never see controller state. Each closure has a self-contained
-contract (params in, no callback out — or a single output reference
-for the readback).
+`EditEngine` (`src/EditEngine.{h,mm}`) is the pure-C++ façade tools
+call into instead of the old `std::function` closures. The Obj-C++
+impl wraps `BrushEngine` / `ShapeEngine` / `GeneratorEngine` /
+`VolumeTexture` and handles world↔texture-local translation for the
+bbox-shaped methods.
+
+The unified commit kernel `commit_generic` (in `ShapeKernel.metal`)
+implements the MagicaVoxel `shader_0018.glsl` shape — bm-parameterized
+blend (Add / Erase / Replace / Intersect) + brush-source selector
+(`tex_t` vs constant fill). Shape + Generator commits route through
+it. Face and Brush still use specialized paths because their
+Remove-mode semantics need a `preview_rem` mask texture (deferred)
+to avoid making erase-preview cells render as visible color during
+the drag.
 
 ## Tool perf rule: dispatch only on state change
 
 The single biggest perf lesson from the B3 phase: **don't dispatch
 every `mouseDragged` event when the target state hasn't changed**.
-Generator's `Tick` does an explicit dirty check (kind / bounds /
-palette / params); shape tools dispatch every event and feel slower
-as a result. Face's controller already includes the dirty check
-(`d` and `face_with`). If you add a new tool, copy Generator's
-pattern.
+Enforced uniformly via `Tool::ShouldDispatch(uint64_t)` + per-Tool
+hash construction:
+  - ShapeTool hashes endpoint + kind + brush size/shape/3d + mode +
+    fill/even toggles (+ raw pixels for project-mode Line).
+  - FaceTool hashes `d` + `face_with`.
+  - GeneratorTool hashes `gs.active_kind` + bounds + palette + the
+    per-kind params; called from `Tick`, not `OnMouseDragged`.
+  - BrushTool skips — each stamp is at a new cursor cell, and
+    `BrushTool::StampAtCursor`'s per-cell `last_drag_edit_cell` check
+    already covers the case.
 
-Other rules:
+If you add a new tool, override `Tool::DispatchParamsHash`, call
+`ResetDispatchHash()` from your `OnMouseDown`, and gate the kernel
+dispatch behind `ShouldDispatch(DispatchParamsHash(...))`.
+
+Other perf rules:
 - Keep the kernel dispatch bbox **tight**. Union with previous
   frame's bbox only when needed (to clear stale cells); don't grow
   union across the whole stroke if you don't need to.
