@@ -10,6 +10,7 @@ namespace macvoxel {
 struct BrushParams;
 struct ShapeParams;
 struct CellPalette;
+struct CommitGenericParams;
 struct Bbox3;
 struct EditVolume;
 
@@ -77,6 +78,12 @@ public:
     // cells; applies the mode rule (Add only fills empty, Paint only
     // repaints occupied, Remove zeroes any).
     virtual void CommitShape(const ShapeParams& params) = 0;
+
+    // Generic commit — the Magica `shader_0018.glsl` pipeline.
+    // Phase 2.2+ routes Shape, Generator, Face, and Brush commits
+    // through this one method (and the underlying commit_generic
+    // MSL kernel) parameterized by `bm` + `brush` selectors.
+    virtual void CommitGeneric(const CommitGenericParams& params) = 0;
 
     // Wait for every previously-enqueued kernel to drain, then blit the
     // (world-cell) bbox out of the doc texture into `out_bytes`.

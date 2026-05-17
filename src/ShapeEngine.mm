@@ -40,6 +40,19 @@ struct StampCellsUniforms {
 static_assert(sizeof(StampCellsUniforms) == 16,
               "StampCellsUniforms layout drift");
 
+// Mirror of ShapeKernel.metal's `CommitGenericUniforms`. int3 fields
+// pad to 16 bytes in MSL — keep the [4] trailing pad here.
+struct CommitGenericUniforms {
+    int32_t dispatch_lo[4];
+    int32_t dispatch_size[4];
+    uint32_t bm;
+    uint32_t brush;
+    uint32_t fill_palette;
+    uint32_t _pad;
+};
+static_assert(sizeof(CommitGenericUniforms) == 48,
+              "CommitGenericUniforms layout drift");
+
 NSString* LoadShapeLibrarySource() {
     NSURL* url = [NSBundle.mainBundle URLForResource:@"ShapeKernel"
                                        withExtension:@"metal"];
@@ -113,6 +126,7 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     id<MTLComputePipelineState> _commitPSO;
     id<MTLComputePipelineState> _stampCellsPSO;
     id<MTLComputePipelineState> _commitCellsPSO;
+    id<MTLComputePipelineState> _commitGenericPSO;
     id<MTLCommandBuffer> _lastBuffer;
     // Project-mode cell buffer — grows as needed to hold the picked
     // cell list. Packed (x, y, z, _pad) per cell to align with MSL's
@@ -167,9 +181,10 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     _commitPSO  = makePso(@"shape_commit");
     _stampCellsPSO  = makePso(@"shape_stamp_cells");
     _commitCellsPSO = makePso(@"shape_commit_cells");
+    _commitGenericPSO = makePso(@"commit_generic");
     if (_previewPSO == nil || _projectPSO == nil || _clearPSO == nil ||
         _commitPSO == nil || _stampCellsPSO == nil ||
-        _commitCellsPSO == nil) {
+        _commitCellsPSO == nil || _commitGenericPSO == nil) {
         return nil;
     }
     return self;
@@ -382,6 +397,41 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     const NSUInteger tg = std::min<NSUInteger>(64, cell_count);
     const MTLSize threadsPerThreadgroup = MTLSizeMake(tg, 1, 1);
     const MTLSize threadgroups = MTLSizeMake((cell_count + tg - 1) / tg, 1, 1);
+    [enc dispatchThreadgroups:threadgroups
+        threadsPerThreadgroup:threadsPerThreadgroup];
+    [enc endEncoding];
+    [cmd commit];
+    _lastBuffer = cmd;
+}
+
+- (void)dispatchCommitGeneric:(const macvoxel::CommitGenericParams&)p
+                        target:(VolumeTexture*)texture {
+    CommitGenericUniforms u{};
+    u.dispatch_lo[0] = p.dispatch_lo_x;
+    u.dispatch_lo[1] = p.dispatch_lo_y;
+    u.dispatch_lo[2] = p.dispatch_lo_z;
+    u.dispatch_size[0] = p.dispatch_size_x;
+    u.dispatch_size[1] = p.dispatch_size_y;
+    u.dispatch_size[2] = p.dispatch_size_z;
+    u.bm = p.bm;
+    u.brush = p.brush;
+    u.fill_palette = p.fill_palette;
+
+    id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+    cmd.label = @"CommitGeneric";
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:_commitGenericPSO];
+    [enc setBytes:&u length:sizeof(u) atIndex:0];
+    [enc setTexture:texture.texture atIndex:0];
+    [enc setTexture:texture.previewTexture atIndex:1];
+    [enc setTexture:texture.oracleTexture atIndex:2];
+
+    const NSUInteger tgX = 4, tgY = 4, tgZ = 4;
+    const MTLSize threadsPerThreadgroup = MTLSizeMake(tgX, tgY, tgZ);
+    const MTLSize threadgroups = MTLSizeMake(
+        ((NSUInteger)p.dispatch_size_x + tgX - 1) / tgX,
+        ((NSUInteger)p.dispatch_size_y + tgY - 1) / tgY,
+        ((NSUInteger)p.dispatch_size_z + tgZ - 1) / tgZ);
     [enc dispatchThreadgroups:threadgroups
         threadsPerThreadgroup:threadsPerThreadgroup];
     [enc endEncoding];

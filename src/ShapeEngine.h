@@ -40,6 +40,26 @@ struct CellPalette {
     uint32_t palette;
 };
 
+// Pure-C++ parameters for the generic commit kernel — the Magica
+// `shader_0018.glsl` shape. `bm` (blend mode) and `brush` (source
+// selector) match the MSL constants in `ShapeKernel.metal`.
+//
+// bm:    1 = Add (fill where doc is empty)
+//        2 = Erase (zero doc where preview is set)
+//        3 = Replace (write preview where both doc and preview are set)
+//        4 = Intersect (clear doc where preview is empty)
+// brush: 0 = sample preview texture (tex_t)
+//        1 = use the `fill_palette` constant per cell
+struct CommitGenericParams {
+    // Dispatch bbox in texture-local cells (world cell minus
+    // EditVolume's lo).
+    int32_t dispatch_lo_x, dispatch_lo_y, dispatch_lo_z;
+    int32_t dispatch_size_x, dispatch_size_y, dispatch_size_z;
+    uint32_t bm;
+    uint32_t brush;
+    uint32_t fill_palette;  // used when brush == 1
+};
+
 }  // namespace macvoxel
 
 #ifdef __OBJC__
@@ -102,6 +122,12 @@ struct CellPalette {
 - (void)dispatchCommitCells:(nonnull const macvoxel::CellPalette*)cells
                   cellCount:(NSUInteger)cell_count
                      target:(nonnull VolumeTexture*)texture;
+
+// Generic commit — blends tex_t (or a constant) into tex_a over a
+// dispatch bbox per `bm` / `brush` selectors. Phase 2.2+ routes
+// Shape, Generator, Face, and Brush commits through this one kernel.
+- (void)dispatchCommitGeneric:(const macvoxel::CommitGenericParams&)params
+                       target:(nonnull VolumeTexture*)texture;
 
 - (void)waitForPendingWork;
 

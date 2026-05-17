@@ -81,6 +81,10 @@ public:
         [shape_ commitShape:params target:texture_];
     }
 
+    void CommitGeneric(const CommitGenericParams& params) override {
+        [shape_ dispatchCommitGeneric:params target:texture_];
+    }
+
     void Readback(const Bbox3& world_bbox,
                   std::vector<uint8_t>* out_bytes) override {
         // ShapeEngine and BrushEngine share the dedicated brush command

@@ -27,6 +27,19 @@ constant uint kModeAdd    = 0u;
 constant uint kModeRemove = 1u;
 constant uint kModePaint  = 2u;
 
+// commit_generic blend modes (Magica's shader_0018 `bm` selector).
+// Distinct from kModeAdd/Remove/Paint — these are 1-indexed and add
+// Intersect as bm=4. Phase 2.2+ routes all per-tool commit kernels
+// through this one.
+constant uint kCommitBmAdd       = 1u;  // r = a > 0 ? a : t
+constant uint kCommitBmErase     = 2u;  // r = t > 0 ? 0 : a
+constant uint kCommitBmReplace   = 3u;  // r = (a&&t) > 0 ? t : a
+constant uint kCommitBmIntersect = 4u;  // r = (a&&t) > 0 ? t : 0
+
+// commit_generic source selector for the per-cell "t" value.
+constant uint kCommitBrushPreview  = 0u;  // sample preview (tex_t)
+constant uint kCommitBrushConstant = 1u;  // use uniforms.fill_palette
+
 constant int kShapeLine   = 0;
 constant int kShapeCircle = 1;
 constant int kShapeSquare = 2;
@@ -450,4 +463,68 @@ kernel void shape_commit(
     }
     // Clear the preview cell either way — stroke is committed.
     preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+}
+
+// Generic commit kernel — the Magica `shader_0018.glsl` shape. Loops
+// over a dispatch bbox, reads doc + a source value (tex_t or constant
+// fill), blends via `bm`, writes the result to tex_a. Clears tex_t in
+// the bbox so a subsequent stroke starts clean. Replaces the per-tool
+// commit kernels in Phase 2.2-2.5 — the bm/brush parameterization
+// covers Add / Erase / Replace / Intersect uniformly.
+//
+// Phase 2.1 (this commit): kernel exists but has no callers. Phases
+// 2.2-2.4 wire shape / generator / face / brush onto it.
+struct CommitGenericUniforms {
+    int3 dispatch_lo;     // bbox start (texture-local cells)
+    int  _pad0;
+    int3 dispatch_size;   // bbox dims
+    int  _pad1;
+    uint bm;              // 1=Add 2=Erase 3=Replace 4=Intersect
+    uint brush;           // 0=tex_t source, 1=constant fill_palette
+    uint fill_palette;    // used when brush == 1
+    uint _pad2;
+};
+
+kernel void commit_generic(
+    constant CommitGenericUniforms&       u           [[buffer(0)]],
+    texture3d<uint, access::read_write>   tex_a       [[texture(0)]],
+    texture3d<uint, access::read_write>   preview     [[texture(1)]],
+    texture3d<uint, access::write>        doc_oracle  [[texture(2)]],
+    uint3                                  gid         [[thread_position_in_grid]])
+{
+    int3 d = int3(gid);
+    if (any(d >= u.dispatch_size)) return;
+    int3 cell_local = u.dispatch_lo + d;
+
+    uint a = tex_a.read(uint3(cell_local)).r;
+    uint t;
+    if (u.brush == kCommitBrushPreview) {
+        t = preview.read(uint3(cell_local)).r;
+    } else {
+        t = u.fill_palette;
+    }
+
+    uint r = a;
+    if (u.bm == kCommitBmAdd) {
+        if (a == 0u) r = t;
+    } else if (u.bm == kCommitBmErase) {
+        if (t != 0u) r = 0u;
+    } else if (u.bm == kCommitBmReplace) {
+        if (a != 0u && t != 0u) r = t;
+    } else if (u.bm == kCommitBmIntersect) {
+        r = (a != 0u && t != 0u) ? t : 0u;
+    }
+
+    if (r != a) {
+        tex_a.write(uint4(r, 0u, 0u, 0u), uint3(cell_local));
+        if (r != 0u) {
+            doc_oracle.write(uint4(1u, 0u, 0u, 0u),
+                             uint3(uint3(cell_local) >> uint3(4u)));
+        }
+    }
+    // Clear preview in this bbox regardless of write — stroke
+    // committed, future strokes shouldn't see stale tex_t.
+    if (u.brush == kCommitBrushPreview) {
+        preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+    }
 }
