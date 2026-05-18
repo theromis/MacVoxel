@@ -249,10 +249,12 @@ kernel void shape_main(
     if (in_shape) {
         // Mode rule: Add only writes when the doc cell is currently
         // empty (so the preview shows added voxels but doesn't paint
-        // over existing ones). Remove always writes 0 here — the
-        // commit kernel handles the actual cell zeroing; the visual
-        // gap is a known v1 wart. Paint only writes where the doc
-        // has a non-empty cell.
+        // over existing ones). Paint only writes where the doc has
+        // a non-empty cell. Remove mirrors the existing doc value
+        // into the preview — the rasterizer composites tex_t over
+        // tex_a so writing the same value is visually invisible, but
+        // it gives commit_generic (bm=2 Erase) a non-zero marker to
+        // fire on at mouseUp.
         uint doc_val = tex_a.read(uint3(cell_local)).r;
         bool in_vol = all(cell_world >= u.vol_min) &&
                       all(cell_world <= u.vol_max);
@@ -260,8 +262,9 @@ kernel void shape_main(
             if (doc_val == 0u && in_vol) write_val = u.palette_idx;
         } else if (u.mode == kModePaint) {
             if (doc_val != 0u) write_val = u.palette_idx;
+        } else if (u.mode == kModeRemove) {
+            if (doc_val != 0u) write_val = doc_val;
         }
-        // kModeRemove: leaves write_val = 0 (silent preview).
     }
 
     preview.write(uint4(write_val, 0u, 0u, 0u), uint3(cell_local));
@@ -335,6 +338,11 @@ kernel void shape_line_project_main(
             if (doc_val == 0u && in_vol) write_val = u.palette_idx;
         } else if (u.mode == kModePaint) {
             if (doc_val != 0u) write_val = u.palette_idx;
+        } else if (u.mode == kModeRemove) {
+            // Mirror doc_val so the rasterizer shows no visual change
+            // during drag but commit_generic bm=2 can fire on these
+            // cells at mouseUp.
+            if (doc_val != 0u) write_val = doc_val;
         }
     }
     preview.write(uint4(write_val, 0u, 0u, 0u), uint3(cell_local));
