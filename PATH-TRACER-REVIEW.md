@@ -1,238 +1,299 @@
 # Path Tracer Review
 
-Reviewed code:
+Reviewed primarily: `src/PathTrace.metal`
 
-- `src/PathTraceRenderer.mm`
-- `src/PathTraceRenderer.h`
-- `src/RaycastRenderer.mm`
-- `src/VoxelGrid.{h,cpp}`
-- `src/RenderState.h`
-- `src/ui/RenderPanel.cpp`
+Supporting context checked: `src/PathTraceRenderer.mm`, `src/RenderState.h`, and `src/VoxelGrid.h`.
 
-This is a static review, not a profiler pass. Performance recommendations below are ranked by likely impact from the code shape; they should be validated with GPU counters or at least fixed-seed headless render timing before doing invasive work.
+This is a static code review, not a GPU profiler pass. I focused on places where the renderer appears to do avoidable work per sample, plus a few correctness or consistency issues that can either waste samples or produce harder-to-converge output. Recommendations are biased toward preserving render quality.
 
 ## Executive Summary
 
-The path tracer is architecturally sound for a compact editor renderer. The major choices are defensible: it reuses the sparse voxel chunk layout, keeps palette colors in linear space on the GPU, uses progressive accumulation, provides deterministic headless rendering, uses empty-chunk skipping, has Russian roulette, and now includes next-event estimation plus MIS. Those are the right broad strokes for a physically motivated voxel path tracer.
+The renderer is not doing naive brute-force path tracing. It already has several quality-preserving variance controls: next-event estimation, MIS, power-weighted light selection, RIS, empty-chunk skipping, Russian roulette, correlated sampling, GGX VNDF sampling, and connected-medium handling for same-material glass. Those are good decisions.
 
-The weak point is that the implementation has outgrown a single inline shader string inside `PathTraceRenderer.mm`. Traversal, BSDF sampling, MIS, glass medium state, lighting, display tonemapping, CPU resource upload, GUI render flow, and headless flow are all coupled in one file. That does not make the renderer wrong, but it does raise the cost and risk of future physical-accuracy work.
+The main cost center is traversal. Every camera/path ray and every direct-light or sun shadow ray runs `dda_traverse`, and the current traversal repeats substantial chunk bookkeeping for every cell inside occupied chunks. The next largest cost centers are direct-light sampling work before each shadow ray, repeated expensive sky integration, and duplicated BSDF/NEE code paths that make it easy to miss optimizations or consistency fixes.
 
-The most promising performance work is not a new BSDF trick. It is reducing traversal and shadow-ray cost:
+Highest-value improvements:
 
-1. Build a better light-sampling representation from exposed emissive faces, ideally power-weighted.
-2. Add a second level of in-chunk empty-space skipping or occupancy masks.
-3. Consider moving the accumulation pass from a fragment render pass with additive blending to a compute kernel once you want batching, tiling, adaptive sampling, or multiple samples per dispatch.
-4. Stop doing whole-document GPU resource rebuilds for palette/material-only edits.
+1. Cache chunk state inside `dda_traverse` so occupied chunks do not reload/recompute coarse-grid state for every cell.
+2. Add in-chunk empty-space skipping, such as 4x4x4 brick occupancy masks.
+3. Change emissive sampling from "emissive voxel, then one of three faces" to an exposed-emissive-face light list.
+4. Precompute or cache atmospheric sky into an environment texture instead of running the Nishita integral on every sky miss.
+5. Add cheap call-site guards for disabled light/sun paths and consolidate duplicated NEE code.
 
-## What Looks Strong
+## Findings
 
-### Data Layout Matches The Problem
+### 1. DDA Repeats Coarse-Grid Work For Every Cell In Occupied Chunks
 
-The GPU scene representation mirrors the editor's sparse `16^3` chunk grid: a dense coarse grid maps chunk coordinates to a compact chunk pool, and DDA skips fully empty chunks. That is a sensible baseline for voxel path tracing because it avoids a dense world-size allocation while keeping cell lookup cheap and predictable.
+Location: `src/PathTrace.metal:538-637`
 
-The path tracer also shares the same coarse-grid/chunk-pool idea as the raycast renderer. That keeps interactive and path-traced rendering aligned enough that picking/rendering mismatches are less likely.
+Inside the DDA loop, every step recomputes:
 
-### The Integrator Has The Right Modern Features
+- `chunk_c = cell >> kChunkBits`
+- `cgc = chunk_c - u.coarse_min`
+- bounds checks against `u.coarse_dim`
+- flattened `coarse_idx`
+- `pool_idx = coarse_grid[coarse_idx]`
 
-The shader is not just brute-force cosine bouncing. It has:
+That is necessary when the ray crosses into a new chunk, but wasteful for the common case where the next cell is still inside the same non-empty 16x16x16 chunk. In a dense or partially occupied chunk, a ray can take many voxel steps while `pool_idx` and chunk bounds stay unchanged.
 
-- next-event estimation against emissive voxels
-- MIS between NEE and BSDF-sampled emitter hits
-- GGX VNDF sampling for rough metal/glass reflection
-- Beer-Lambert medium attenuation for connected same-material glass
-- Russian roulette after a couple of bounces
-- deterministic frame seeds for headless comparison
+Recommendation: restructure traversal around a cached current chunk:
 
-That is a solid feature set for the product's current scope.
+- Compute chunk coord and `pool_idx` when entering a chunk.
+- If `pool_idx == 0`, use the existing empty-chunk skip.
+- If `pool_idx != 0`, step local cells until crossing a chunk boundary, loading only `chunk_pool[pool_idx - 1].cells[local_idx]` per cell.
+- Recompute coarse-grid state only after crossing a chunk boundary.
 
-### Accumulation Semantics Are Mostly Clean
+This should reduce integer ALU and coarse-grid memory reads without changing the traced paths.
 
-Accumulation resets on camera, document, resolution, and glass-mode changes. Fixed-seed headless rendering gives you a practical regression tool. The display pass divides the HDR accumulation texture by sample count and handles aspect-preserving presentation, which keeps interactive iteration and export using the same accumulated data.
+### 2. No In-Chunk Empty-Space Skipping
 
-## Architectural Concerns
+Location: `src/PathTrace.metal:632-682`, CPU upload at `src/PathTraceRenderer.mm:403-425`
 
-### 1. The Inline Shader Is Now Too Large
+The renderer skips fully empty chunks, but once a chunk has any voxel, it steps cell by cell through the entire chunk. A chunk with one filled voxel and 4095 empty cells is as expensive to cross as a mostly full chunk.
 
-`PathTraceRenderer.mm` embeds the full MSL source starting at `kShaderSource`, and the path tracer fragment alone contains traversal, light sampling, BSDF evaluation, medium handling, Russian roulette, and display code. This was reasonable early on, but it is now a maintenance risk.
+Voxel art scenes often contain many sparse boundary chunks. Shadow rays multiply this cost because every NEE query also traverses the same structure.
 
-Concrete issues:
+Recommendation: add a compact occupancy hierarchy per chunk:
 
-- CPU and MSL structs are manually duplicated.
-- The shader cannot be tested, linted, or syntax-highlighted normally.
-- Small physical changes require editing a long string with no module boundaries.
-- Traversal changes are duplicated mentally against `RaycastRenderer.mm`.
-- Comments are carrying too much invariant load because the code cannot be decomposed.
+- Low-risk first step: store a 4x4x4 brick occupancy mask per chunk. A ray entering an empty brick can skip to the next brick boundary.
+- Better later: store axis-aware masks or a tiny per-chunk mip hierarchy.
 
-Recommendation: move shader code into real `.metal` sources or at least generated included strings. Split it conceptually into:
+This preserves exact voxel hits while avoiding cell-by-cell walks through known-empty regions.
 
-- `VoxelTraversal.metal`
-- `Sampling.metal`
-- `Bsdf.metal`
-- `Lights.metal`
-- `PathTrace.metal`
-- `Display.metal`
+### 3. `kMaxSteps = 4096` Is Both A Safety Valve And A Possible Miss Bug
 
-Keep the Obj-C++ side as pipeline/resource orchestration. This does not need to be a large refactor all at once; start by extracting the shader string unchanged into a `.metal` file loaded through the default library or build-system-embedded source.
+Location: `src/PathTrace.metal:322`, loop at `src/PathTrace.metal:538`
 
-### 2. Shared GPU Layout Needs A Single Owner
+`dda_traverse` returns a miss when the loop reaches 4096 iterations. Because one iteration can mean either one voxel step in an occupied chunk or one empty-chunk skip, this cap can terminate valid long rays before they leave the sparse AABB.
 
-`PathUniforms`, `GpuMaterial`, `GpuLight`, and `Chunk` are duplicated between C++/Obj-C++ and MSL. There are CPU-side `static_assert`s for struct size, but they do not prove the MSL side still matches.
+For normal compact models this may never trigger. For large imported scene graphs, widely separated chunks, or long diagonal shadow rays, it can produce missing occlusion or missing hits. It also makes performance behavior scene-scale dependent in a hidden way.
 
-Recommendation: introduce a small shared GPU schema header or generator. If true shared C++/MSL headers are awkward because of Objective-C++/Metal syntax, at least centralize the CPU declarations and add a tiny shader-side layout validation convention where feasible.
+Recommendation: prefer termination based on `t_exit` or explicit chunk/AABB exit rather than a fixed iteration cap. Keep a very high defensive cap only as an assert-style fallback if Metal needs one.
 
-Also consider packing palette color and material into one 256-entry GPU table. Every surface hit currently loads both `palette[h.cell_val]` and `materials[h.cell_val]`; the table is tiny, but a single material/color record would simplify binding and avoid accidental drift between parallel buffers.
+### 4. Direct-Light Sampling Still Wastes Work On Hidden Or Irrelevant Faces
 
-### 3. Traversal Is Duplicated With The Raycast Renderer
+Location: `src/PathTrace.metal:808-950`, light build at `src/PathTraceRenderer.mm:478-572`
 
-The raycast renderer and path tracer both implement coarse-grid DDA with empty-chunk skipping, but the path tracer has additional medium-exit semantics. Some duplication is unavoidable because the shader requirements differ, but the shared math is subtle enough that drift is a real risk.
+The light list is one entry per emissive voxel. Each NEE candidate then chooses one of three faces based on the receiver position.
 
-Recommendation: extract a common traversal module with two entry points:
+This is simple, but it still spends candidate work on emissive voxels or faces that are not actually exposed to air. Interior emissive cells in a solid light cluster can remain in the light list and generate candidates that can never be directly visible. Even for exposed lights, the shader has to reconstruct face geometry every candidate.
 
-- ordinary first-hit traversal for raycast/shadow rays
-- medium-aware traversal for glass
+Recommendation: build the light buffer from exposed emissive faces:
 
-The goal is not abstraction for its own sake. The goal is to avoid fixing numeric edge cases in one renderer while leaving the other with stale boundary behavior.
+- Store face origin, normal, emitted radiance, area, and sampling probability.
+- Weight by `luminance(Le) * area`.
+- Later, merge adjacent coplanar faces with the same material into rectangles.
 
-### 4. Global Render State Leaks Into Renderer Internals
+This reduces wasted RIS candidates and makes each shadow ray more likely to test a useful light sample. It improves quality per sample without biasing the estimator.
 
-`PathTraceRenderer` takes explicit `maxBounces` for headless accumulation, but still reads `CurrentRenderState().glass_mode` while encoding uniforms and `CurrentRenderState().aces_tonemap` during export. GUI and headless modes are therefore not fully isolated.
+### 5. RIS Candidate Count Multiplies Expensive Per-Hit Work
 
-Recommendation: pass a small immutable render-settings struct into render/export paths. The global `RenderState` can still be the UI source of truth, but `PathTraceRenderer` should not need to reach back into it during lower-level encoding.
+Location: `src/PathTrace.metal:841-932`; default `nee_ris_count = 8` at `src/RenderState.h:111-119`
 
-### 5. Empty Documents Return Before Display/Clear
+The RIS path fires only one shadow ray, which is good, but each shading point still does `M` candidates. Each candidate may do random picks, CDF binary search, face construction, `sqrt`, direction normalization, cosine checks, source-pdf math, and reservoir update. With the default `M = 8`, this is non-trivial at every non-delta bounce.
 
-When `_coarseBuffer` or `_poolBuffer` is nil, `renderInView` returns before the display pass, even though the comment says to let display clear to background. If a path-traced render had been visible and the document becomes empty, this risks leaving stale drawable contents or failing to update the visible output consistently.
-
-Recommendation: make the empty-scene path explicit. Either clear/draw sky/ground through the display pass, or encode a simple clear pass and update `sample_count`.
-
-## Performance Review
-
-### 1. Shadow Rays Are Probably The Dominant Cost In Lit Scenes
-
-Every non-emissive surface bounce does a NEE sample, and every NEE sample traces a shadow DDA through the same voxel structure. That roughly doubles traversal work for diffuse/metal/glass-reflect bounces before counting additional BSDF continuation rays.
-
-This is the right trade for physical convergence around small lights, but it means light sampling quality matters a lot. The current light list is one entry per emissive voxel, sampled uniformly, then one of three faces is sampled. That is simple and likely unbiased for visible cube faces, but it wastes samples on:
-
-- low-power emitters when high-power emitters dominate
-- buried/internal emissive voxels or faces that immediately fail visibility
-- large emissive regions represented as many independent voxels with no area hierarchy
+This can absolutely be worth it when it prevents noisy shadow rays. The inefficiency is that the current source representation forces the shader to rediscover face geometry and candidate weights every time.
 
 Recommendations:
 
-- Build the light list from exposed emissive faces, not emissive voxels.
-- Store face normal, corner/origin, area, and emitted radiance.
-- Sample faces power-weighted by `luminance(Le) * area`.
-- For adjacent emissive voxels with same material, consider coalescing coplanar exposed faces into rectangles later.
+- Exposed-face light records will remove much of the per-candidate reconstruction.
+- Consider alias-table sampling for power-weighted lights if light counts become large. The current binary search is `O(log light_count)` per candidate.
+- Consider adapting `M`: first bounce and high-throughput paths benefit most; late bounces after Russian roulette may not need 8 candidates.
 
-Expected impact: lower variance and fewer wasted shadow traversals. This improves both quality per sample and time-to-clean-image without compromising physical accuracy.
+### 6. Area-Light And Sun NEE Are Called Even When They Are Disabled
 
-### 2. In-Chunk Empty Space Is Not Skipped
+Locations:
 
-The two-level grid skips empty chunks, but once a chunk is non-empty, traversal falls back to cell-by-cell stepping. A chunk with one voxel and 4095 empty cells is treated as occupied for every ray crossing it.
+- Light NEE guard inside callee: `src/PathTrace.metal:826`
+- Sun NEE guard inside callee: `src/PathTrace.metal:981-983`
+- Repeated call sites: `src/PathTrace.metal:1333-1339`, `1460-1466`, `1475-1481`, `1525-1531`, `1550-1558`, `1586-1592`, `1605-1613`
 
-For sparse voxel art, that can be a major cost because a visually sparse model can still create many mostly-empty chunks. This cost is multiplied by bounces and shadow rays.
+`nee_sample_light` and `nee_sample_sun` return quickly when disabled, but most call sites still construct and pass the full argument list on every relevant bounce. The functions also zero-initialize an `NEELight` before the feature checks.
 
-Recommendations, from least to most invasive:
+The compiler may inline and simplify some of this, but `u.light_count` and `u.sun_radiance` are runtime uniforms, so the shader still carries the branches.
 
-- Add a `uint64_t` or small array occupancy mask per chunk for `4^3` bricks and skip empty bricks.
-- Store per-axis or per-brick occupancy summaries to jump within chunks.
-- Build a small clipmap/mipmap occupancy hierarchy over the coarse grid for larger scenes.
+Recommendation: add explicit call-site guards:
 
-The current empty-chunk skip should stay; the missing piece is a level between `16^3 chunk is empty` and `step every voxel cell`.
+- `if (u.light_count != 0u) { ... nee_sample_light ... }`
+- `if (sun_enabled) { ... nee_sample_sun ... }`
 
-### 3. Fragment-Pipeline Accumulation Is Simple But Limits Future Performance Work
+Compute `sun_enabled` once near the top of `pt_fragment` or encode it as a uniform. This is small, but it removes dead work in common scenes with no emissives or no sun.
 
-The accumulation pass is a fullscreen triangle fragment shader writing to an `RGBA32Float` render target with additive blending. That is a good minimal implementation, but it constrains next steps:
+### 7. Atmospheric Sky Is Very Expensive Per Sky Miss
 
-- one sample per render pass in GUI mode
-- one command buffer per sample in headless mode
-- no natural place for tile scheduling or adaptive sampling
-- no easy persistent per-pixel RNG/sample state
-- blend hardware writes an unused alpha channel too
+Locations: `src/PathTrace.metal:374-458`, sky miss at `src/PathTrace.metal:1371-1375`, horizon blend at `src/PathTrace.metal:1317-1324`
 
-Recommendation: keep the current path until profiling shows dispatch overhead or bandwidth is material. When you need more control, move accumulation to compute:
+`nishita_sky_radiance` performs 32 view samples, and each view sample calls `atmosphere_transmittance`, which performs 8 more samples. That is roughly 256 transmittance sample evaluations per sky query, with repeated `sqrt`, `exp`, and vector math.
 
-- one thread per pixel or small tile
-- loop `N` samples per dispatch for headless/export
-- write accumulated RGB plus sample count explicitly
-- support adaptive sampling or progressive tile refinement later
+When atmospheric sky is enabled, this runs for escaped primary rays, escaped secondary rays, and sometimes for the primary ground-horizon fade. It is physically nicer than a constant sky, but it is a lot of repeated deterministic work.
 
-This is not urgent for the current editor loop, but it is the right architectural direction for serious offline-quality renders.
+Recommendation: precompute a sky environment texture whenever sun/atmosphere settings change:
 
-### 4. Headless Rendering Submits One Command Buffer Per Sample
+- 2D lat-long or octahedral map in grid direction space.
+- Same Nishita integral, just evaluated once per texel instead of per path escape.
+- Sample the map in the path tracer for sky misses and horizon fade.
 
-`renderHeadlessSamples` creates and commits a command buffer for every sample, then waits only for the last one. For hundreds or thousands of samples this can produce unnecessary CPU/driver overhead and queue pressure.
+This keeps the same sky model while moving work out of the per-sample hot path. Use sufficient resolution and filtering so this is a cache, not a quality downgrade.
+
+### 8. Direct Sun NEE Rebuilds A Basis Every Shading Point
+
+Location: `src/PathTrace.metal:985-1001`
+
+`nee_sample_sun` constructs a TBN around `u.sun_dir_grid` for every sun sample. The sun direction is uniform for the whole pass, so the basis can be computed CPU-side and uploaded, or computed once per fragment and reused across bounces.
+
+Recommendation: add `sun_tangent_grid` and `sun_bitangent_grid` to `PathUniforms`, or compute them once near the top of `pt_fragment` and pass into a lighter sun sampler. This saves a normalize/cross sequence per sun-NEE call.
+
+### 9. BSDF Basis Construction Is Repeated And Uses Full Normalization
+
+Locations:
+
+- `cosine_hemi`: `src/PathTrace.metal:244-248`
+- `ggx_sample_vndf`: `src/PathTrace.metal:282-286`
+
+Surface normals are axis-aligned voxel face normals. For six possible normals, the tangent frame can be selected from constants rather than built with `cross` and `normalize` for every diffuse, metal, and glass sample.
+
+Recommendation: replace generic basis construction for voxel normals with a small axis-normal helper returning fixed `t1/t2`. Keep the generic path only if future non-axis-aligned geometry needs it.
+
+This is a pure ALU reduction and should not affect sampling quality.
+
+### 10. Several Expensive `pow(x, 5.0)` Calls Are Schlick Powers
+
+Locations:
+
+- `nee_ggx_mis`: `src/PathTrace.metal:1067`
+- glass entry Fresnel: `src/PathTrace.metal:1516`
+- glass exit Fresnel: `src/PathTrace.metal:1256`
+
+Schlick Fresnel uses `(1 - cos)^5`. Calling generic `pow` is usually more expensive than a multiply chain.
+
+Recommendation: introduce:
+
+```metal
+inline float pow5(float x) {
+    float x2 = x * x;
+    return x2 * x2 * x;
+}
+```
+
+Then use `pow5(saturate(...))`. Same math, less work.
+
+### 11. Material Constants Are Recomputed At Every Hit
+
+Locations: material load at `src/PathTrace.metal:1381-1383`, repeated clamps/Fresnel setup at `1457-1458`, `1509-1518`, `1238-1256`
+
+The shader repeatedly computes:
+
+- clamped roughness
+- clamped metallic/transparency
+- dielectric `r0`
+- linear albedo from a separate palette table
+- material type conversion from float to uint
+
+The material table has only 256 entries and is rebuilt CPU-side already. It can carry precomputed shader-ready fields.
 
 Recommendations:
 
-- Batch multiple samples per command buffer, for example 16-64 accumulation passes per command buffer.
-- If/when moving to compute, run multiple samples inside one kernel dispatch.
-- Add timing output around GPU completion so headless renders can report samples/sec.
+- Store material type as `uint`, not `float`, if layout permits.
+- Combine palette and material into one GPU table: `albedo`, `emission`, `roughness`, `metallic`, `transparency`, `ior`, `r0`, flags.
+- Precompute clamped values CPU-side.
 
-This is a low-risk improvement even before a compute migration.
+This reduces per-hit ALU and one constant-buffer lookup.
 
-### 5. Whole-Document Resource Rebuilds Are Conservative But Coarse
+### 12. Display Tonemapping Is Duplicated
 
-On any `doc->version` change, the path tracer rebuilds the coarse grid, chunk pool, palette buffer, material buffer, and light buffer. That is acceptable when entering render mode after editing, but it is inefficient for palette/material edits because most of the voxel pool is unchanged.
+Locations:
 
-Recommendations:
+- `ema_compose_fragment`: `src/PathTrace.metal:1687-1695`
+- `display_fragment_direct`: `src/PathTrace.metal:1749-1757`
 
-- Track palette/material revision separately from grid revision.
-- Re-upload palette/material buffers independently.
-- Rebuild the light list when emissive material/color/emission changes, or when voxels using emissive indices change.
-- Rebuild chunk/coarse buffers only when grid topology/cells change.
+The ACES/gamma conversion appears twice. This is not a major runtime cost because only one display path is used at a time, but it is a maintenance redundancy. A future change to tonemapping can easily update one path and miss the other.
 
-This mostly improves iteration latency when tuning materials and lights.
+Recommendation: extract `tonemap_to_srgb(float3 c, uint aces_tonemap)`.
 
-### 6. Use Private GPU Buffers For Static Scene Data
+### 13. NEE Contribution Logic Is Repeated Across Material Branches
 
-Scene buffers are created with `MTLResourceStorageModeShared`. That is convenient and fine for small scenes, but static path-trace data is read heavily by the GPU and not mutated by the CPU after upload.
+Locations: diffuse/metal/glass/ground NEE blocks throughout `src/PathTrace.metal:1332-1340` and `1459-1614`
 
-Recommendation: benchmark private-storage buffers populated via blit for `_coarseBuffer`, `_poolBuffer`, and `_lightBuffer`. On Apple Silicon shared memory is not automatically bad, so this should be measured, but private buffers may still help cache residency and access flags.
+Almost every material branch repeats the same shape:
 
-### 7. RNG Quality Is Adequate But Not Variance-Optimized
+- sample area light
+- add clamped diffuse or GGX MIS contribution
+- sample sun
+- add clamped diffuse or GGX MIS contribution
 
-The shader uses a PCG-style hash seeded by pixel and frame. That is acceptable and cheap, but not optimized for convergence. Purely random per-pixel sampling leaves visible noise patterns longer than blue-noise or low-discrepancy approaches.
+This creates code size, branch pressure, and consistency risk. There is already one visible inconsistency: the glass probabilistic diffuse fallback adds NEE without `nee_clamped` at `src/PathTrace.metal:1588-1592`, while the ordinary diffuse path clamps indirect NEE at `src/PathTrace.metal:1608-1613`.
 
-Recommendations:
+Recommendation: consolidate into helpers like:
 
-- Try a precomputed blue-noise texture for pixel/sample dimensions.
-- Consider Cranley-Patterson-rotated low-discrepancy sequences for AA/light/BSDF dimensions.
-- Keep fixed-seed determinism for regression renders.
+- `add_diffuse_nee(...)`
+- `add_ggx_nee(...)`
 
-This is a quality-per-sample improvement, not a raw milliseconds-per-sample improvement.
+They can contain the area/sun enabled guards and the clamp policy once.
 
-### 8. Micro-Optimizations To Consider Only After Profiling
+### 14. DDA Shadow Rays For Area Lights Do Not Use A Max Distance
 
-These are plausible but should not be first-line work:
+Location: shadow ray in `nee_sample_light` at `src/PathTrace.metal:936-940`
 
-- Replace repeated `pow(x, 5.0)` Schlick calls with explicit multiply chains.
-- Specialize roughness-zero glass/metal paths to avoid GGX math for mirror-like materials.
-- Precompute material constants such as `r0`, clamped roughness, effective type, and linear albedo into the GPU material table.
-- Avoid recomputing inverse view-projection per sample when camera/size are unchanged.
-- Use function constants or separate pipelines for common feature modes if branch divergence shows up in counters.
+For a sampled finite light point, the visibility query only needs to know whether anything blocks the segment from `x` to the sampled face. The current call traces until the first hit or until it leaves the whole sparse AABB, then checks whether the first hit cell is the chosen light.
 
-## Physical Accuracy Notes
+Usually the chosen light is the first hit when visible, so this is fine. But if numerical issues step past the chosen face, the traversal may continue farther than the sampled-light distance. A segment-limited DDA would also make the intended visibility test explicit.
 
-The renderer is physically motivated, but some current choices are artistic/product choices rather than strict physical transport:
+Recommendation: add an optional `t_max_distance` to the shadow traversal path. Stop once the current DDA distance exceeds the sampled point distance plus epsilon. This can reduce worst-case work and makes the shadow query more robust.
 
-- The virtual infinite ground plane is useful for legibility, but it is scene lighting not represented in the voxel document.
-- The sky is a constant color, not an environment map or sun/sky model.
-- Absorption mode caps "clear" glass toward `0.8`, which intentionally preserves ghost attenuation but is not physically clear glass.
-- Metal material behavior is a probabilistic split between diffuse and specular based on `metallic`, rather than a full layered/energy-conserving material model.
+### 15. Primary-Ray Setup Uses Matrix Unprojection Per Pixel
 
-Those are not necessarily problems. They should stay explicit because future work may otherwise optimize or "correct" them in ways that change the product's intended look.
+Location: `src/PathTrace.metal:1120-1135`
+
+Every fragment multiplies two clip-space points by `inv_vp`, divides by `w`, subtracts, normalizes, and converts world to grid. This is standard and correct, but for a fullscreen pinhole camera it is more work than necessary.
+
+Recommendation: upload grid-space camera basis and frustum corner/ray differentials. Generate the ray direction from interpolated basis vectors and normalize once. The DOF code already needs grid-space camera basis, so this would align primary-ray setup with the rest of the shader.
+
+This is lower priority than traversal because it happens once per sample, not per bounce/shadow ray.
+
+### 16. The Jitter Noise Comment Disagrees With The Actual Sampler
+
+Locations:
+
+- CPU comment says nearest: `src/PathTraceRenderer.mm:155-158`
+- Shader uses linear filtering: `src/PathTrace.metal:1106-1111`
+
+The shader comment and code agree that the noise texture is bilinear-filtered. The CPU-side comment says nearest filtering and 16x16 tiles. This is not a runtime bottleneck, but it is a maintenance blunder in a sampling-sensitive area.
+
+Recommendation: update the stale CPU comment so future sampling changes are not made from the wrong mental model.
+
+### 17. Comments For EMA Weight Are Stale In The Uniform Definitions
+
+Locations:
+
+- `src/PathTrace.metal:86-90`
+- `src/PathTraceRenderer.mm:104-108`
+- actual behavior: `src/PathTraceRenderer.mm:820-845`
+
+The uniform comments still describe `max(1/(sample_count+1), ema_floor)`, but the actual code uses `ema_floor` directly after the first valid history frame. This is not a path-tracing hot path, but it is another stale-comment issue in renderer behavior.
+
+Recommendation: update the comments or rename the field to match the current semantics.
 
 ## Suggested Priority Order
 
-1. Extract the shader into real `.metal` source while preserving behavior.
-2. Add render timing for headless samples and a small benchmark scene set.
-3. Change the light buffer from emissive voxels to exposed emissive faces, then add power-weighted sampling.
-4. Batch headless command buffers.
-5. Add in-chunk occupancy skipping.
-6. Split document resource rebuilds by grid vs palette/material/light changes.
-7. Revisit compute-based accumulation when batching/adaptive sampling/tiling becomes important.
+1. Optimize `dda_traverse` chunk-state caching.
+2. Add per-chunk brick occupancy skipping.
+3. Build an exposed-face light list and simplify NEE candidate generation.
+4. Add call-site guards and helper functions for area/sun NEE.
+5. Precompute atmospheric sky into an environment texture.
+6. Replace axis-normal basis construction and Schlick `pow` calls with cheaper exact equivalents.
+7. Precompute material constants and consider merging palette/material GPU tables.
+8. Add segment-limited shadow traversal for finite light samples.
+9. Clean up stale comments and duplicated tonemap code.
 
-## Bottom Line
+## Validation Plan
 
-The current path tracer is a credible implementation, not a throwaway prototype. Its biggest risk is maintainability, not a fundamentally bad rendering architecture. The biggest performance opportunity is to spend fewer rays on unproductive traversal: better light sampling, fewer shadow-ray misses, and more empty-space skipping inside non-empty chunks.
+Before changing behavior, add a small fixed-seed benchmark set:
+
+- empty sky / ground scene
+- dense cube
+- sparse imported model
+- emissive cluster with many hidden/internal emitters
+- glass-heavy scene
+- atmospheric sky enabled
+
+Measure GPU time per accumulated sample and keep fixed-seed image comparisons for changes that should be mathematically identical. Traversal caching, fixed tangent frames, `pow5`, material precomputation, and call-site guards should be visually identical. Light-list changes and sky caching should be compared against high-sample references because they change sampling strategy or approximated lookup resolution.

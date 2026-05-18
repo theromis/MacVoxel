@@ -31,3 +31,6 @@ compile_commands.json
 # Editor backups
 *.swp
 *~
+
+# Agent memos
+old-memos/
