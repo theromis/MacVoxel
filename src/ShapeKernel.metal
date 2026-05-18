@@ -434,15 +434,20 @@ kernel void shape_clear(
 //
 // Phase 2.1 (this commit): kernel exists but has no callers. Phases
 // 2.2-2.4 wire shape / generator / face / brush onto it.
+// NOTE: int3 in MSL is 16-byte aligned AND 16 bytes in size (3 ints + 4
+// bytes of trailing pad). Two int3s back-to-back pack perfectly to
+// bytes 0-31, matching the CPU mirror's `int32_t[4] + int32_t[4]`.
+// DO NOT insert scalar fields between int3s — the compiler will pad
+// the next int3 up to the 16-byte boundary and the CPU/GPU struct
+// layouts will disagree (the kernel then reads `bm` as one of the
+// dispatch_size components and the bounds check kills every thread).
 struct CommitGenericUniforms {
     int3 dispatch_lo;     // bbox start (texture-local cells)
-    int  _pad0;
     int3 dispatch_size;   // bbox dims
-    int  _pad1;
     uint bm;              // 1=Add 2=Erase 3=Replace 4=Intersect
     uint brush;           // 0=tex_t source, 1=constant fill_palette
     uint fill_palette;    // used when brush == 1
-    uint _pad2;
+    uint _pad;
 };
 
 kernel void commit_generic(
