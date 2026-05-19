@@ -99,6 +99,8 @@ public:
     void Clear();
 
 private:
+    void RebuildIndex();
+
     std::deque<EditOp> undo_;
     std::deque<EditOp> redo_;
     EditOp current_;
@@ -106,7 +108,14 @@ private:
     // same-cell rewrites within an op. The linear scan that lived here
     // turned brush strokes into O(N²) work at large radii. Cleared on
     // BeginOp / CommitOp / AbandonOp so it never outlives an op.
+    //
+    // Lazy: `index_built_` is true when the map is in sync with
+    // `current_.changes`. Single-batch ops (the common case for every
+    // GPU-authoritative tool) skip building it entirely — RecordBatch
+    // appends straight to `current_.changes` and leaves the map empty.
+    // Any subsequent Record / RecordBatch call rebuilds the map first.
     std::unordered_map<int64_t, size_t> current_index_;
+    bool index_built_ = true;
     // Same idea for palette / material slot dedupe. Indexed by the
     // 0..255 slot number; size 256 is fine for either array.
     std::array<int16_t, 256> palette_slot_index_{};   // -1 = absent

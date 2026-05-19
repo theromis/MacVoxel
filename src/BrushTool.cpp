@@ -1,13 +1,13 @@
 #include "BrushTool.h"
 
 #include "BrushEngine.h"
-#include "CellKey.h"
 #include "Document.h"
 #include "EditEngine.h"
 #include "EditHistory.h"
 #include "EditorContext.h"
 #include "Input.h"
 #include "InteractionState.h"
+#include "Perf.h"
 #include "Shapes.h"
 #include "ToolState.h"
 #include "ViewContext.h"
@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <vector>
 
 namespace macvoxel {
@@ -59,9 +61,18 @@ BrushParams BuildParams(const EditorContext& ctx,
 void BrushTool::ResetStrokeState() {
     paint_mode_ = ToolMode::Add;
     last_drag_edit_cell_ = kInvalidCell;
-    drag_skip_cells_.clear();
+    // drag_skip_ is reset at OnMouseDown when we have the doc's
+    // EditVolume; here just leave the existing buffer alone — it's
+    // already zero after the prior stroke's CommitOp.
     stroke_bbox_x0_ = stroke_bbox_y0_ = stroke_bbox_z0_ = INT32_MAX;
     stroke_bbox_x1_ = stroke_bbox_y1_ = stroke_bbox_z1_ = INT32_MIN;
+    perf_stamp_count_ = 0;
+    perf_footprint_us_ = 0.0;
+    perf_readback_us_ = 0.0;
+    perf_diff_us_ = 0.0;
+    perf_apply_us_ = 0.0;
+    perf_history_us_ = 0.0;
+    perf_cells_committed_ = 0;
 }
 
 // Replicate the kernel's footprint walk on the CPU to build the
@@ -69,9 +80,9 @@ void BrushTool::ResetStrokeState() {
 // doc.grid or doc.volume_shadow — those stay frozen at pre-stroke
 // state during the stroke.
 //
-// `doc.grid.Get` here is intentionally the *pre-stroke* state oracle:
-// we don't update grid mid-stroke, so it answers "was this cell empty
-// at the start of the stroke?" Cells that transition from 0→non-0
+// `doc.volume_shadow.Get` here is the *pre-stroke* state oracle:
+// the dense O(1) array, byte-equal to grid inside the EditVolume
+// (Document::SetCell invariant). Cells that transition from 0→non-0
 // (Add) or non-0→0 (Remove) go into the skip set so the next pick's
 // raycast ignores them. Paint doesn't change occupancy, so it skips
 // nothing.
@@ -81,7 +92,7 @@ void BrushTool::StampAtCursor(EditorContext& ctx, const ViewContext& vc,
     shapes::Vec3i target;
     int face_axis = 2;
     if (!vc.ComputeTargetCell(e.local.x, e.local.y, mode, &target,
-                              &face_axis, drag_skip_cells_)) {
+                              &face_axis, &drag_skip_)) {
         return;
     }
     if (SameCell(target, last_drag_edit_cell_)) return;
@@ -108,6 +119,7 @@ void BrushTool::StampAtCursor(EditorContext& ctx, const ViewContext& vc,
         stroke_bbox_z1_ = std::max(stroke_bbox_z1_, z);
     };
 
+    const auto t_footprint = perf::Now();
     for (int dz = lo; dz <= hi; ++dz) {
         if (!is_3d && p.face_axis == 2 && dz != 0) continue;
         for (int dy = lo; dy <= hi; ++dy) {
@@ -128,7 +140,7 @@ void BrushTool::StampAtCursor(EditorContext& ctx, const ViewContext& vc,
                 const int y = p.cy + dy;
                 const int z = p.cz + dz;
                 if (!vol.Contains(x, y, z)) continue;
-                const uint8_t pre = doc.grid.Get(x, y, z);
+                const uint8_t pre = doc.volume_shadow.Get(x, y, z);
                 bool changes_occupancy = false;
                 if (mode == ToolMode::Add) {
                     changes_occupancy = (pre == 0);
@@ -141,11 +153,13 @@ void BrushTool::StampAtCursor(EditorContext& ctx, const ViewContext& vc,
                 // extends the bbox but doesn't add to skip.
                 extend_bbox(x, y, z);
                 if (changes_occupancy) {
-                    drag_skip_cells_.insert(PackCellKey(x, y, z));
+                    drag_skip_.Set(x, y, z);
                 }
             }
         }
     }
+    perf_footprint_us_ += perf::Micros(perf::Now() - t_footprint);
+    ++perf_stamp_count_;
 
     engine.BrushStamp(p);
 }
@@ -170,49 +184,41 @@ void BrushTool::SyncStrokeFromTexture(EditorContext& ctx,
     if (bb.x0 > bb.x1 || bb.y0 > bb.y1 || bb.z0 > bb.z1) return;
 
     std::vector<uint8_t> post;
+    const auto t_readback = perf::Now();
     engine.Readback(bb, &post);
+    perf_readback_us_ += perf::Micros(perf::Now() - t_readback);
 
     const size_t bw = static_cast<size_t>(bb.x1 - bb.x0 + 1);
     const size_t bh = static_cast<size_t>(bb.y1 - bb.y0 + 1);
     const size_t bd = static_cast<size_t>(bb.z1 - bb.z0 + 1);
     if (post.size() < bw * bh * bd) return;
 
+    // Single-pass diff + shadow update. DiffAndApplyRegion walks the
+    // bbox row-by-row with memcmp short-circuit, writes new values
+    // into the shadow as it goes, marks chunks dirty, and emits the
+    // CellChange diff for history + grid.
     std::vector<CellChange> diff;
-    diff.reserve(drag_skip_cells_.size() + 16);
+    diff.reserve(1024);
+    const auto t_diff = perf::Now();
+    doc.volume_shadow.DiffAndApplyRegion(bb.x0, bb.y0, bb.z0,
+                                         bb.x1, bb.y1, bb.z1,
+                                         post.data(), &diff);
+    perf_diff_us_ += perf::Micros(perf::Now() - t_diff);
 
-    for (size_t lz = 0; lz < bd; ++lz) {
-        for (size_t ly = 0; ly < bh; ++ly) {
-            const size_t row_base = lz * bw * bh + ly * bw;
-            for (size_t lx = 0; lx < bw; ++lx) {
-                const int32_t x = bb.x0 + static_cast<int32_t>(lx);
-                const int32_t y = bb.y0 + static_cast<int32_t>(ly);
-                const int32_t z = bb.z0 + static_cast<int32_t>(lz);
-                const uint8_t pre = doc.volume_shadow.Get(x, y, z);
-                const uint8_t cur = post[row_base + lx];
-                if (pre == cur) continue;
-                CellChange c{};
-                c.x = x; c.y = y; c.z = z;
-                c.old_val = pre;
-                c.new_val = cur;
-                diff.push_back(c);
-            }
-        }
-    }
-
-    if (diff.empty()) {
-        // Texture is still consistent with shadow — bbox was tracked
-        // but no cells actually changed (e.g. Add over already-filled
-        // region). Nothing to record.
-        return;
-    }
+    if (diff.empty()) return;
 
     EditHistory& history = ctx.history;
-    doc.ApplyChanges(diff.data(), diff.size());
+    perf_cells_committed_ = diff.size();
+    const auto t_apply = perf::Now();
+    doc.grid.ApplyChanges(diff.data(), diff.size());
+    perf_apply_us_ += perf::Micros(perf::Now() - t_apply);
+    const auto t_history = perf::Now();
     history.RecordBatch(diff.data(), diff.size());
+    perf_history_us_ += perf::Micros(perf::Now() - t_history);
 
-    // ApplyChanges marked the shadow's chunks dirty. Drain — the GPU
-    // texture has been authoritative the whole stroke, so the next
-    // render-pass sync should upload nothing.
+    // DiffAndApplyRegion marked the shadow's chunks dirty. Drain —
+    // the GPU texture has been authoritative the whole stroke, so
+    // the next render-pass sync should upload nothing.
     (void)doc.volume_shadow.TakeDirtyChunks();
     doc.BumpGeometry();
 }
@@ -222,6 +228,9 @@ bool BrushTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
                             EditEngine& engine) {
     const ToolMode mode = e.mods.command ? ToolMode::Remove : ctx.tool.mode;
     ResetStrokeState();
+    // Bind / zero the skip bitmap to the doc's EditVolume. First call
+    // pays a 16 MB allocation; subsequent calls memset in place.
+    drag_skip_.ResetTo(ctx.document.volume);
     paint_mode_ = mode;
     is_dragging_ = true;
     state.drag_mode = DragMode::Paint;
@@ -241,8 +250,20 @@ void BrushTool::OnMouseUp(EditorContext& ctx, InteractionState& /*state*/,
                            const ViewContext& /*vc*/, const MouseEvent& /*e*/,
                            EditEngine& engine) {
     if (!is_dragging_) return;
+    const auto t_total = perf::Now();
     SyncStrokeFromTexture(ctx, engine);
     ctx.history.CommitOp();
+    if (perf::Enabled()) {
+        const double total_us = perf::Micros(perf::Now() - t_total) +
+                                perf_footprint_us_;
+        fprintf(stderr,
+                "[perf brush] stamps=%d cells=%zu footprint=%.0fus "
+                "readback=%.0fus diff=%.0fus apply=%.0fus history=%.0fus "
+                "total=%.0fus\n",
+                perf_stamp_count_, perf_cells_committed_, perf_footprint_us_,
+                perf_readback_us_, perf_diff_us_, perf_apply_us_,
+                perf_history_us_, total_us);
+    }
     is_dragging_ = false;
     ResetStrokeState();
 }
@@ -255,8 +276,20 @@ void BrushTool::Cancel(EditorContext& ctx, InteractionState& /*state*/,
     // stroke's history so the user can undo it. The brush kernel
     // writes the doc texture *directly* so there's no preview to
     // discard — the writes are real.
+    const auto t_total = perf::Now();
     SyncStrokeFromTexture(ctx, engine);
     ctx.history.CommitOp();
+    if (perf::Enabled()) {
+        const double total_us = perf::Micros(perf::Now() - t_total) +
+                                perf_footprint_us_;
+        fprintf(stderr,
+                "[perf brush cancel] stamps=%d cells=%zu footprint=%.0fus "
+                "readback=%.0fus diff=%.0fus apply=%.0fus history=%.0fus "
+                "total=%.0fus\n",
+                perf_stamp_count_, perf_cells_committed_, perf_footprint_us_,
+                perf_readback_us_, perf_diff_us_, perf_apply_us_,
+                perf_history_us_, total_us);
+    }
     is_dragging_ = false;
     ResetStrokeState();
 }

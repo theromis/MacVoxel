@@ -1,5 +1,7 @@
 #include "ViewContext.h"
 
+#include "CellBitmap.h"
+
 #include "Document.h"
 #include "EditorContext.h"
 #include "FloatingBuffer.h"
@@ -249,7 +251,7 @@ bool ViewContext::GridPlaneIntersect(float local_x, float local_y,
 bool ViewContext::ComputeTargetCell(
     float local_x, float local_y, ToolMode mode,
     shapes::Vec3i* out_cell, int* out_face_axis,
-    const std::unordered_set<int64_t>& skip) const {
+    const CellBitmap* skip) const {
     if (ctx == nullptr) return false;
     const Document& doc = ctx->document;
 
@@ -263,9 +265,9 @@ bool ViewContext::ComputeTargetCell(
     // During a drag-Add stroke, skip cells we just placed so the raycast
     // keeps hitting the original surface. Other modes (Remove, Paint)
     // and non-drag interactions raycast against the live grid.
-    if (mode == ToolMode::Add && !skip.empty()) {
+    if (mode == ToolMode::Add && skip != nullptr && !skip->Empty()) {
         hit_voxel = RaycastIgnoring(doc.grid, ray_origin_grid,
-                                    ray_dir_grid, 4096.0f, skip, &hit);
+                                    ray_dir_grid, 4096.0f, *skip, &hit);
     } else {
         hit_voxel = Raycast(doc.grid, ray_origin_grid,
                             ray_dir_grid, 4096.0f, &hit);

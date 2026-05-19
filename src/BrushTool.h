@@ -1,11 +1,11 @@
 #pragma once
 
+#include "CellBitmap.h"
 #include "Shapes.h"
 #include "Tool.h"
 #include "ToolState.h"
 
 #include <cstdint>
-#include <unordered_set>
 
 namespace macvoxel {
 
@@ -48,13 +48,29 @@ private:
     bool is_dragging_ = false;
     ToolMode paint_mode_ = ToolMode::Add;
     shapes::Vec3i last_drag_edit_cell_{INT32_MIN, INT32_MIN, INT32_MIN};
-    std::unordered_set<int64_t> drag_skip_cells_;
+    // Dense byte-per-cell bitmap of cells the kernel has placed this
+    // stroke — the picker's ComputeTargetCell consults it via
+    // RaycastIgnoring so the raycast keeps hitting the original
+    // surface. Replaces the previous std::unordered_set<int64_t>:
+    // the hashmap probe per footprint cell was the single dominant
+    // cost in the brush hot path.
+    CellBitmap drag_skip_;
     // Union AABB of every stamp's footprint in this stroke. INT32_MAX /
     // MIN sentinels = empty (no stamps fired yet).
     int32_t stroke_bbox_x0_ = INT32_MAX, stroke_bbox_y0_ = INT32_MAX,
             stroke_bbox_z0_ = INT32_MAX;
     int32_t stroke_bbox_x1_ = INT32_MIN, stroke_bbox_y1_ = INT32_MIN,
             stroke_bbox_z1_ = INT32_MIN;
+
+    // MACVOXEL_PERF accumulators. Reset in ResetStrokeState; printed
+    // once per stroke in OnMouseUp / Cancel.
+    int perf_stamp_count_ = 0;
+    double perf_footprint_us_ = 0.0;
+    double perf_readback_us_ = 0.0;
+    double perf_diff_us_ = 0.0;
+    double perf_apply_us_ = 0.0;
+    double perf_history_us_ = 0.0;
+    size_t perf_cells_committed_ = 0;
 };
 
 }  // namespace macvoxel

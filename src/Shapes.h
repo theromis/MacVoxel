@@ -6,6 +6,7 @@
 namespace macvoxel {
 
 class VoxelGrid;
+class VoxelVolume;
 
 namespace shapes {
 
@@ -57,9 +58,13 @@ void EnumerateBox(Vec3i corner_a, Vec3i corner_b, bool fill,
 // every cell that (a) is non-empty and matches `match_color` (or any
 // non-empty cell when match_color == 0) and (b) has its face on the
 // (axis, sign) side exposed (the cell at offset +sign along axis is empty).
-// Uses 4- or 8-connectivity in the in-plane axes per `eight_conn`.
-void FloodCoplanarFace(const VoxelGrid& grid, Vec3i seed, int axis, int sign,
-                       uint8_t match_color, bool eight_conn,
+// Bounded by the per-axis [`u_min`, `u_max`] × [`v_min`, `v_max`] plane
+// rect (typically the EditVolume's in-plane extent). Uses a dense
+// visited bitmap sized to that rect so BFS is O(plane area) instead of
+// O(N · hashmap-probes). 4- or 8-connectivity per `eight_conn`.
+void FloodCoplanarFace(const VoxelVolume& shadow, Vec3i seed, int axis, int sign,
+                       uint8_t match_color, int u_min, int u_max,
+                       int v_min, int v_max, bool eight_conn,
                        std::vector<Vec3i>& out);
 
 // Flood-fill EMPTY cells in the plane perpendicular to `axis` through
@@ -68,7 +73,7 @@ void FloodCoplanarFace(const VoxelGrid& grid, Vec3i seed, int axis, int sign,
 // user clicks on a volume wall — the seed plane has no voxels to flood
 // against, so we instead fill the available empty cells inside the
 // volume's bounding rect.
-void FloodCoplanarEmpty(const VoxelGrid& grid, Vec3i seed, int axis,
+void FloodCoplanarEmpty(const VoxelVolume& shadow, Vec3i seed, int axis,
                         int u_min, int u_max, int v_min, int v_max,
                         bool eight_conn, std::vector<Vec3i>& out);
 

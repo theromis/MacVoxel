@@ -3,6 +3,14 @@ import SwiftUI
 struct ToolPanel: View {
     @Bindable var state: EditorState
 
+    // Cached brush cell count. Recomputing inline every body run was an
+    // O(edge³) Swift loop firing 10×/sec via the EditorState tick timer
+    // — at brush_size=63 that's 2.5M iterations/sec on the main thread,
+    // enough to stall MTKView's draw and tank camera-orbit framerate.
+    // Now recomputed only when one of the brush settings actually
+    // changes.
+    @State private var cachedBrushCells: Int = 0
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader("Tool")
@@ -17,6 +25,10 @@ struct ToolPanel: View {
                 Text(brushSummary)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
+                    .onAppear { recomputeBrushCells() }
+                    .onChange(of: state.brushSize) { _, _ in recomputeBrushCells() }
+                    .onChange(of: state.brush3D) { _, _ in recomputeBrushCells() }
+                    .onChange(of: state.brushShape) { _, _ in recomputeBrushCells() }
             }
 
             perToolControls
@@ -123,30 +135,37 @@ struct ToolPanel: View {
 
     private var brushSummary: String {
         let edge = max(1, state.brushSize)
+        if state.brush3D {
+            return "\(edge) × \(edge) × \(edge)  (\(cachedBrushCells) cells)"
+        }
+        return "\(edge) × \(edge)  (\(cachedBrushCells) cells, on face plane)"
+    }
+
+    private func recomputeBrushCells() {
+        let edge = max(1, state.brushSize)
         let lo = -((edge - 1) / 2)
         let hi = edge / 2
         let c = Float(lo + hi) * 0.5
         let halfEdge = Float(edge) * 0.5
         let r2 = halfEdge * halfEdge
+        let isCircle = state.brushShape == .circle
+        let is3D = state.brush3D
         var cells = 0
         for dz in lo...hi {
-            if !state.brush3D && dz != 0 { continue }
+            if !is3D && dz != 0 { continue }
             for dy in lo...hi {
                 for dx in lo...hi {
-                    if state.brushShape == .circle {
+                    if isCircle {
                         let fx = Float(dx) - c
                         let fy = Float(dy) - c
-                        let fz = state.brush3D ? Float(dz) - c : 0
+                        let fz = is3D ? Float(dz) - c : 0
                         if fx*fx + fy*fy + fz*fz > r2 { continue }
                     }
                     cells += 1
                 }
             }
         }
-        if state.brush3D {
-            return "\(edge) × \(edge) × \(edge)  (\(cells) cells)"
-        }
-        return "\(edge) × \(edge)  (\(cells) cells, on face plane)"
+        cachedBrushCells = cells
     }
 
     // ----- Per-tool extras -----

@@ -1,6 +1,6 @@
 #include "Raycast.h"
 
-#include "CellKey.h"
+#include "CellBitmap.h"
 #include "VoxelGrid.h"
 
 #include <cmath>
@@ -13,7 +13,7 @@ bool RaycastImpl(const VoxelGrid& grid,
                  simd::float3 origin,
                  simd::float3 direction,
                  float t_max,
-                 const std::unordered_set<int64_t>* ignore,
+                 const CellBitmap* ignore,
                  RayHit* out_hit) {
     constexpr float kInf = std::numeric_limits<float>::infinity();
 
@@ -45,7 +45,7 @@ bool RaycastImpl(const VoxelGrid& grid,
     const float tDeltaZ = (sz != 0) ? 1.0f / std::abs(direction.z) : kInf;
 
     auto is_ignored = [&](int32_t cx, int32_t cy, int32_t cz) {
-        return ignore != nullptr && ignore->contains(PackCellKey(cx, cy, cz));
+        return ignore != nullptr && ignore->Test(cx, cy, cz);
     };
 
     // Starting cell: if it's already filled, the ray began inside a voxel.
@@ -115,7 +115,7 @@ bool RaycastIgnoring(const VoxelGrid& grid,
                      simd::float3 origin,
                      simd::float3 direction,
                      float t_max,
-                     const std::unordered_set<int64_t>& ignore,
+                     const CellBitmap& ignore,
                      RayHit* out_hit) {
     return RaycastImpl(grid, origin, direction, t_max, &ignore, out_hit);
 }

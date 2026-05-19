@@ -39,6 +39,22 @@ public:
     // current shadow state (which the brush kernel does by construction).
     void ApplyChanges(const CellChange* changes, size_t count);
 
+    // Single-pass commit from a GPU-texture readback. `post_bytes` is
+    // the x-fastest contents of the bbox region the engine just read
+    // back. Walks the bbox row-by-row, comparing against the dense
+    // shadow; for every cell that changed, emits a CellChange in
+    // *out_diff AND writes the new value back into the shadow + marks
+    // the chunk dirty + updates filled_count_ / bounds_.
+    //
+    // Saves the second per-cell loop that would otherwise happen in
+    // VoxelVolume::ApplyChanges: the diff and the shadow update touch
+    // the same cells, so doing them in one pass cuts memory traffic
+    // and per-cell function-call overhead in half.
+    void DiffAndApplyRegion(int32_t bx0, int32_t by0, int32_t bz0,
+                            int32_t bx1, int32_t by1, int32_t bz1,
+                            const uint8_t* post_bytes,
+                            std::vector<CellChange>* out_diff);
+
     // Whole-buffer reseed used by load + open + new. The per-cell `Set`
     // storm would also work but skips the dense-zero scan when the
     // source is sparse.

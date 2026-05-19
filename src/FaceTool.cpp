@@ -8,6 +8,7 @@
 #include "EditorContext.h"
 #include "Input.h"
 #include "InteractionState.h"
+#include "Perf.h"
 #include "ShapeEngine.h"  // CellPalette
 #include "Shapes.h"
 #include "ToolState.h"
@@ -18,6 +19,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <vector>
 
 namespace macvoxel {
@@ -34,6 +37,13 @@ void FaceTool::Reset() {
     last_bbox_x1_ = last_bbox_y1_ = last_bbox_z1_ = INT32_MIN;
     union_bbox_x0_ = union_bbox_y0_ = union_bbox_z0_ = INT32_MAX;
     union_bbox_x1_ = union_bbox_y1_ = union_bbox_z1_ = INT32_MIN;
+    perf_flood_us_ = 0.0;
+    perf_flood_cells_ = 0;
+    perf_readback_us_ = 0.0;
+    perf_diff_us_ = 0.0;
+    perf_apply_us_ = 0.0;
+    perf_history_us_ = 0.0;
+    perf_cells_committed_ = 0;
 }
 
 void FaceTool::EnumerateCells(const EditorContext& ctx,
@@ -188,12 +198,11 @@ bool FaceTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
     from_wall_ = (color == 0);
 
     const ToolSettings& t = ctx.tool;
-    if (color == 0) {
-        // Wall pick. Flood-fill empty cells on the wall plane,
-        // bounded by the EditVolume's in-plane extent. Then shift
-        // seed_cells one step outside the volume so the normal
-        // k=1..d extrusion math (in EnumerateCells) lands the first
-        // voxel on the wall plane itself.
+    const auto t_flood = perf::Now();
+    {
+        // Both flood paths bound visited to the EditVolume's in-plane
+        // extent — the dense bitmap inside Shapes::FloodCoplanar*
+        // depends on this rect being finite.
         const EditVolume& vol = ctx.document.volume;
         const int u_axis = (axis == 0) ? 1 : 0;
         const int v_axis = (axis == 2) ? 1 : 2;
@@ -205,21 +214,31 @@ bool FaceTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
         };
         const int u_min = axis_lo(u_axis), u_max = axis_hi(u_axis);
         const int v_min = axis_lo(v_axis), v_max = axis_hi(v_axis);
-        shapes::FloodCoplanarEmpty(ctx.document.grid, seed, axis,
-                                   u_min, u_max, v_min, v_max,
-                                   t.face_eight_connected, seed_cells_);
-        int da[3] = {0, 0, 0};
-        da[axis] = sign;
-        for (auto& s : seed_cells_) {
-            s.x -= da[0]; s.y -= da[1]; s.z -= da[2];
+        if (color == 0) {
+            // Wall pick. Flood-fill empty cells on the wall plane,
+            // bounded by the EditVolume's in-plane extent. Then shift
+            // seed_cells one step outside the volume so the normal
+            // k=1..d extrusion math (in EnumerateCells) lands the
+            // first voxel on the wall plane itself.
+            shapes::FloodCoplanarEmpty(ctx.document.volume_shadow, seed, axis,
+                                       u_min, u_max, v_min, v_max,
+                                       t.face_eight_connected, seed_cells_);
+            int da[3] = {0, 0, 0};
+            da[axis] = sign;
+            for (auto& s : seed_cells_) {
+                s.x -= da[0]; s.y -= da[1]; s.z -= da[2];
+            }
+        } else {
+            const uint8_t flood_color =
+                (t.face_extrude == FaceExtrudeKind::Color) ? color : 0;
+            shapes::FloodCoplanarFace(ctx.document.volume_shadow, seed, axis,
+                                      sign, flood_color, u_min, u_max,
+                                      v_min, v_max, t.face_eight_connected,
+                                      seed_cells_);
         }
-    } else {
-        const uint8_t flood_color =
-            (t.face_extrude == FaceExtrudeKind::Color) ? color : 0;
-        shapes::FloodCoplanarFace(ctx.document.grid, seed, axis, sign,
-                                  flood_color, t.face_eight_connected,
-                                  seed_cells_);
     }
+    perf_flood_us_ += perf::Micros(perf::Now() - t_flood);
+    perf_flood_cells_ = seed_cells_.size();
     state.drag_mode = DragMode::Shape;
     ctx.preview_active = true;
     ctx.history.BeginOp();
@@ -251,6 +270,7 @@ void FaceTool::OnMouseUp(EditorContext& ctx, InteractionState& state,
         Reset();
         return;
     }
+    const auto t_total = perf::Now();
     const int d = ComputeFaceVoxels(state, vc, e);
     if (d != applied_d_ || ctx.tool.face_with != applied_with_) {
         Refresh(ctx, state, d, engine);
@@ -277,33 +297,28 @@ void FaceTool::OnMouseUp(EditorContext& ctx, InteractionState& state,
                 bb.x0 = rx0; bb.y0 = ry0; bb.z0 = rz0;
                 bb.x1 = rx1; bb.y1 = ry1; bb.z1 = rz1;
                 std::vector<uint8_t> post;
+                const auto t_readback = perf::Now();
                 engine.Readback(bb, &post);
+                perf_readback_us_ += perf::Micros(perf::Now() - t_readback);
                 const size_t bw = static_cast<size_t>(rx1 - rx0 + 1);
                 const size_t bh = static_cast<size_t>(ry1 - ry0 + 1);
                 const size_t bd = static_cast<size_t>(rz1 - rz0 + 1);
                 if (post.size() >= bw * bh * bd) {
                     std::vector<CellChange> diff;
                     diff.reserve(cells.size());
-                    for (size_t lz = 0; lz < bd; ++lz) {
-                        for (size_t ly = 0; ly < bh; ++ly) {
-                            const size_t row_base = lz * bw * bh + ly * bw;
-                            for (size_t lx = 0; lx < bw; ++lx) {
-                                const int32_t x = rx0 + static_cast<int32_t>(lx);
-                                const int32_t y = ry0 + static_cast<int32_t>(ly);
-                                const int32_t z = rz0 + static_cast<int32_t>(lz);
-                                const uint8_t pre = doc.volume_shadow.Get(x, y, z);
-                                const uint8_t cur = post[row_base + lx];
-                                if (pre == cur) continue;
-                                CellChange c{};
-                                c.x = x; c.y = y; c.z = z;
-                                c.old_val = pre; c.new_val = cur;
-                                diff.push_back(c);
-                            }
-                        }
-                    }
+                    const auto t_diff = perf::Now();
+                    doc.volume_shadow.DiffAndApplyRegion(
+                        rx0, ry0, rz0, rx1, ry1, rz1,
+                        post.data(), &diff);
+                    perf_diff_us_ += perf::Micros(perf::Now() - t_diff);
                     if (!diff.empty()) {
-                        doc.ApplyChanges(diff.data(), diff.size());
+                        perf_cells_committed_ = diff.size();
+                        const auto t_apply = perf::Now();
+                        doc.grid.ApplyChanges(diff.data(), diff.size());
+                        perf_apply_us_ += perf::Micros(perf::Now() - t_apply);
+                        const auto t_history = perf::Now();
                         ctx.history.RecordBatch(diff.data(), diff.size());
+                        perf_history_us_ += perf::Micros(perf::Now() - t_history);
                         (void)doc.volume_shadow.TakeDirtyChunks();
                         doc.BumpGeometry();
                     }
@@ -323,6 +338,17 @@ void FaceTool::OnMouseUp(EditorContext& ctx, InteractionState& state,
     ctx.history.CommitOp();
     ctx.preview_active = false;
     state.anchor.has_anchor = false;
+    if (perf::Enabled()) {
+        const double total_us = perf::Micros(perf::Now() - t_total) +
+                                perf_flood_us_;
+        fprintf(stderr,
+                "[perf face] flood=%zu cells in %.0fus | commit cells=%zu "
+                "readback=%.0fus diff=%.0fus apply=%.0fus history=%.0fus "
+                "total=%.0fus\n",
+                perf_flood_cells_, perf_flood_us_, perf_cells_committed_,
+                perf_readback_us_, perf_diff_us_, perf_apply_us_,
+                perf_history_us_, total_us);
+    }
     Reset();
 }
 

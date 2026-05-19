@@ -8,10 +8,10 @@
 #include <simd/simd.h>
 
 #include <cstdint>
-#include <unordered_set>
 
 namespace macvoxel {
 
+class CellBitmap;
 struct EditorContext;
 struct Bounds3;
 
@@ -56,12 +56,13 @@ struct ViewContext {
 
     // Mode-aware pick. Add returns the *neighbor* cell (placement
     // target); Remove/Paint return the *hit* cell. During a Paint
-    // drag, the per-stroke skip set keeps the raycast on the
+    // drag, the per-stroke skip bitmap keeps the raycast on the
     // original surface even after voxels have been placed in front.
+    // Pass `nullptr` (or an empty bitmap) for non-drag picks.
     bool ComputeTargetCell(
         float local_x, float local_y, ToolMode mode,
         shapes::Vec3i* out_cell, int* out_face_axis,
-        const std::unordered_set<int64_t>& skip = {}) const;
+        const CellBitmap* skip = nullptr) const;
 
     // For tools that accept empty-space anchors (Line/Circle/Square/
     // Box): try mode-faithful pick, then fall back to Add semantics

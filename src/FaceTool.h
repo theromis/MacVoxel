@@ -83,6 +83,16 @@ private:
             union_bbox_z0_ = INT32_MAX;
     int32_t union_bbox_x1_ = INT32_MIN, union_bbox_y1_ = INT32_MIN,
             union_bbox_z1_ = INT32_MIN;
+
+    // MACVOXEL_PERF accumulators. Reset in Reset() at stroke start;
+    // printed once per stroke in OnMouseUp / Cancel.
+    double perf_flood_us_ = 0.0;
+    size_t perf_flood_cells_ = 0;
+    double perf_readback_us_ = 0.0;
+    double perf_diff_us_ = 0.0;
+    double perf_apply_us_ = 0.0;
+    double perf_history_us_ = 0.0;
+    size_t perf_cells_committed_ = 0;
 };
 
 }  // namespace macvoxel

@@ -2,10 +2,10 @@
 
 #include <cstdint>
 #include <simd/simd.h>
-#include <unordered_set>
 
 namespace macvoxel {
 
+class CellBitmap;
 class VoxelGrid;
 
 struct RayHit {
@@ -30,14 +30,14 @@ bool Raycast(const VoxelGrid& grid,
              float t_max,
              RayHit* out_hit);
 
-// Same DDA, but cells whose packed key is in `ignore` are treated as empty.
-// Lets drag-add ignore voxels placed during the current stroke so the
+// Same DDA, but cells flagged in `ignore` are treated as empty. Lets
+// drag-add ignore voxels placed during the current stroke so the
 // raycast keeps targeting the original surface.
 bool RaycastIgnoring(const VoxelGrid& grid,
                      simd::float3 origin,
                      simd::float3 direction,
                      float t_max,
-                     const std::unordered_set<int64_t>& ignore,
+                     const CellBitmap& ignore,
                      RayHit* out_hit);
 
 }  // namespace macvoxel

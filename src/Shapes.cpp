@@ -3,11 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <unordered_set>
 #include <utility>
+#include <vector>
 
-#include "CellKey.h"
-#include "VoxelGrid.h"
+#include "VoxelVolume.h"
 
 namespace macvoxel::shapes {
 
@@ -191,8 +190,54 @@ void EnumerateBox(Vec3i corner_a, Vec3i corner_b, bool fill,
     }
 }
 
-void FloodCoplanarFace(const VoxelGrid& grid, Vec3i seed, int axis, int sign,
-                       uint8_t match_color, bool eight_conn,
+namespace {
+
+// 2D BFS visited bitmap sized to a plane rect. Encapsulates the
+// flatten + bounds-check + mark-visited boilerplate so the two flood
+// functions stay declarative.
+class PlaneVisited {
+public:
+    PlaneVisited(int u_min, int u_max, int v_min, int v_max)
+        : u_min_(u_min),
+          v_min_(v_min),
+          u_stride_(u_max - u_min + 1),
+          v_stride_(v_max - v_min + 1) {
+        if (u_stride_ <= 0 || v_stride_ <= 0) {
+            u_stride_ = v_stride_ = 0;
+            return;
+        }
+        bits_.assign(static_cast<size_t>(u_stride_) *
+                         static_cast<size_t>(v_stride_),
+                     0);
+    }
+    bool InBounds(int u, int v) const {
+        return u >= u_min_ && (u - u_min_) < u_stride_ &&
+               v >= v_min_ && (v - v_min_) < v_stride_;
+    }
+    // Returns true if newly marked (caller should enqueue), false if
+    // the (u, v) was either out of bounds or already visited.
+    bool MarkIfFresh(int u, int v) {
+        if (!InBounds(u, v)) return false;
+        const size_t idx = static_cast<size_t>(u - u_min_) +
+                           static_cast<size_t>(v - v_min_) *
+                               static_cast<size_t>(u_stride_);
+        if (bits_[idx]) return false;
+        bits_[idx] = 1;
+        return true;
+    }
+private:
+    int u_min_;
+    int v_min_;
+    int u_stride_;
+    int v_stride_;
+    std::vector<uint8_t> bits_;
+};
+
+}  // namespace
+
+void FloodCoplanarFace(const VoxelVolume& shadow, Vec3i seed, int axis, int sign,
+                       uint8_t match_color, int u_min, int u_max,
+                       int v_min, int v_max, bool eight_conn,
                        std::vector<Vec3i>& out) {
     out.clear();
     const int u_axis = (axis == 0) ? 1 : 0;
@@ -209,21 +254,21 @@ void FloodCoplanarFace(const VoxelGrid& grid, Vec3i seed, int axis, int sign,
     normal[axis] = sign;
 
     auto qualifies = [&](const Vec3i& c) -> bool {
-        const uint8_t v = grid.Get(c.x, c.y, c.z);
+        const uint8_t v = shadow.Get(c.x, c.y, c.z);
         if (v == 0) return false;
         if (match_color != 0 && v != match_color) return false;
-        return grid.Get(c.x + normal[0], c.y + normal[1],
-                        c.z + normal[2]) == 0;
+        return shadow.Get(c.x + normal[0], c.y + normal[1],
+                          c.z + normal[2]) == 0;
     };
 
     if (!qualifies(seed)) return;
 
-    std::unordered_set<int64_t> visited;
+    PlaneVisited visited(u_min, u_max, v_min, v_max);
     std::vector<std::pair<int, int>> stack;
     const int seed_u = seed_xyz[u_axis];
     const int seed_v = seed_xyz[v_axis];
+    if (!visited.MarkIfFresh(seed_u, seed_v)) return;
     stack.push_back({seed_u, seed_v});
-    visited.insert(PackCellKey(seed_u, seed_v, 0));
     while (!stack.empty()) {
         const std::pair<int, int> top = stack.back();
         stack.pop_back();
@@ -236,8 +281,7 @@ void FloodCoplanarFace(const VoxelGrid& grid, Vec3i seed, int axis, int sign,
             {u + 1, v}, {u - 1, v}, {u, v + 1}, {u, v - 1}
         };
         for (const auto& n : cardinals) {
-            const int64_t key = PackCellKey(n.first, n.second, 0);
-            if (visited.insert(key).second) stack.push_back(n);
+            if (visited.MarkIfFresh(n.first, n.second)) stack.push_back(n);
         }
         if (eight_conn) {
             const std::pair<int, int> diagonals[4] = {
@@ -245,14 +289,13 @@ void FloodCoplanarFace(const VoxelGrid& grid, Vec3i seed, int axis, int sign,
                 {u - 1, v + 1}, {u - 1, v - 1}
             };
             for (const auto& n : diagonals) {
-                const int64_t key = PackCellKey(n.first, n.second, 0);
-                if (visited.insert(key).second) stack.push_back(n);
+                if (visited.MarkIfFresh(n.first, n.second)) stack.push_back(n);
             }
         }
     }
 }
 
-void FloodCoplanarEmpty(const VoxelGrid& grid, Vec3i seed, int axis,
+void FloodCoplanarEmpty(const VoxelVolume& shadow, Vec3i seed, int axis,
                         int u_min, int u_max, int v_min, int v_max,
                         bool eight_conn, std::vector<Vec3i>& out) {
     out.clear();
@@ -266,28 +309,24 @@ void FloodCoplanarEmpty(const VoxelGrid& grid, Vec3i seed, int axis,
         xyz[v_axis] = v;
         return Vec3i{xyz[0], xyz[1], xyz[2]};
     };
-    auto in_rect = [&](int u, int v) {
-        return u >= u_min && u <= u_max && v >= v_min && v <= v_max;
-    };
     auto is_empty = [&](const Vec3i& c) -> bool {
-        return grid.Get(c.x, c.y, c.z) == 0;
+        return shadow.Get(c.x, c.y, c.z) == 0;
     };
 
+    PlaneVisited visited(u_min, u_max, v_min, v_max);
     const int seed_u = seed_xyz[u_axis];
     const int seed_v = seed_xyz[v_axis];
-    if (!in_rect(seed_u, seed_v)) return;
+    if (!visited.InBounds(seed_u, seed_v)) return;
     if (!is_empty(seed)) return;
+    visited.MarkIfFresh(seed_u, seed_v);
 
-    std::unordered_set<int64_t> visited;
     std::vector<std::pair<int, int>> stack;
     stack.push_back({seed_u, seed_v});
-    visited.insert(PackCellKey(seed_u, seed_v, 0));
     while (!stack.empty()) {
         const std::pair<int, int> top = stack.back();
         stack.pop_back();
         const int u = top.first;
         const int v = top.second;
-        if (!in_rect(u, v)) continue;
         const Vec3i c = cell_at(u, v);
         if (!is_empty(c)) continue;
         out.push_back(c);
@@ -295,8 +334,7 @@ void FloodCoplanarEmpty(const VoxelGrid& grid, Vec3i seed, int axis,
             {u + 1, v}, {u - 1, v}, {u, v + 1}, {u, v - 1}
         };
         for (const auto& n : cardinals) {
-            const int64_t key = PackCellKey(n.first, n.second, 0);
-            if (visited.insert(key).second) stack.push_back(n);
+            if (visited.MarkIfFresh(n.first, n.second)) stack.push_back(n);
         }
         if (eight_conn) {
             const std::pair<int, int> diagonals[4] = {
@@ -304,8 +342,7 @@ void FloodCoplanarEmpty(const VoxelGrid& grid, Vec3i seed, int axis,
                 {u - 1, v + 1}, {u - 1, v - 1}
             };
             for (const auto& n : diagonals) {
-                const int64_t key = PackCellKey(n.first, n.second, 0);
-                if (visited.insert(key).second) stack.push_back(n);
+                if (visited.MarkIfFresh(n.first, n.second)) stack.push_back(n);
             }
         }
     }

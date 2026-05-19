@@ -472,26 +472,11 @@ void ShapeTool::OnMouseUp(EditorContext& ctx, InteractionState& state,
     const size_t bd = static_cast<size_t>(bb.z1 - bb.z0 + 1);
     if (post.size() >= bw * bh * bd) {
         std::vector<CellChange> diff;
-        diff.reserve(bw * bh);
-        for (size_t lz = 0; lz < bd; ++lz) {
-            for (size_t ly = 0; ly < bh; ++ly) {
-                const size_t row_base = lz * bw * bh + ly * bw;
-                for (size_t lx = 0; lx < bw; ++lx) {
-                    const int32_t x = bb.x0 + static_cast<int32_t>(lx);
-                    const int32_t y = bb.y0 + static_cast<int32_t>(ly);
-                    const int32_t z = bb.z0 + static_cast<int32_t>(lz);
-                    const uint8_t pre = doc.volume_shadow.Get(x, y, z);
-                    const uint8_t cur = post[row_base + lx];
-                    if (pre == cur) continue;
-                    CellChange c{};
-                    c.x = x; c.y = y; c.z = z;
-                    c.old_val = pre; c.new_val = cur;
-                    diff.push_back(c);
-                }
-            }
-        }
+        doc.volume_shadow.DiffAndApplyRegion(bb.x0, bb.y0, bb.z0,
+                                             bb.x1, bb.y1, bb.z1,
+                                             post.data(), &diff);
         if (!diff.empty()) {
-            doc.ApplyChanges(diff.data(), diff.size());
+            doc.grid.ApplyChanges(diff.data(), diff.size());
             ctx.history.RecordBatch(diff.data(), diff.size());
             (void)doc.volume_shadow.TakeDirtyChunks();
             doc.BumpGeometry();
