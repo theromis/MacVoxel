@@ -117,7 +117,10 @@ NSString* LoadBrushLibrarySource() {
     [enc setComputePipelineState:_pipeline];
     [enc setBytes:&u length:sizeof(u) atIndex:0];
     [enc setTexture:texture.texture atIndex:0];
-    [enc setTexture:texture.oracleTexture atIndex:1];
+    [enc setTexture:texture.previewTexture atIndex:1];
+    [enc setTexture:texture.previewOracleTexture atIndex:2];
+    [enc setTexture:texture.previewRemTexture atIndex:3];
+    [enc setTexture:texture.previewRemOracleTexture atIndex:4];
 
     const NSUInteger tgX = std::min<NSUInteger>(8, (NSUInteger)p.size_x);
     const NSUInteger tgY = std::min<NSUInteger>(8, (NSUInteger)p.size_y);

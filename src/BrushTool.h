@@ -1,6 +1,5 @@
 #pragma once
 
-#include "CellBitmap.h"
 #include "Shapes.h"
 #include "Tool.h"
 #include "ToolState.h"
@@ -13,14 +12,12 @@ namespace macvoxel {
 // claim mouseDown via its own branch lands here. Cmd flips the stroke
 // to Remove.
 //
-// During a stroke: the brush kernel writes the doc texture directly,
-// while `doc.grid` / `doc.volume_shadow` stay frozen at pre-stroke
-// state. `drag_skip_cells_` is the CPU-side oracle so each pick's
-// raycast ignores cells the stroke has *just* placed (otherwise the
-// brush marches outward along the face normal). On `OnMouseUp` the
-// stroke's union bbox is read back from the texture, diffed against
-// the still-pre-stroke shadow, and batch-applied to grid + shadow +
-// history.
+// During a stroke: the kernel writes preview surfaces (tex_t for Add /
+// Paint, preview_rem for Remove); doc.grid / volume_shadow / tex_a
+// stay frozen at pre-stroke state. On `OnMouseUp` commit_generic
+// promotes the preview into tex_a, then the stroke's union bbox is
+// read back, diffed against the shadow, and batch-applied to grid +
+// shadow + history.
 class BrushTool final : public Tool {
 public:
     bool OnMouseDown(EditorContext& ctx, InteractionState& state,
@@ -48,13 +45,6 @@ private:
     bool is_dragging_ = false;
     ToolMode paint_mode_ = ToolMode::Add;
     shapes::Vec3i last_drag_edit_cell_{INT32_MIN, INT32_MIN, INT32_MIN};
-    // Dense byte-per-cell bitmap of cells the kernel has placed this
-    // stroke — the picker's ComputeTargetCell consults it via
-    // RaycastIgnoring so the raycast keeps hitting the original
-    // surface. Replaces the previous std::unordered_set<int64_t>:
-    // the hashmap probe per footprint cell was the single dominant
-    // cost in the brush hot path.
-    CellBitmap drag_skip_;
     // Union AABB of every stamp's footprint in this stroke. INT32_MAX /
     // MIN sentinels = empty (no stamps fired yet).
     int32_t stroke_bbox_x0_ = INT32_MAX, stroke_bbox_y0_ = INT32_MAX,

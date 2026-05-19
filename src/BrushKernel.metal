@@ -4,15 +4,17 @@
 // footprint is a regular grid over the brush's bounding box and each
 // thread tests its cell against the circle/slab constraints.
 //
-// Async-write protocol (B2):
-//   buffer(0)  = Uniforms (brush center / bounds / shape / mode / volume)
-//   texture(0) = R8Uint doc texture, access::read_write. Kernel reads the
-//                old value, computes the new value, writes back if changed.
+// Phase 2.4: kernel writes the preview surfaces (tex_t for Add /
+// Paint, preview_rem for Remove), never tex_a directly. The
+// rasterizer composites the surfaces over tex_a; commit_generic
+// promotes them at OnMouseUp.
 //
-// No diff/atomic-counter output — the texture is authoritative during a
-// stroke, and end-of-stroke sync (BrushController::OnMouseUp) recovers
-// the per-cell diff by comparing the texture to the still-pre-stroke
-// `doc.volume_shadow`.
+//   buffer(0)  = Uniforms (brush center / bounds / shape / mode / volume)
+//   texture(0) = R8Uint doc texture, access::read (occupancy check)
+//   texture(1) = preview tex (tex_t), access::write
+//   texture(2) = preview oracle (16³), access::write
+//   texture(3) = preview_rem, access::write
+//   texture(4) = preview_rem oracle (16³), access::write
 //
 // Each thread covers exactly one footprint cell. Threads dispatched past
 // the bounds (when the dispatch rounds up to threadgroup-multiple) early
@@ -48,20 +50,14 @@ struct Uniforms {
     float r2;           // (max_dim * 0.5)^2 — circle/sphere radius squared
 };
 
-// Apply the mode's value-rewrite rule: Add fills empty cells with the
-// palette index, Remove clears any cell, Paint repaints non-empty cells.
-static uint compute_new_value(uint old_val, uint mode, uint palette_idx) {
-    if (mode == kModeAdd)    return old_val == 0u ? palette_idx : old_val;
-    if (mode == kModeRemove) return 0u;
-    if (mode == kModePaint)  return old_val == 0u ? old_val : palette_idx;
-    return old_val;
-}
-
 kernel void brush_main(
-    constant Uniforms& u                              [[buffer(0)]],
-    texture3d<uint, access::read_write> tex_a         [[texture(0)]],
-    texture3d<uint, access::write>      oracle        [[texture(1)]],
-    uint3 gid                                         [[thread_position_in_grid]])
+    constant Uniforms& u                                  [[buffer(0)]],
+    texture3d<uint, access::read>       tex_a             [[texture(0)]],
+    texture3d<uint, access::write>      preview           [[texture(1)]],
+    texture3d<uint, access::write>      preview_oracle    [[texture(2)]],
+    texture3d<uint, access::write>      preview_rem       [[texture(3)]],
+    texture3d<uint, access::write>      preview_rem_oracle [[texture(4)]],
+    uint3 gid                                             [[thread_position_in_grid]])
 {
     // Footprint-grid bounds check: dispatches round up to the threadgroup
     // size, so trailing threads in each dim must early-out.
@@ -95,7 +91,6 @@ kernel void brush_main(
         if (d2 > u.r2) return;
     }
 
-    // Read current cell value from the texture.
     int3 tex_coord = cell - u.tex_origin;
     bool in_tex = all(tex_coord >= int3(0)) &&
                   all(tex_coord <  int3(tex_a.get_width(),
@@ -103,24 +98,31 @@ kernel void brush_main(
                                         tex_a.get_depth()));
     if (!in_tex) return;
 
-    uint old_val = tex_a.read(uint3(tex_coord)).r;
-    uint new_val = compute_new_value(old_val, u.mode, u.palette_idx);
-
-    // Out-of-volume create-non-empty drop (EditVolume policy: creating a
-    // new non-empty cell outside the volume is silently ignored; in-place
-    // deletes / repaints of cells that already exist outside are allowed).
+    uint doc_val = tex_a.read(uint3(tex_coord)).r;
     bool in_vol = all(cell >= u.vol_min) && all(cell <= u.vol_max);
-    if (new_val != 0u && old_val == 0u && !in_vol) return;
-    if (new_val == old_val) return;
 
-    tex_a.write(uint4(new_val, 0u, 0u, 0u), uint3(tex_coord));
-    // Mark the chunk non-empty in the oracle. Monotone-empty→non-empty;
-    // never cleared by the kernel even on Remove, so a Remove that
-    // empties a chunk just leaves the oracle conservatively
-    // "non-empty" until the end-of-stroke sync rebuilds it. Cheap, and
-    // race-safe because every thread writes the same value (1).
-    if (new_val != 0u) {
-        oracle.write(uint4(1u, 0u, 0u, 0u),
-                     uint3(uint3(tex_coord) >> uint3(4u)));
+    // Add / Paint stamp into tex_t; Remove stamps into preview_rem.
+    // Each mode gates on the doc cell so the preview reflects the
+    // change semantics: Add only shows new voxels in empty cells,
+    // Paint only over existing ones, Remove only where there's a doc
+    // cell to hide.
+    if (u.mode == kModeAdd) {
+        if (doc_val == 0u && in_vol) {
+            preview.write(uint4(u.palette_idx, 0u, 0u, 0u), uint3(tex_coord));
+            preview_oracle.write(uint4(1u, 0u, 0u, 0u),
+                                 uint3(uint3(tex_coord) >> uint3(4u)));
+        }
+    } else if (u.mode == kModePaint) {
+        if (doc_val != 0u) {
+            preview.write(uint4(u.palette_idx, 0u, 0u, 0u), uint3(tex_coord));
+            preview_oracle.write(uint4(1u, 0u, 0u, 0u),
+                                 uint3(uint3(tex_coord) >> uint3(4u)));
+        }
+    } else if (u.mode == kModeRemove) {
+        if (doc_val != 0u) {
+            preview_rem.write(uint4(1u, 0u, 0u, 0u), uint3(tex_coord));
+            preview_rem_oracle.write(uint4(1u, 0u, 0u, 0u),
+                                     uint3(uint3(tex_coord) >> uint3(4u)));
+        }
     }
 }
