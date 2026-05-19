@@ -49,13 +49,6 @@ public:
                              target:texture_];
     }
 
-    void CommitCells(const CellPalette* cells,
-                     std::size_t cell_count) override {
-        [shape_ dispatchCommitCells:cells
-                           cellCount:static_cast<NSUInteger>(cell_count)
-                              target:texture_];
-    }
-
     void ClearPreviewBbox(const Bbox3& world_bbox) override {
         [shape_ clearPreviewBbox:(world_bbox.x0 - vol_->x0)
                               y0:(world_bbox.y0 - vol_->y0)

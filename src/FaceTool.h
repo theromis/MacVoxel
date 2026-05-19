@@ -16,11 +16,11 @@ struct CellPalette;
 // outward) or insets (negative, inward) by an integer number of voxel
 // layers along the face normal.
 //
-// Phase B3c (still in place): flood-fill stays CPU (needs `doc.grid`
-// for same-color matching), but the per-frame extrusion writes go
-// through `EditEngine::StampCells` writing tex_t. The rasterizer
-// composites tex_t over the doc; commit promotes via `CommitCells` +
-// a bbox readback for the per-cell history diff.
+// Flood-fill stays CPU (needs `doc.grid` for same-color matching);
+// per-frame extrusion writes go through `EditEngine::StampCells`
+// stamping tex_t (Add / Paint) or preview_rem (Remove / inverted Add).
+// Commit at mouseUp dispatches `commit_generic` over the union bbox
+// with bm derived from (mode, sign(d)).
 //
 // Mode dispatch (mode is frozen at click via state.anchor.mode):
 //   Add    — signed d. Positive extrudes; negative insets (erases).

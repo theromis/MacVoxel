@@ -52,15 +52,11 @@ public:
                                          const int32_t* cells_xyz,
                                          std::size_t cell_count) = 0;
 
-    // Per-cell tex_t splat used by the Face tool's hot path. CPU
-    // pre-computes (cell, palette) entries; kernel just writes them.
+    // Per-cell preview-surface splat used by the Face tool. palette != 0
+    // stamps tex_t (Add / Paint); palette == 0 stamps preview_rem
+    // (Remove). Commit happens via CommitGeneric over the union bbox.
     virtual void StampCells(const CellPalette* cells,
                             std::size_t cell_count) = 0;
-
-    // Per-cell tex_a commit used by Face at OnMouseUp. CPU pre-computed
-    // the target value per cell (Add / Remove / Paint resolved).
-    virtual void CommitCells(const CellPalette* cells,
-                             std::size_t cell_count) = 0;
 
     // Zero a tex_t region (in world cell coords). Tools clear their
     // preview on cancel / abort.

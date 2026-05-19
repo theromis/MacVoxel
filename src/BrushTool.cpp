@@ -65,7 +65,6 @@ void BrushTool::ResetStrokeState() {
     stroke_bbox_x0_ = stroke_bbox_y0_ = stroke_bbox_z0_ = INT32_MAX;
     stroke_bbox_x1_ = stroke_bbox_y1_ = stroke_bbox_z1_ = INT32_MIN;
     perf_stamp_count_ = 0;
-    perf_footprint_us_ = 0.0;
     perf_readback_us_ = 0.0;
     perf_diff_us_ = 0.0;
     perf_apply_us_ = 0.0;
@@ -214,13 +213,12 @@ void BrushTool::OnMouseUp(EditorContext& ctx, InteractionState& /*state*/,
     ctx.preview_active = false;
     ctx.history.CommitOp();
     if (perf::Enabled()) {
-        const double total_us = perf::Micros(perf::Now() - t_total) +
-                                perf_footprint_us_;
+        const double total_us = perf::Micros(perf::Now() - t_total);
         fprintf(stderr,
-                "[perf brush] stamps=%d cells=%zu footprint=%.0fus "
+                "[perf brush] stamps=%d cells=%zu "
                 "readback=%.0fus diff=%.0fus apply=%.0fus history=%.0fus "
                 "total=%.0fus\n",
-                perf_stamp_count_, perf_cells_committed_, perf_footprint_us_,
+                perf_stamp_count_, perf_cells_committed_,
                 perf_readback_us_, perf_diff_us_, perf_apply_us_,
                 perf_history_us_, total_us);
     }
@@ -239,13 +237,12 @@ void BrushTool::Cancel(EditorContext& ctx, InteractionState& /*state*/,
     ctx.preview_active = false;
     ctx.history.CommitOp();
     if (perf::Enabled()) {
-        const double total_us = perf::Micros(perf::Now() - t_total) +
-                                perf_footprint_us_;
+        const double total_us = perf::Micros(perf::Now() - t_total);
         fprintf(stderr,
-                "[perf brush cancel] stamps=%d cells=%zu footprint=%.0fus "
+                "[perf brush cancel] stamps=%d cells=%zu "
                 "readback=%.0fus diff=%.0fus apply=%.0fus history=%.0fus "
                 "total=%.0fus\n",
-                perf_stamp_count_, perf_cells_committed_, perf_footprint_us_,
+                perf_stamp_count_, perf_cells_committed_,
                 perf_readback_us_, perf_diff_us_, perf_apply_us_,
                 perf_history_us_, total_us);
     }

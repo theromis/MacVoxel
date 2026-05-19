@@ -55,7 +55,6 @@ private:
     // MACVOXEL_PERF accumulators. Reset in ResetStrokeState; printed
     // once per stroke in OnMouseUp / Cancel.
     int perf_stamp_count_ = 0;
-    double perf_footprint_us_ = 0.0;
     double perf_readback_us_ = 0.0;
     double perf_diff_us_ = 0.0;
     double perf_apply_us_ = 0.0;

@@ -33,10 +33,14 @@ commits on `main`. As of 2026-05-16:
 - **Tool/EditEngine refactor (2026-05-17)**: closure-bag controllers
   replaced by a `Tool` base class + `ToolRegistry` + a pure-C++
   `EditEngine` façade. Unified `commit_generic` MSL kernel covers
-  Shape + Generator commits. Dispatch-on-state-change enforced via
-  `Tool::ShouldDispatch`. Face and Brush stayed on their specialized
-  commit paths pending a `preview_rem` mask refactor — see the
-  "Tool abstraction" section below.
+  every volume-writing tool's commit. Dispatch-on-state-change
+  enforced via `Tool::ShouldDispatch`. See "Tool abstraction" below.
+- **preview_rem mask (2026-05-19)**: companion R8Uint 256³ + 16³
+  oracle alongside `tex_t`. Tools' Remove-mode strokes write a
+  non-zero mask into `preview_rem`; the rasterizer reads it as a
+  cell-skip so doc cells "disappear" live during the drag.
+  `commit_generic bm=Erase` consumes the mask. Unblocked the Face
+  and Brush migrations onto `commit_generic`.
 
 The CPU `PreviewOverlay` is dormant — every active-development tool
 now writes `tex_t` instead. The rasterizer still binds the legacy
@@ -51,11 +55,6 @@ Deferred polish, not yet implemented:
 - Drag-drop a `.vox` onto the running window (cold-launch via Finder
   Open With works through `.onOpenURL`).
 - Theme parity vs the old `ui/Theme.cpp` pro-app dark.
-- **`preview_rem` mask texture**: required to migrate Face commit
-  + Brush kernel onto commit_generic (Phases 2.3 / 2.4 of the Tool
-  refactor — see plan `happy-juggling-volcano.md`). Without the
-  mask, Remove-mode preview cells would render as visible color
-  during the drag instead of as "hidden doc cells".
 - 2D-brush variants of the shape kernels (`brush_3d == 0`) render
   nothing in `shape_main` — would need either an in-plane mask or a
   CPU fallback.
@@ -201,22 +200,20 @@ src/
 │                          actually outside the wall (the midpoint
 │                          heuristic broke when the camera sat
 │                          inside the volume on an axis).
-├── BrushOps.{h,cpp}       LEGACY CPU brush. Still compiles. The
-│                          preview=true path is unused by current
-│                          tooling but `ComputeNewCellValue` is still
-│                          reachable from the brush kernel's CPU-side
-│                          mode rules.
-├── BrushTool.{h,cpp}              Brush — writes tex_a directly
-│                                  (commit_generic migration deferred).
+├── BrushTool.{h,cpp}              Brush — writes tex_t / preview_rem
+│                                  per mode, commits via
+│                                  commit_generic at mouseUp.
 ├── ShapeTool.{h,cpp}              Line / Circle / Square / Box.
-│                                  Writes tex_t, commits via
+│                                  Writes tex_t (Add/Paint) or
+│                                  preview_rem (Remove); commits via
 │                                  commit_generic. BeginShapeAnchor
 │                                  free function exposed for Generator.
-├── FaceTool.{h,cpp}               CPU flood + GPU stamp_cells per
-│                                  mouseDragged (the specialized
-│                                  scatter path stays until preview_rem
-│                                  unblocks commit_generic migration).
-│                                  Wall flood-fill via FloodCoplanarEmpty.
+├── FaceTool.{h,cpp}               CPU flood + GPU shape_stamp_cells
+│                                  per mouseDragged (palette splits
+│                                  the stamp between tex_t and
+│                                  preview_rem). Commits via
+│                                  commit_generic. Wall flood via
+│                                  FloodCoplanarEmpty.
 ├── GeneratorTool.{h,cpp}          Persistent gizmo (drag-out → idle →
 │                                  commit). Tick-time dirty check via
 │                                  ShouldDispatch. Commit() exposed
@@ -273,11 +270,10 @@ one is "the truth" depends on the phase of the edit.
                 ┌──────────────────────────────────────────┐
                 │  VoxelVolume.shadow  (CPU, dense 256³)   │
                 │                                          │
-   pre-stroke   │  ┌─────────────────────────────────────┐ │
-   reads       ─┼─►│  oracle for "is doc[cell] != 0?"    │ │
-   during      │  │  during brush stroke. drag_skip_cells│ │
-   stroke      │  │  is computed from this.              │ │
-                │  └─────────────────────────────────────┘ │
+                │  ─ end-of-stroke diff target             │
+                │  ─ pre-stroke oracle for tools that      │
+                │    need to read occupancy during a       │
+                │    stroke (Face flood, Shape add filter) │
                 └────────────────────┬─────────────────────┘
                                      │ end-of-stroke
                                      │ ApplyChanges(diff)
@@ -286,7 +282,10 @@ one is "the truth" depends on the phase of the edit.
                 │  VoxelGrid          (CPU, sparse chunks) │
                 │  ─ on-disk + .vox load/save format       │
                 │  ─ EditHistory's per-cell records        │
-                │  ─ Picking (Raycast.cpp DDA)             │
+                │  ─ Picking (Raycast.cpp DDA) — frozen at │
+                │    pre-stroke state for the whole drag,  │
+                │    so picks always hit the original      │
+                │    surface without a skip set            │
                 │  ─ Path tracer's chunk-pool source       │
                 │  ─ Selection ops                         │
                 └────────────────────┬─────────────────────┘
@@ -297,38 +296,42 @@ one is "the truth" depends on the phase of the edit.
                 │  VolumeTexture.tex_a   (GPU, R8Uint 256³)│
                 │                                          │
                 │   ─ rasterizer fragment samples this     │
-                │   ─ brush / shape / face / generator     │
-                │     kernels WRITE this during a stroke   │
+                │   ─ commit_generic at mouseUp writes it; │
+                │     during a stroke tex_a is FROZEN at   │
+                │     pre-stroke state                     │
                 │   ─ oracle (16³ R8Uint) for empty-skip   │
-                │     in the rasterizer DDA                │
                 │                                          │
-                │  Companion: tex_t (preview, 256³ R8Uint) │
-                │   ─ shape / face / generator preview     │
-                │   ─ composited over tex_a by rasterizer  │
+                │  Companions: tex_t + preview_rem (256³)  │
+                │   ─ tex_t: Add / Paint preview (palette) │
+                │   ─ preview_rem: Remove preview (mask)   │
+                │   ─ rasterizer composites both over tex_a│
                 │     when `preview_active`                │
-                │   ─ previewOracleTexture (16³)           │
+                │   ─ each has its own 16³ oracle          │
                 └──────────────────────────────────────────┘
 ```
 
 During a stroke:
 1. CPU: pre-stroke `VoxelGrid` and `VoxelVolume.shadow` are byte-equal
    inside the EditVolume (debug-build asserted in `Document::SetCell`).
-2. GPU compute kernel writes `tex_a` (brush) or `tex_t` (shape /
-   face / generator). The CPU side stays frozen.
-3. Picking uses CPU `VoxelGrid` + a `drag_skip_cells` set the
-   controller populated from the brush footprint (using
-   `volume_shadow.Get` as the still-pre-stroke oracle). The skip
-   set makes raycasts behave as if the new cells weren't there yet —
-   the next stamp targets the original surface.
-4. On `OnMouseUp`, the controller:
+2. GPU compute kernel writes `tex_t` (Add / Paint preview) or
+   `preview_rem` (Remove mask) — never `tex_a`. The rasterizer
+   composites both over `tex_a`.
+3. Picking uses the CPU `VoxelGrid`, which is frozen at pre-stroke
+   state for the whole drag — so picks always hit the original
+   surface for free, no skip set needed.
+4. On `OnMouseUp`, the tool:
+   - calls `commit_generic` over the stroke bbox with the
+     appropriate `bm` (1=Add, 2=Erase, 3=Replace, 4=Intersect),
+     which promotes the preview surface into `tex_a` and clears
+     the consumed surface,
    - `waitForPendingWork` on the engine's queue,
    - blits the stroke's bbox of `tex_a` back to CPU,
-   - diffs against `volume_shadow` (which is still pre-stroke state),
+   - diffs against `volume_shadow` (still pre-stroke state),
    - emits a `CellChange[]` diff,
-   - calls `doc.ApplyChanges(diff)` to bring `grid` + `shadow` up to
-     date, and `history.RecordBatch(diff)` to log undo,
-   - drains `volume_shadow.TakeDirtyChunks()` (the kernel already
-     wrote `tex_a` so the next syncFromVolume should be a no-op),
+   - calls `doc.ApplyChanges(diff)` to bring `grid` + `shadow` up
+     to date, and `history.RecordBatch(diff)` to log undo,
+   - drains `volume_shadow.TakeDirtyChunks()` (commit_generic
+     already wrote `tex_a` so the next `syncFromVolume` is a no-op),
    - `doc.BumpGeometry()`.
 
 This is why all three reps stay in sync at every commit point. It
@@ -358,9 +361,9 @@ The `Tool` virtual interface:
 
 | Tool | File | Notes |
 | --- | --- | --- |
-| Brush | `BrushTool.{h,cpp}` | Writes `tex_a` directly (no commit pass yet — Phase 2.4 deferred behind `preview_rem`). |
-| Shape | `ShapeTool.{h,cpp}` | Line/Circle/Square/Box. Writes `tex_t`, commits via `commit_generic`. `BeginShapeAnchor` is a free function here, also called by Generator. |
-| Face | `FaceTool.{h,cpp}` | Still on the per-cell scatter path (`shape_stamp_cells` + `shape_commit_cells`) — Phase 2.3 migration deferred behind `preview_rem`. |
+| Brush | `BrushTool.{h,cpp}` | Writes `tex_t` (Add / Paint) or `preview_rem` (Remove); commits via `commit_generic` at mouseUp. |
+| Shape | `ShapeTool.{h,cpp}` | Line/Circle/Square/Box. Writes `tex_t` / `preview_rem` per mode; commits via `commit_generic`. `BeginShapeAnchor` is a free function here, also called by Generator. |
+| Face | `FaceTool.{h,cpp}` | CPU flood + `shape_stamp_cells` (per-cell scatter into `tex_t` for palette != 0, `preview_rem` for palette == 0); commits via `commit_generic`. |
 | Generator | `GeneratorTool.{h,cpp}` | Persistent gizmo (drag-out → idle-with-handles → commit). Public `Commit` so MetalScene's Enter-key handler can fire it. `HasActiveGizmo` for the dispatcher's special-case intercept. |
 
 `EditEngine` (`src/EditEngine.{h,mm}`) is the pure-C++ façade tools
@@ -372,11 +375,8 @@ bbox-shaped methods.
 The unified commit kernel `commit_generic` (in `ShapeKernel.metal`)
 implements the MagicaVoxel `shader_0018.glsl` shape — bm-parameterized
 blend (Add / Erase / Replace / Intersect) + brush-source selector
-(`tex_t` vs constant fill). Shape + Generator commits route through
-it. Face and Brush still use specialized paths because their
-Remove-mode semantics need a `preview_rem` mask texture (deferred)
-to avoid making erase-preview cells render as visible color during
-the drag.
+(`tex_t` / `preview_rem` for the preview path, constant fill
+otherwise). Every volume-writing tool's commit routes through it.
 
 ## Tool perf rule: dispatch only on state change
 
@@ -556,10 +556,10 @@ Key invariants in the shader:
   is the only field that matters (sets the rasterizer's
   `preview_active` uniform). Keep the file for the FB overlay-pool
   rendering path until that migrates too.
-- `BrushOps`'s `StampBrushFootprint(preview=true)` no longer has
-  any active callers, but the function compiles and the C++ types
-  it uses (`ComputeNewCellValue`) are still pulled in by the brush
-  controller's mode rules. Don't delete without auditing.
+- The `skip` parameter on `ViewContext::ComputeTargetCell` /
+  `RaycastIgnoring` is no callers' arg anymore (Brush no longer
+  populates `drag_skip_`). The plumbing stays for now in case a
+  future tool needs it; the `CellBitmap` type stands ready.
 - `main.mm` is intentionally tiny — argv check + Swift entry call.
 - Bridge enums use `NS_ENUM(NSInteger, …)` with `NS_SWIFT_NAME(case)`
   on each entry so Swift gets idiomatic `.x` / `.brush` cases.

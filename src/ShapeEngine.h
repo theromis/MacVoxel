@@ -31,10 +31,10 @@ struct ShapeParams {
     int32_t tex_origin_x, tex_origin_y, tex_origin_z;
 };
 
-// One entry of the (cell, palette) buffer consumed by Face's stamp /
-// commit kernels. World cell coords. palette == 0 means "this cell
-// should become empty on commit" — the stamp kernel writes 0 to
-// tex_t (silent preview); the commit kernel writes 0 to tex_a.
+// One entry of the (cell, palette) buffer consumed by Face's stamp
+// kernel. World cell coords. palette != 0 stamps into tex_t (Add /
+// Paint); palette == 0 stamps into preview_rem (Remove). Commit
+// happens via commit_generic over the union bbox afterwards.
 struct CellPalette {
     int32_t x, y, z;
     uint32_t palette;
@@ -100,20 +100,13 @@ struct CommitGenericParams {
                        x1:(int)x1 y1:(int)y1 z1:(int)z1
                    target:(nonnull VolumeTexture*)texture;
 
-// Per-cell stamp: write each entry's palette into tex_t. The Face
-// controller's hot path uses this — CPU does the flood-fill +
-// mode-aware extrusion enumeration, the kernel just splats palettes.
+// Per-cell stamp: write each entry's palette into the preview
+// surfaces. palette != 0 → tex_t (Add / Paint); palette == 0 →
+// preview_rem (Remove). Face tool's hot path: CPU does the flood
+// + mode-aware extrusion enumeration, the kernel splats.
 - (void)dispatchStampCells:(nonnull const macvoxel::CellPalette*)cells
                  cellCount:(NSUInteger)cell_count
                     target:(nonnull VolumeTexture*)texture;
-
-// Per-cell commit: write each entry's palette directly into tex_a
-// (clearing the corresponding tex_t cell). Used by the Face tool at
-// OnMouseUp — handles Add / Remove / Paint uniformly because the
-// CPU pre-computed the target value per cell.
-- (void)dispatchCommitCells:(nonnull const macvoxel::CellPalette*)cells
-                  cellCount:(NSUInteger)cell_count
-                     target:(nonnull VolumeTexture*)texture;
 
 // Generic commit — blends tex_t (or a constant) into tex_a over a
 // dispatch bbox per `bm` / `brush` selectors. Phase 2.2+ routes
