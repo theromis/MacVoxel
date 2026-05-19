@@ -198,7 +198,9 @@ fragment float4 raycast_fragment(
     texture3d<uint, access::read> tex_a [[texture(0)]],
     texture3d<uint, access::read> doc_oracle [[texture(1)]],
     texture3d<uint, access::read> preview_tex [[texture(2)]],
-    texture3d<uint, access::read> preview_oracle [[texture(3)]])
+    texture3d<uint, access::read> preview_oracle [[texture(3)]],
+    texture3d<uint, access::read> preview_rem [[texture(4)]],
+    texture3d<uint, access::read> preview_rem_oracle [[texture(5)]])
 {
     // Reconstruct world-space ray from NDC.
     float4 near_clip = float4(in.ndc, 0.0, 1.0);
@@ -303,6 +305,15 @@ fragment float4 raycast_fragment(
             if (!doc_chunk_empty) {
                 val_doc = tex_a.read(uint3(cell_local)).r;
             }
+        }
+        // preview_rem: Remove-mode preview mask. Non-zero entries hide
+        // the corresponding doc cell during the stroke, so erase shows
+        // up live without mutating tex_a. Only worth probing when the
+        // doc actually has something here to hide.
+        if (val_doc != 0u && u.preview_active != 0 &&
+            preview_rem_oracle.read(uint3(oracle_c)).r != 0u &&
+            preview_rem.read(uint3(cell_local)).r != 0u) {
+            val_doc = 0u;
         }
         // Preview-tex: shape/face/generator tool live preview. Same
         // dims + chunking as the doc tex; gated by preview_active so
@@ -731,6 +742,8 @@ fragment float4 raycast_fragment(
     [encoder setFragmentTexture:docVolumeTex.oracleTexture atIndex:1];
     [encoder setFragmentTexture:docVolumeTex.previewTexture atIndex:2];
     [encoder setFragmentTexture:docVolumeTex.previewOracleTexture atIndex:3];
+    [encoder setFragmentTexture:docVolumeTex.previewRemTexture atIndex:4];
+    [encoder setFragmentTexture:docVolumeTex.previewRemOracleTexture atIndex:5];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:3];
