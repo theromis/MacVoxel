@@ -400,6 +400,7 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     [enc setTexture:texture.texture atIndex:0];
     [enc setTexture:texture.previewTexture atIndex:1];
     [enc setTexture:texture.oracleTexture atIndex:2];
+    [enc setTexture:texture.previewRemTexture atIndex:3];
 
     const NSUInteger tgX = 4, tgY = 4, tgZ = 4;
     const MTLSize threadsPerThreadgroup = MTLSizeMake(tgX, tgY, tgZ);

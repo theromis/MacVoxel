@@ -463,6 +463,7 @@ kernel void commit_generic(
     texture3d<uint, access::read_write>   tex_a       [[texture(0)]],
     texture3d<uint, access::read_write>   preview     [[texture(1)]],
     texture3d<uint, access::write>        doc_oracle  [[texture(2)]],
+    texture3d<uint, access::read_write>   preview_rem [[texture(3)]],
     uint3                                  gid         [[thread_position_in_grid]])
 {
     int3 d = int3(gid);
@@ -470,9 +471,17 @@ kernel void commit_generic(
     int3 cell_local = u.dispatch_lo + d;
 
     uint a = tex_a.read(uint3(cell_local)).r;
+    // bm=Erase sources from preview_rem (the Remove-mode mask the
+    // rasterizer uses to hide cells live); all other bms source from
+    // tex_t (the additive preview). Constant brush mode overrides
+    // both with a uniform value.
     uint t;
     if (u.brush == kCommitBrushPreview) {
-        t = preview.read(uint3(cell_local)).r;
+        if (u.bm == kCommitBmErase) {
+            t = preview_rem.read(uint3(cell_local)).r;
+        } else {
+            t = preview.read(uint3(cell_local)).r;
+        }
     } else {
         t = u.fill_palette;
     }
@@ -495,9 +504,13 @@ kernel void commit_generic(
                              uint3(uint3(cell_local) >> uint3(4u)));
         }
     }
-    // Clear preview in this bbox regardless of write — stroke
-    // committed, future strokes shouldn't see stale tex_t.
+    // Clear whichever preview surface this commit consumed in this bbox
+    // so future strokes start clean.
     if (u.brush == kCommitBrushPreview) {
-        preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+        if (u.bm == kCommitBmErase) {
+            preview_rem.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+        } else {
+            preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+        }
     }
 }
