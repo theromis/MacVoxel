@@ -284,8 +284,6 @@ void FaceTool::OnMouseUp(EditorContext& ctx, InteractionState& state,
         int32_t bx0, by0, bz0, bx1, by1, bz1;
         EnumerateCells(ctx, state, d, &cells, &bx0, &by0, &bz0, &bx1, &by1, &bz1);
         if (!cells.empty()) {
-            engine.CommitCells(cells.data(), cells.size());
-
             const int32_t rx0 = std::max(union_bbox_x0_, vol.x0);
             const int32_t ry0 = std::max(union_bbox_y0_, vol.y0);
             const int32_t rz0 = std::max(union_bbox_z0_, vol.z0);
@@ -296,6 +294,28 @@ void FaceTool::OnMouseUp(EditorContext& ctx, InteractionState& state,
                 Bbox3 bb{};
                 bb.x0 = rx0; bb.y0 = ry0; bb.z0 = rz0;
                 bb.x1 = rx1; bb.y1 = ry1; bb.z1 = rz1;
+                // Pick the blend mode that matches what EnumerateCells
+                // emitted: Add with d>0 stamps tex_t (bm=1 Add), Add
+                // with d<0 and Remove stamp preview_rem (bm=2 Erase),
+                // Paint stamps tex_t and replaces in-place (bm=3).
+                uint32_t bm = 1u;
+                const ToolMode m = state.anchor.mode;
+                if (m == ToolMode::Paint) {
+                    bm = 3u;
+                } else if (m == ToolMode::Remove || (m == ToolMode::Add && d < 0)) {
+                    bm = 2u;
+                }
+                CommitGenericParams cp{};
+                cp.dispatch_lo_x = bb.x0 - vol.x0;
+                cp.dispatch_lo_y = bb.y0 - vol.y0;
+                cp.dispatch_lo_z = bb.z0 - vol.z0;
+                cp.dispatch_size_x = bb.x1 - bb.x0 + 1;
+                cp.dispatch_size_y = bb.y1 - bb.y0 + 1;
+                cp.dispatch_size_z = bb.z1 - bb.z0 + 1;
+                cp.bm = bm;
+                cp.brush = 0u;  // source = tex_t / preview_rem
+                cp.fill_palette = ctx.tool.palette_idx;
+                engine.CommitGeneric(cp);
                 std::vector<uint8_t> post;
                 const auto t_readback = perf::Now();
                 engine.Readback(bb, &post);

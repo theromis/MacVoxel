@@ -362,14 +362,12 @@ kernel void shape_line_project_main(
     }
 }
 
-// "Stamp a list of (cell, palette) entries into tex_t" — one thread
-// per buffer entry. Used by the Face tool, where CPU does the
-// flood-fill + mode-aware enumeration (per-cell target palette,
-// 0 meaning "remove this cell on commit") and the kernel just writes
-// the resulting palette into tex_t. Cells with palette == 0 are
-// stamped as 0 too; the preview won't render them but the commit
-// kernel still touches them so a Face-Remove stroke writes 0 into
-// the doc on commit.
+// "Stamp a list of (cell, palette) entries into preview surfaces" —
+// one thread per buffer entry. Used by the Face tool, where CPU does
+// the flood-fill + mode-aware enumeration. Cells with palette != 0
+// are stamped into tex_t (additive preview); cells with palette == 0
+// are stamped into preview_rem (mask=1) so the rasterizer hides the
+// underlying doc cell and commit_generic bm=Erase can collect it.
 struct StampCellsUniforms {
     int3 tex_origin;
     int  _pad;
@@ -378,12 +376,14 @@ struct StampCellsUniforms {
 struct CellPalette { int x, y, z; uint palette; };
 
 kernel void shape_stamp_cells(
-    constant StampCellsUniforms& u                  [[buffer(0)]],
-    constant CellPalette* cells                     [[buffer(1)]],
-    constant uint&        cell_count                [[buffer(2)]],
-    texture3d<uint, access::write> preview          [[texture(0)]],
-    texture3d<uint, access::write> preview_oracle   [[texture(1)]],
-    uint gid                                        [[thread_position_in_grid]])
+    constant StampCellsUniforms& u                          [[buffer(0)]],
+    constant CellPalette* cells                             [[buffer(1)]],
+    constant uint&        cell_count                        [[buffer(2)]],
+    texture3d<uint, access::write> preview                  [[texture(0)]],
+    texture3d<uint, access::write> preview_oracle           [[texture(1)]],
+    texture3d<uint, access::write> preview_rem              [[texture(2)]],
+    texture3d<uint, access::write> preview_rem_oracle       [[texture(3)]],
+    uint gid                                                [[thread_position_in_grid]])
 {
     if (gid >= cell_count) return;
     CellPalette c = cells[gid];
@@ -392,10 +392,14 @@ kernel void shape_stamp_cells(
                      preview.get_height(),
                      preview.get_depth());
     if (any(cell_local < 0) || any(cell_local >= dims)) return;
-    preview.write(uint4(c.palette, 0u, 0u, 0u), uint3(cell_local));
     if (c.palette != 0u) {
+        preview.write(uint4(c.palette, 0u, 0u, 0u), uint3(cell_local));
         preview_oracle.write(uint4(1u, 0u, 0u, 0u),
                              uint3(uint3(cell_local) >> uint3(4u)));
+    } else {
+        preview_rem.write(uint4(1u, 0u, 0u, 0u), uint3(cell_local));
+        preview_rem_oracle.write(uint4(1u, 0u, 0u, 0u),
+                                 uint3(uint3(cell_local) >> uint3(4u)));
     }
 }
 
