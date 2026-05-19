@@ -228,11 +228,13 @@ static bool cell_in_shape(int3 cell_world, constant ShapeUniforms& u) {
 }
 
 kernel void shape_main(
-    constant ShapeUniforms& u                       [[buffer(0)]],
-    texture3d<uint, access::read>       tex_a       [[texture(0)]],
-    texture3d<uint, access::write>      preview     [[texture(1)]],
+    constant ShapeUniforms& u                          [[buffer(0)]],
+    texture3d<uint, access::read>       tex_a          [[texture(0)]],
+    texture3d<uint, access::write>      preview        [[texture(1)]],
     texture3d<uint, access::write>      preview_oracle [[texture(2)]],
-    uint3 gid                                       [[thread_position_in_grid]])
+    texture3d<uint, access::write>      preview_rem    [[texture(3)]],
+    texture3d<uint, access::write>      preview_rem_oracle [[texture(4)]],
+    uint3 gid                                          [[thread_position_in_grid]])
 {
     int3 d = int3(gid);
     if (any(d >= u.dispatch_size)) return;
@@ -245,32 +247,35 @@ kernel void shape_main(
         in_shape = cell_in_shape(cell_world, u);
     }
 
-    uint write_val = 0u;
+    // Add/Paint cells go into the additive preview (tex_t); Remove
+    // cells go into preview_rem as a non-zero mask the rasterizer
+    // reads to hide the doc cell live. The dispatch bbox is the
+    // union of last + current frame, so cells the previous frame
+    // wrote but the current frame doesn't cover are zeroed naturally.
+    uint add_val = 0u;
+    uint rem_val = 0u;
     if (in_shape) {
-        // Mode rule: Add only writes when the doc cell is currently
-        // empty (so the preview shows added voxels but doesn't paint
-        // over existing ones). Paint only writes where the doc has
-        // a non-empty cell. Remove mirrors the existing doc value
-        // into the preview — the rasterizer composites tex_t over
-        // tex_a so writing the same value is visually invisible, but
-        // it gives commit_generic (bm=2 Erase) a non-zero marker to
-        // fire on at mouseUp.
         uint doc_val = tex_a.read(uint3(cell_local)).r;
         bool in_vol = all(cell_world >= u.vol_min) &&
                       all(cell_world <= u.vol_max);
         if (u.mode == kModeAdd) {
-            if (doc_val == 0u && in_vol) write_val = u.palette_idx;
+            if (doc_val == 0u && in_vol) add_val = u.palette_idx;
         } else if (u.mode == kModePaint) {
-            if (doc_val != 0u) write_val = u.palette_idx;
+            if (doc_val != 0u) add_val = u.palette_idx;
         } else if (u.mode == kModeRemove) {
-            if (doc_val != 0u) write_val = doc_val;
+            if (doc_val != 0u) rem_val = 1u;
         }
     }
 
-    preview.write(uint4(write_val, 0u, 0u, 0u), uint3(cell_local));
-    if (write_val != 0u) {
+    preview.write(uint4(add_val, 0u, 0u, 0u), uint3(cell_local));
+    preview_rem.write(uint4(rem_val, 0u, 0u, 0u), uint3(cell_local));
+    if (add_val != 0u) {
         preview_oracle.write(uint4(1u, 0u, 0u, 0u),
                              uint3(uint3(cell_local) >> uint3(4u)));
+    }
+    if (rem_val != 0u) {
+        preview_rem_oracle.write(uint4(1u, 0u, 0u, 0u),
+                                 uint3(uint3(cell_local) >> uint3(4u)));
     }
 }
 
@@ -283,13 +288,15 @@ kernel void shape_main(
 struct PackedCellXYZ { int x, y, z, _pad; };
 
 kernel void shape_line_project_main(
-    constant ShapeUniforms& u                            [[buffer(0)]],
-    constant PackedCellXYZ* cells                        [[buffer(1)]],
-    constant uint& cell_count                            [[buffer(2)]],
-    texture3d<uint, access::read>       tex_a            [[texture(0)]],
-    texture3d<uint, access::write>      preview          [[texture(1)]],
-    texture3d<uint, access::write>      preview_oracle   [[texture(2)]],
-    uint3 gid                                            [[thread_position_in_grid]])
+    constant ShapeUniforms& u                                   [[buffer(0)]],
+    constant PackedCellXYZ* cells                               [[buffer(1)]],
+    constant uint& cell_count                                   [[buffer(2)]],
+    texture3d<uint, access::read>       tex_a                   [[texture(0)]],
+    texture3d<uint, access::write>      preview                 [[texture(1)]],
+    texture3d<uint, access::write>      preview_oracle          [[texture(2)]],
+    texture3d<uint, access::write>      preview_rem             [[texture(3)]],
+    texture3d<uint, access::write>      preview_rem_oracle      [[texture(4)]],
+    uint3 gid                                                   [[thread_position_in_grid]])
 {
     int3 d = int3(gid);
     if (any(d >= u.dispatch_size)) return;
@@ -329,26 +336,29 @@ kernel void shape_line_project_main(
         }
     }
 
-    uint write_val = 0u;
+    uint add_val = 0u;
+    uint rem_val = 0u;
     if (in_shape) {
         uint doc_val = tex_a.read(uint3(cell_local)).r;
         bool in_vol = all(cell_world >= u.vol_min) &&
                       all(cell_world <= u.vol_max);
         if (u.mode == kModeAdd) {
-            if (doc_val == 0u && in_vol) write_val = u.palette_idx;
+            if (doc_val == 0u && in_vol) add_val = u.palette_idx;
         } else if (u.mode == kModePaint) {
-            if (doc_val != 0u) write_val = u.palette_idx;
+            if (doc_val != 0u) add_val = u.palette_idx;
         } else if (u.mode == kModeRemove) {
-            // Mirror doc_val so the rasterizer shows no visual change
-            // during drag but commit_generic bm=2 can fire on these
-            // cells at mouseUp.
-            if (doc_val != 0u) write_val = doc_val;
+            if (doc_val != 0u) rem_val = 1u;
         }
     }
-    preview.write(uint4(write_val, 0u, 0u, 0u), uint3(cell_local));
-    if (write_val != 0u) {
+    preview.write(uint4(add_val, 0u, 0u, 0u), uint3(cell_local));
+    preview_rem.write(uint4(rem_val, 0u, 0u, 0u), uint3(cell_local));
+    if (add_val != 0u) {
         preview_oracle.write(uint4(1u, 0u, 0u, 0u),
                              uint3(uint3(cell_local) >> uint3(4u)));
+    }
+    if (rem_val != 0u) {
+        preview_rem_oracle.write(uint4(1u, 0u, 0u, 0u),
+                                 uint3(uint3(cell_local) >> uint3(4u)));
     }
 }
 
@@ -423,14 +433,16 @@ kernel void shape_commit_cells(
 // strokes (and at the start of each stamp to drop the previous
 // frame's preview).
 kernel void shape_clear(
-    constant ShapeUniforms& u             [[buffer(0)]],
-    texture3d<uint, access::write> preview [[texture(0)]],
-    uint3 gid                              [[thread_position_in_grid]])
+    constant ShapeUniforms& u                  [[buffer(0)]],
+    texture3d<uint, access::write> preview     [[texture(0)]],
+    texture3d<uint, access::write> preview_rem [[texture(1)]],
+    uint3 gid                                  [[thread_position_in_grid]])
 {
     int3 d = int3(gid);
     if (any(d >= u.dispatch_size)) return;
     int3 cell_local = u.dispatch_lo + d;
     preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+    preview_rem.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
 }
 
 // Generic commit kernel — the Magica `shader_0018.glsl` shape. Loops

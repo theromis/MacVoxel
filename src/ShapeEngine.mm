@@ -225,6 +225,8 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     [enc setTexture:texture.texture atIndex:0];
     [enc setTexture:texture.previewTexture atIndex:1];
     [enc setTexture:texture.previewOracleTexture atIndex:2];
+    [enc setTexture:texture.previewRemTexture atIndex:3];
+    [enc setTexture:texture.previewRemOracleTexture atIndex:4];
     Dispatch(enc, p);
     [enc endEncoding];
     [cmd commit];
@@ -267,6 +269,8 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     [enc setTexture:texture.texture atIndex:0];
     [enc setTexture:texture.previewTexture atIndex:1];
     [enc setTexture:texture.previewOracleTexture atIndex:2];
+    [enc setTexture:texture.previewRemTexture atIndex:3];
+    [enc setTexture:texture.previewRemOracleTexture atIndex:4];
     Dispatch(enc, p);
     [enc endEncoding];
     [cmd commit];
@@ -293,6 +297,7 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     [enc setComputePipelineState:_clearPSO];
     [enc setBytes:&u length:sizeof(u) atIndex:0];
     [enc setTexture:texture.previewTexture atIndex:0];
+    [enc setTexture:texture.previewRemTexture atIndex:1];
 
     const NSUInteger tgX = std::min<NSUInteger>(8, (NSUInteger)u.dispatch_size[0]);
     const NSUInteger tgY = std::min<NSUInteger>(8, (NSUInteger)u.dispatch_size[1]);
