@@ -56,6 +56,16 @@ class VoxelVolume;
 @property(nonatomic, readonly, nonnull) id<MTLTexture> previewTexture;
 @property(nonatomic, readonly, nonnull) id<MTLTexture> previewOracleTexture;
 
+// Remove-preview mask ("preview_rem"). Same dims as the doc tex
+// (R8Uint 256³ + 16³ oracle); a non-zero cell means "the active tool
+// wants this doc cell to read as empty during the preview". The
+// rasterizer composites this BEFORE shading, so Remove-mode strokes
+// (Brush / Shape / Face / Generator) can show cells disappearing
+// live without actually mutating tex_a until commit. commit_generic
+// in bm=Erase mode reads this mask in place of tex_t.
+@property(nonatomic, readonly, nonnull) id<MTLTexture> previewRemTexture;
+@property(nonatomic, readonly, nonnull) id<MTLTexture> previewRemOracleTexture;
+
 // Texture dimensions in cells. Mirrors volume.size_{x,y,z}.
 @property(nonatomic, readonly) int sizeX;
 @property(nonatomic, readonly) int sizeY;

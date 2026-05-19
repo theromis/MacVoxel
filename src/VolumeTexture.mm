@@ -11,6 +11,8 @@
     id<MTLTexture> _oracleTexture;
     id<MTLTexture> _previewTexture;
     id<MTLTexture> _previewOracleTexture;
+    id<MTLTexture> _previewRemTexture;
+    id<MTLTexture> _previewRemOracleTexture;
     int _chunksX;
     int _chunksY;
     int _chunksZ;
@@ -91,6 +93,17 @@
     _previewOracleTexture = [device newTextureWithDescriptor:previewOracleDesc];
     if (_previewOracleTexture == nil) return nil;
     [_previewOracleTexture setLabel:@"VolumeTexture.previewOracle"];
+
+    // preview_rem mask — same dims/usage as previewTexture; allocated
+    // fresh-zero (Metal default) so a brand-new doc has nothing masked.
+    _previewRemTexture = [device newTextureWithDescriptor:previewDesc];
+    if (_previewRemTexture == nil) return nil;
+    [_previewRemTexture setLabel:@"VolumeTexture.previewRem"];
+
+    _previewRemOracleTexture =
+        [device newTextureWithDescriptor:previewOracleDesc];
+    if (_previewRemOracleTexture == nil) return nil;
+    [_previewRemOracleTexture setLabel:@"VolumeTexture.previewRemOracle"];
 
     return self;
 }
