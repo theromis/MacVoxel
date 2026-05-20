@@ -26,8 +26,6 @@ struct ContentView: View {
                     Divider()
                     LightPanel(state: state)
                     Divider()
-                    GeneratorPanel(state: state)
-                    Divider()
                     SelectionPanel()
                 }
             }

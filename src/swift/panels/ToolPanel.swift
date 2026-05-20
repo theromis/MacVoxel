@@ -209,6 +209,19 @@ struct ToolPanel: View {
                                selection: $state.faceEightConnected,
                                options: [(false, "4-side"), (true, "8-side")])
             }
+        case .generator:
+            sectionHeader("Generator")
+            Picker("Kind", selection: $state.generatorKind) {
+                Text("Ellipsoid").tag(BridgeGeneratorKind.ellipsoid)
+                Text("Cylinder").tag(BridgeGeneratorKind.cylinder)
+                Text("Cone").tag(BridgeGeneratorKind.cone)
+                Text("Pyramid").tag(BridgeGeneratorKind.pyramid)
+                Text("Torus").tag(BridgeGeneratorKind.torus)
+                Text("Perlin").tag(BridgeGeneratorKind.perlin)
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            GeneratorControls(state: state)
         default:
             EmptyView()
         }
