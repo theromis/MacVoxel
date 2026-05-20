@@ -61,22 +61,34 @@ struct PathUniforms {
 // 16-aligned successor.
 static_assert(sizeof(PathUniforms) == 496, "PathUniforms size mismatch");
 
-// Per-emissive-voxel entry in the next-event-estimation light buffer.
-// Built CPU-side at doc.version change so the shader doesn't have to
-// scan the grid; `le` is the linear-space color × effective emission so
-// the shader needs no palette/material lookup at sample time.
+// Per-exposed-emissive-face entry in the next-event-estimation light
+// buffer. An "exposed face" is the boundary between an emissive voxel
+// and an empty neighbor cell; faces buried inside contiguous emissive
+// regions (or against solid non-emissive cells) emit no light to the
+// rest of the scene and are skipped. For a 40³ solid emissive cube this
+// collapses ~64k voxel records to ~9.6k surface-face records and gets
+// rid of the ~85% wasted shadow-ray budget the old per-voxel list
+// burned on interior cells. Each record is sampled as a 1×1 area light
+// in the plane perpendicular to its outward normal.
 struct GpuLight {
-    simd::float4 pos;  // .xyz = grid-space corner of the voxel.
+    simd::float4 pos;  // .xyz = grid-space corner of the *face*: the
+                       //       voxel's minimum corner shifted +1 along
+                       //       any normal axis whose sign is positive
+                       //       (so the shader can sample as
+                       //       pos.xyz + perp1·u1 + perp2·u2 directly).
                        // .w   = cumulative normalized sampling weight (CDF).
-                       //       Last light's .w is 1.0; binary search picks
+                       //       Last face's .w is 1.0; binary search picks
                        //       `li` such that cdf[li-1] < u <= cdf[li].
     simd::float4 le;   // .xyz = albedo_linear * effective_emission.
-                       // .w   = per-light sampling probability (prob[li] =
+                       // .w   = per-face sampling probability (prob[li] =
                        //       cdf[li] - cdf[li-1]). Pre-baked so the
                        //       BSDF-arrives-at-emitter MIS branch reads it
                        //       directly without re-doing the subtract.
+    simd::float4 nrm;  // .xyz = outward face normal — axis-aligned unit
+                       //       vector with a single ±1 component.
+                       // .w   = unused.
 };
-static_assert(sizeof(GpuLight) == 32, "GpuLight size mismatch");
+static_assert(sizeof(GpuLight) == 48, "GpuLight size mismatch");
 
 // Per-palette-entry material data uploaded to the path-tracer's
 // fragment shader. Mirrors macvoxel::Material but lives in a tightly
@@ -478,13 +490,22 @@ struct DisplayUniforms {
 - (void)rebuildLightBufferFromDocument:(macvoxel::Document*)doc {
     using VG = macvoxel::VoxelGrid;
     const auto& chunks = doc->grid.chunks();
-    // Next-event estimation light list. One entry per emissive voxel
-    // (with effective_emission > 0). Stored as { grid corner, linear
-    // albedo × emission } so the shader can sample without a palette
-    // lookup. We keep the buffer non-nil even when empty (Metal needs a
-    // buffer bound at index 5) and gate use via _lightCount.
+    // Next-event estimation light list — one entry per *exposed*
+    // emissive face. A face is exposed when the neighbor cell across
+    // it is empty (v == 0); faces against any solid neighbor — even
+    // another emissive voxel — emit nothing into the rest of the scene
+    // and are skipped. The light-list size therefore scales with the
+    // emissive *surface area*, not the emissive *volume*, which is
+    // what fixes the 40³ solid-emissive-cube perf cliff (64k → 9.6k).
+    // `volume_shadow.Get` returns 0 for out-of-bounds reads, which is
+    // exactly what we want — faces on the outer wall of an emissive
+    // region are exposed to space.
     std::vector<GpuLight> lights;
     lights.reserve(64);
+    const macvoxel::VoxelVolume& vol = doc->volume_shadow;
+    auto is_empty = [&vol](int32_t x, int32_t y, int32_t z) {
+        return vol.Get(x, y, z) == 0;
+    };
     for (const auto& [coord, chunk] : chunks) {
         if (chunk->filled_count == 0) continue;
         const int32_t base_x = coord.x * static_cast<int32_t>(VG::kChunkSize);
@@ -503,20 +524,47 @@ struct DisplayUniforms {
                     const float eff = macvoxel::EffectiveEmission(m);
                     if (eff <= 0.0f) continue;
                     const macvoxel::Color c = doc->palette.Get(v);
-                    GpuLight L;
-                    L.pos = simd::float4{
-                        static_cast<float>(base_x + static_cast<int32_t>(lx)),
-                        static_cast<float>(base_y + static_cast<int32_t>(ly)),
-                        static_cast<float>(base_z + static_cast<int32_t>(lz)),
-                        0.0f,
-                    };
-                    L.le = simd::float4{
+                    const int32_t gx = base_x + static_cast<int32_t>(lx);
+                    const int32_t gy = base_y + static_cast<int32_t>(ly);
+                    const int32_t gz = base_z + static_cast<int32_t>(lz);
+                    const simd::float4 le_pre = simd::float4{
                         std::pow(c.r / 255.0f, 2.2f) * eff,
                         std::pow(c.g / 255.0f, 2.2f) * eff,
                         std::pow(c.b / 255.0f, 2.2f) * eff,
                         0.0f,
                     };
-                    lights.push_back(L);
+                    // Six axial neighbors. For each exposed face, the
+                    // record's `pos` is the face's minimum corner (the
+                    // voxel corner shifted +1 along the normal axis
+                    // when the normal points in the positive direction),
+                    // so the shader's `pos + perp1·u + perp2·v` sweeps
+                    // the unit-area face directly.
+                    struct Face {
+                        int32_t dx, dy, dz;
+                        float   nx, ny, nz;
+                        float   ox, oy, oz;  // anchor offset from voxel corner
+                    };
+                    static constexpr Face kFaces[6] = {
+                        { -1, 0, 0,  -1, 0, 0,  0, 0, 0 },
+                        { +1, 0, 0,  +1, 0, 0,  1, 0, 0 },
+                        {  0,-1, 0,   0,-1, 0,  0, 0, 0 },
+                        {  0,+1, 0,   0,+1, 0,  0, 1, 0 },
+                        {  0, 0,-1,   0, 0,-1,  0, 0, 0 },
+                        {  0, 0,+1,   0, 0,+1,  0, 0, 1 },
+                    };
+                    for (const Face& f : kFaces) {
+                        if (!is_empty(gx + f.dx, gy + f.dy, gz + f.dz)) continue;
+                        GpuLight L;
+                        L.pos = simd::float4{
+                            static_cast<float>(gx) + f.ox,
+                            static_cast<float>(gy) + f.oy,
+                            static_cast<float>(gz) + f.oz,
+                            0.0f,
+                        };
+                        L.le  = le_pre;
+                        L.nrm = simd::float4{ f.nx, f.ny, f.nz, 0.0f };
+                        lights.push_back(L);
+                    }
                 }
             }
         }

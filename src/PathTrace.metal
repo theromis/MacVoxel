@@ -69,10 +69,13 @@ struct PathUniforms {
 };
 
 struct GpuLight {
-    float4 pos;  // .xyz = grid-space corner; .w = cumulative CDF for
-                 //   power-weighted importance sampling (last entry = 1.0).
+    float4 pos;  // .xyz = grid-space corner of the exposed face;
+                 // .w   = cumulative CDF for power-weighted importance
+                 //       sampling (last entry = 1.0).
     float4 le;   // .xyz = albedo_linear * effective_emission;
-                 // .w   = per-light sampling probability (= cdf[i]-cdf[i-1]).
+                 // .w   = per-face sampling probability (= cdf[i]-cdf[i-1]).
+    float4 nrm;  // .xyz = outward face normal (axis-aligned ±1 on one axis).
+                 // .w   = unused.
 };
 
 struct DisplayUniforms {
@@ -767,13 +770,19 @@ float nee_pdf_solid_for_arrival(constant PathUniforms& u,
     float3 d = hit_point - prev_point;
     float dist2 = dot(d, d);
     if (dist2 < 1e-8) return 0.0;
+    // Find the (cell, face_normal) record. We match on the recovered
+    // voxel coord (face anchor minus max(n,0)) AND on the normal, so a
+    // corner voxel with multiple exposed faces resolves to the right
+    // entry — each of its faces has a distinct prob_li.
     for (uint i = 0u; i < u.light_count; ++i) {
-        if (all(int3(lights[i].pos.xyz) == hit_cell)) {
+        float3 ln = lights[i].nrm.xyz;
+        int3 cell_i = int3(lights[i].pos.xyz - max(ln, 0.0));
+        if (all(cell_i == hit_cell) && all(ln == n_y)) {
             float prob_li = (u.power_weighted_nee != 0u)
                 ? lights[i].le.w
                 : (1.0 / float(u.light_count));
             if (prob_li <= 0.0) return 0.0;
-            return prob_li * (1.0 / 3.0) * dist2 / cos_y;
+            return prob_li * dist2 / cos_y;
         }
     }
     return 0.0;
@@ -871,33 +880,19 @@ NEELight nee_sample_light(float3 x,
         if (prob_li <= 0.0) continue;
         GpuLight L = lights[li];
 
-        // Face selection — uniform over the 3 visible faces of the cell.
-        float3 corner = L.pos.xyz;
-        float3 center = corner + 0.5;
-        float3 to_x = x - center;
-        int axis = int(pickrand1(u, b, 3u, rng, jitter_seed) * 3.0);
-        if (axis > 2) axis = 2;
-        float coord_axis = (axis == 0) ? to_x.x
-                         : (axis == 1) ? to_x.y : to_x.z;
-        float face_sign = coord_axis >= 0.0 ? 1.0 : -1.0;
-        float3 n_y = float3(0.0);
-        float3 y = corner;
+        // Each record already IS a single 1×1 exposed face — no in-cell
+        // face-selection step. Sample uniformly within the face plane
+        // using two unit tangents derived from the normal via the
+        // Magica trick `|n.zxy|·u + |n.yzx|·v`, which produces the two
+        // canonical-axis tangents perpendicular to an axis-aligned ±1
+        // normal regardless of sign.
+        float3 n_y = L.nrm.xyz;
         float2 face_uv = pickrand2(u, b, 4u, rng, jitter_seed);
         float u1 = face_uv.x;
         float u2 = face_uv.y;
-        if (axis == 0) {
-            n_y.x = face_sign;
-            y.x += face_sign > 0.0 ? 1.0 : 0.0;
-            y.y += u1; y.z += u2;
-        } else if (axis == 1) {
-            n_y.y = face_sign;
-            y.y += face_sign > 0.0 ? 1.0 : 0.0;
-            y.x += u1; y.z += u2;
-        } else {
-            n_y.z = face_sign;
-            y.z += face_sign > 0.0 ? 1.0 : 0.0;
-            y.x += u1; y.y += u2;
-        }
+        float3 perp1 = abs(float3(n_y.z, n_y.x, n_y.y));
+        float3 perp2 = abs(float3(n_y.y, n_y.z, n_y.x));
+        float3 y = L.pos.xyz + perp1 * u1 + perp2 * u2;
 
         float3 d = y - x;
         float dist2 = dot(d, d);
@@ -909,11 +904,12 @@ NEELight nee_sample_light(float3 x,
         if (cos_x <= 0.0 || cos_y <= 0.0) continue;
 
         // RIS weight = target / source (both in solid-angle measure).
-        // Source pdf = prob_li · (1/3) · dist² / cos_y (face-area pdf
-        // converted to solid angle); target = unshadowed integrand
-        // luminance. Equal denominators across iterations let us do
-        // weighted reservoir sampling with one rand1 per candidate.
-        float source_pdf_solid = prob_li * (1.0 / 3.0) * dist2 / cos_y;
+        // Source pdf = prob_li · dist² / cos_y — face area is 1, so the
+        // area→solid-angle Jacobian is the only adjustment. Target is
+        // unshadowed integrand luminance. Equal denominators across
+        // iterations let us do weighted reservoir sampling with one
+        // rand1 per candidate.
+        float source_pdf_solid = prob_li * dist2 / cos_y;
         float target = nee_target_pdf_solid(L.le.xyz, cos_x);
         if (source_pdf_solid <= 0.0 || target <= 0.0) continue;
         float w_i = target / source_pdf_solid;
@@ -925,7 +921,11 @@ NEELight nee_sample_light(float3 x,
             chosen_cos_x  = cos_x;
             chosen_cos_y  = cos_y;
             chosen_dist2  = dist2;
-            chosen_cell   = int3(L.pos.xyz);
+            // Voxel coord behind the face — for +X/+Y/+Z normals the
+            // face anchor sits +1 along the normal axis, so subtract
+            // max(n, 0) to recover the owning voxel. The DDA shadow-
+            // ray hit test below compares against this.
+            chosen_cell   = int3(L.pos.xyz - max(L.nrm.xyz, 0.0));
             chosen_target = target;
             have_chosen = true;
         }
