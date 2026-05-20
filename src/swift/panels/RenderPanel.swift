@@ -175,12 +175,36 @@ private struct MaterialEditor: View {
                 .pickerStyle(.menu)
             }
 
+            paramsForType
+        }
+        .disabled(state.activePaletteSlot == 0)
+    }
+
+    @ViewBuilder
+    private var paramsForType: some View {
+        switch state.activeMaterialType {
+        case .diffuse:
+            EmptyView()
+        case .metal:
             slider("Roughness", value: floatBinding(get: { state.activeMaterialRoughness },
                                                     apply: state.applyMaterialRoughness),
                    range: 0...1, format: "%.2f")
             slider("Metallic", value: floatBinding(get: { state.activeMaterialMetallic },
                                                    apply: state.applyMaterialMetallic),
                    range: 0...1, format: "%.2f")
+        case .glass:
+            slider("Roughness", value: floatBinding(get: { state.activeMaterialRoughness },
+                                                    apply: state.applyMaterialRoughness),
+                   range: 0...1, format: "%.2f")
+            slider("Transparency",
+                   value: floatBinding(get: { state.activeMaterialTransparency },
+                                       apply: state.applyMaterialTransparency),
+                   range: 0...1, format: "%.2f")
+            slider("IoR",
+                   value: floatBinding(get: { state.activeMaterialIor },
+                                       apply: state.applyMaterialIor),
+                   range: 1...3, format: "%.2f")
+        case .emissive:
             slider("Emission",
                    value: floatBinding(
                        get: { state.activeMaterialEmission * 100.0 },
@@ -191,16 +215,9 @@ private struct MaterialEditor: View {
                        get: { Float(state.activeMaterialEmissionPower) },
                        apply: { state.applyMaterialEmissionPower(Int($0.rounded())) }),
                    range: 1...5, format: "%.0f", step: 1)
-            slider("Transparency",
-                   value: floatBinding(get: { state.activeMaterialTransparency },
-                                       apply: state.applyMaterialTransparency),
-                   range: 0...1, format: "%.2f")
-            slider("IoR",
-                   value: floatBinding(get: { state.activeMaterialIor },
-                                       apply: state.applyMaterialIor),
-                   range: 1...3, format: "%.2f")
+        @unknown default:
+            EmptyView()
         }
-        .disabled(state.activePaletteSlot == 0)
     }
 
     private var indexLabel: some View {
