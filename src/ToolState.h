@@ -15,6 +15,7 @@ enum class ToolKind {
     Box,     // two-click corner-to-corner volumetric box / hollow frame
     Face,    // click a face, drag to extrude / inset along its normal
     Generator,  // gizmoized AABB feeding a parameterized GPU primitive
+    Mutator,    // cursor-AOE GPU rule that mutates voxels based on neighbors
     Marquee,    // screen-space rectangle → every occupied voxel under it
     BoxSelect,  // 3D AABB drag → every occupied voxel inside the AABB
     FloodSelect,// click a voxel → BFS-flood by matching palette index

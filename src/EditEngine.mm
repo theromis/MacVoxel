@@ -4,6 +4,7 @@
 #import "EditVolume.h"
 #import "GeneratorEngine.h"
 #import "Generators.h"
+#import "MutatorEngine.h"
 #import "ShapeEngine.h"
 #import "VolumeTexture.h"
 
@@ -17,11 +18,13 @@ namespace {
 class EditEngineImpl final : public EditEngine {
 public:
     EditEngineImpl(BrushEngine* brush, ShapeEngine* shape,
-                   GeneratorEngine* generator, VolumeTexture* texture,
+                   GeneratorEngine* generator, MutatorEngine* mutator,
+                   VolumeTexture* texture,
                    const EditVolume& vol)
         : brush_(brush),
           shape_(shape),
           generator_(generator),
+          mutator_(mutator),
           texture_(texture),
           vol_(&vol) {}
 
@@ -70,6 +73,10 @@ public:
                           params:params];
     }
 
+    void DispatchMutator(const MutatorDispatchParams& params) override {
+        [mutator_ dispatchInto:texture_ params:params];
+    }
+
     void CommitGeneric(const CommitGenericParams& params) override {
         [shape_ dispatchCommitGeneric:params target:texture_];
     }
@@ -95,12 +102,14 @@ public:
     void WaitForPendingWork() override {
         [shape_ waitForPendingWork];
         [brush_ waitForPendingWork];
+        [mutator_ waitForPendingWork];
     }
 
 private:
     BrushEngine* brush_;          // ARC-strong
     ShapeEngine* shape_;          // ARC-strong
     GeneratorEngine* generator_;  // ARC-strong
+    MutatorEngine* mutator_;      // ARC-strong
     VolumeTexture* texture_;      // ARC-strong
     const EditVolume* vol_;       // non-owning, must outlive *this
 };
@@ -110,10 +119,11 @@ private:
 std::unique_ptr<EditEngine> MakeEditEngine(BrushEngine* brush,
                                            ShapeEngine* shape,
                                            GeneratorEngine* generator,
+                                           MutatorEngine* mutator,
                                            VolumeTexture* texture,
                                            const EditVolume& vol) {
     return std::make_unique<EditEngineImpl>(brush, shape, generator,
-                                            texture, vol);
+                                            mutator, texture, vol);
 }
 
 }  // namespace macvoxel

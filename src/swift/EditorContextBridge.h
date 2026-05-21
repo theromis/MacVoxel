@@ -31,9 +31,10 @@ typedef NS_ENUM(NSInteger, BridgeToolKind) {
     BridgeToolKindBox         NS_SWIFT_NAME(box)         = 4,
     BridgeToolKindFace        NS_SWIFT_NAME(face)        = 5,
     BridgeToolKindGenerator   NS_SWIFT_NAME(generator)   = 6,
-    BridgeToolKindMarquee     NS_SWIFT_NAME(marquee)     = 7,
-    BridgeToolKindBoxSelect   NS_SWIFT_NAME(boxSelect)   = 8,
-    BridgeToolKindFloodSelect NS_SWIFT_NAME(floodSelect) = 9,
+    BridgeToolKindMutator     NS_SWIFT_NAME(mutator)     = 7,
+    BridgeToolKindMarquee     NS_SWIFT_NAME(marquee)     = 8,
+    BridgeToolKindBoxSelect   NS_SWIFT_NAME(boxSelect)   = 9,
+    BridgeToolKindFloodSelect NS_SWIFT_NAME(floodSelect) = 10,
 };
 
 typedef NS_ENUM(NSInteger, BridgeToolMode) {
@@ -187,6 +188,13 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, assign) float generatorTorusTube;
 @property (nonatomic, assign) NSInteger generatorPerlinPaletteLo;
 @property (nonatomic, assign) NSInteger generatorPerlinPaletteHi;
+
+// ---------------------------------------------------------------------------
+// Mutator panel state. v1 holds Foliage only; future kinds add fields.
+// ---------------------------------------------------------------------------
+
+@property (nonatomic, assign) NSInteger mutatorFoliageSeedColor;  // palette idx
+@property (nonatomic, assign) float mutatorFoliageDensity;        // [0, 1]
 
 // ---------------------------------------------------------------------------
 // Render settings (path tracer inputs). Live state read by the

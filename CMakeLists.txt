@@ -63,6 +63,8 @@ set(APP_SOURCES
     src/MarqueeController.cpp
     src/MetalScene.mm
     src/MoveSelectController.cpp
+    src/MutatorEngine.mm
+    src/MutatorTool.cpp
     src/OverlayDraw.cpp
     src/ShapeTool.cpp
     src/ToolRegistry.cpp
@@ -84,6 +86,7 @@ set(APP_SWIFT_SOURCES
     src/swift/EditorState.swift
     src/swift/panels/GeneratorControls.swift
     src/swift/panels/LightPanel.swift
+    src/swift/panels/MutatorControls.swift
     src/swift/panels/ModelPanel.swift
     src/swift/panels/PalettePanel.swift
     src/swift/panels/RenderPanel.swift
@@ -96,6 +99,7 @@ set(APP_RESOURCES
     resources/default.vox
     src/BrushKernel.metal
     src/Generators.metal
+    src/Mutators.metal
     src/ShapeKernel.metal
     src/Overlay.metal
     src/PathTrace.metal

@@ -211,6 +211,7 @@ void GeneratorTool::OnMouseUp(EditorContext& /*ctx*/, InteractionState& state,
 }
 
 void GeneratorTool::Tick(EditorContext& ctx, InteractionState& state,
+                         const ViewContext& /*vc*/,
                          ToolKind active_tool, bool escape_pressed,
                          EditEngine& engine) {
     if (!active_) return;

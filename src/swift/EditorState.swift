@@ -256,6 +256,18 @@ final class EditorState {
         set { bridge.generatorPerlinPaletteHi = newValue; tick &+= 1 }
     }
 
+    // ---- Mutator (panel-facing) ----
+
+    var mutatorFoliageSeedColor: Int {
+        get { _ = tick; return bridge.mutatorFoliageSeedColor }
+        set { bridge.mutatorFoliageSeedColor = newValue; tick &+= 1 }
+    }
+
+    var mutatorFoliageDensity: Float {
+        get { _ = tick; return bridge.mutatorFoliageDensity }
+        set { bridge.mutatorFoliageDensity = newValue; tick &+= 1 }
+    }
+
     // ---- Render settings (panel-facing) ----
     //
     // Path tracer reads these every frame; raycast preview ignores

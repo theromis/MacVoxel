@@ -33,6 +33,7 @@ public:
                    EditEngine& engine) override;
 
     void Tick(EditorContext& ctx, InteractionState& state,
+              const ViewContext& vc,
               ToolKind active_tool, bool escape_pressed,
               EditEngine& engine) override;
 

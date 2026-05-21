@@ -20,6 +20,8 @@ struct Params;
 enum class Kind : uint32_t;
 }  // namespace generators
 
+struct MutatorDispatchParams;
+
 // Pure-C++ façade over BrushEngine + ShapeEngine + GeneratorEngine.
 //
 // Replaces the per-tool `std::function` closures the controllers used
@@ -70,6 +72,13 @@ public:
                           const generators::Bounds3i& last_bounds,
                           const generators::Params& params) = 0;
 
+    // Mutator kernel dispatch — async, reads tex_a / tex_t / preview_rem
+    // live-composited and writes a delta into tex_t. Commit happens via
+    // CommitGeneric over the AOE union bbox afterwards (bm=Add for the
+    // tex_t half, bm=Erase for the preview_rem half — Foliage v1 uses
+    // only the Add half).
+    virtual void DispatchMutator(const MutatorDispatchParams& params) = 0;
+
     // Unified commit — the Magica `shader_0018.glsl` pipeline.
     // Phase 2.2 wired Shape + Generator onto this; Face and Brush
     // migrations are deferred behind a `preview_rem` mask refactor
@@ -94,17 +103,19 @@ public:
 @class BrushEngine;
 @class ShapeEngine;
 @class GeneratorEngine;
+@class MutatorEngine;
 @class VolumeTexture;
 
 namespace macvoxel {
 
 // MetalScene constructs one of these in init, passing the engines and
 // the doc's VolumeTexture it already owns. The returned object holds
-// strong (ARC) refs to all four; tools keep a non-owning pointer/ref.
+// strong (ARC) refs to all five; tools keep a non-owning pointer/ref.
 // `vol` is observed by reference and must outlive the EditEngine.
 std::unique_ptr<EditEngine> MakeEditEngine(BrushEngine* brush,
                                            ShapeEngine* shape,
                                            GeneratorEngine* generator,
+                                           MutatorEngine* mutator,
                                            VolumeTexture* texture,
                                            const EditVolume& vol);
 

@@ -20,6 +20,8 @@
 #include "FloatingBufferOps.h"
 #include "GeneratorState.h"
 #include "Generators.h"
+#include "MutatorState.h"
+#include "Mutators.h"
 #include "Palette.h"
 #include "Selection.h"
 #include "SelectionOps.h"
@@ -457,6 +459,27 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 - (void)setGeneratorPerlinPaletteHi:(NSInteger)idx {
     _ctx->generator.params.perlin_palette_hi =
         static_cast<uint32_t>(std::clamp<NSInteger>(idx, 0, 255));
+}
+
+// ---------------------------------------------------------------------------
+// Mutator panel state
+// ---------------------------------------------------------------------------
+
+- (NSInteger)mutatorFoliageSeedColor {
+    return static_cast<NSInteger>(_ctx->mutator.params.foliage.seed_color);
+}
+
+- (void)setMutatorFoliageSeedColor:(NSInteger)idx {
+    _ctx->mutator.params.foliage.seed_color =
+        static_cast<uint8_t>(std::clamp<NSInteger>(idx, 1, 255));
+}
+
+- (float)mutatorFoliageDensity {
+    return _ctx->mutator.params.foliage.density;
+}
+
+- (void)setMutatorFoliageDensity:(float)v {
+    _ctx->mutator.params.foliage.density = std::clamp(v, 0.0f, 1.0f);
 }
 
 // ---------------------------------------------------------------------------

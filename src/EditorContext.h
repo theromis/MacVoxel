@@ -5,6 +5,7 @@
 #include "EditHistory.h"
 #include "FloatingBuffer.h"
 #include "GeneratorState.h"
+#include "MutatorState.h"
 #include "PanelState.h"
 #include "RenderState.h"
 #include "Selection.h"
@@ -29,6 +30,7 @@ struct EditorContext {
     RenderSettings render_settings;
     RenderProgress render_progress;
     GeneratorState generator;
+    MutatorState mutator;
     FloatingBuffer floating_buffer;
     // True while a tool is actively writing the GPU preview texture
     // (tex_t) — gates the rasterizer's `preview_active` uniform so the
@@ -36,6 +38,12 @@ struct EditorContext {
     // gesture. Tools set this on gesture-begin and clear it on commit
     // or cancel.
     bool preview_active = false;
+    // Alpha used to composite preview cells over the doc. 1.0 = opaque
+    // (drag-time stamps look exactly like the committed result). < 1.0
+    // = "ghost" — preview cells alpha-over the doc cell or sky behind
+    // them. Used by Brush / Mutator hover previews to telegraph the
+    // would-be stamp without claiming it's already committed.
+    float preview_alpha = 1.0f;
     EditHistory history;
     Clipboard clipboard;
     PanelState panel;

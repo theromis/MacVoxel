@@ -2,6 +2,7 @@
 
 #import "BrushEngine.h"
 #import "GeneratorEngine.h"
+#import "MutatorEngine.h"
 #import "PathTraceRenderer.h"
 #import "RaycastRenderer.h"
 #import "SceneOverlayRenderer.h"
@@ -66,6 +67,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     PathTraceRenderer *_pathTraceRenderer;
     SceneOverlayRenderer *_overlayRenderer;
     GeneratorEngine *_generatorEngine;
+    MutatorEngine *_mutatorEngine;
     BrushEngine *_brushEngine;
     ShapeEngine *_shapeEngine;
     // Per-document GPU mirror of the voxel grid. Both renderers and
@@ -176,6 +178,12 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         initWithDevice:device commandQueue:brushQueue];
     if (_shapeEngine == nil) return nil;
 
+    // Mutator kernels share the same queue (also mutually exclusive at
+    // gesture level with brush / shape / generator).
+    _mutatorEngine = [[MutatorEngine alloc]
+        initWithDevice:device commandQueue:brushQueue];
+    if (_mutatorEngine == nil) return nil;
+
     _docVolumeTex = [[VolumeTexture alloc]
         initWithDevice:device
                 volume:_ctx->document.volume_shadow];
@@ -183,7 +191,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     _docVolumeTexCachedVersion = 0;
 
     _editEngine = macvoxel::MakeEditEngine(_brushEngine, _shapeEngine,
-                                           _generatorEngine, _docVolumeTex,
+                                           _generatorEngine, _mutatorEngine,
+                                           _docVolumeTex,
                                            _ctx->document.volume);
     _toolRegistry = std::make_unique<macvoxel::ToolRegistry>();
     _activeTool = nullptr;
@@ -295,6 +304,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
             case 'l': case 'L': _ctx->tool.tool = K::Line;    return;
             case 'b': case 'B': _ctx->tool.tool = K::Box;     return;
             case 'f': case 'F': _ctx->tool.tool = K::Face;    return;
+            case 'u': case 'U': _ctx->tool.tool = K::Mutator; return;
             case 'm': case 'M': _ctx->tool.tool = K::Marquee; return;
             case 't': case 'T': _ctx->tool.mode = M::Add;     return;
             case 'r': case 'R': _ctx->tool.mode = M::Remove;  return;
@@ -429,8 +439,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     // Per-frame Tick on every Tool. Currently only Generator does
     // anything in Tick (gizmo dirty-check / cancel-on-Esc); others
     // default to no-op.
-    _toolRegistry->TickAll(*_ctx, _interaction, _ctx->tool.tool, escape_now,
-                            *_editEngine);
+    _toolRegistry->TickAll(*_ctx, _interaction, [self viewContext],
+                            _ctx->tool.tool, escape_now, *_editEngine);
 
     // Auto-commit the floating buffer on "user moved on" gestures
     // detectable from the per-frame loop: tool switch and render-mode

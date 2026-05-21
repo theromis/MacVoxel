@@ -47,7 +47,10 @@ struct Uniforms {
     // oracle (`preview_oracle`) so we don't pay a per-cell read
     // through chunks the preview hasn't touched.
     int preview_active;
-    int _pad6;
+    // < 1.0 enables the "ghost" composite (preview cells alpha-over
+    // whatever's behind them — doc, FB, or sky). 1.0 = opaque (current
+    // drag-stamp behavior). Set by tools per gesture phase.
+    float preview_alpha;
     int _pad7;
     int _pad8;
 };
@@ -78,7 +81,7 @@ struct Uniforms {
     float3   box_max;
     float    _pad5;
     int      preview_active;
-    int      _pad6;
+    float    preview_alpha;
     int      _pad7;
     int      _pad8;
 };
@@ -278,6 +281,17 @@ fragment float4 raycast_fragment(
 
     int last_axis = -1;
 
+    // Ghost-composite state. When preview_alpha < 1.0 and we hit a
+    // preview cell, we capture its shaded color, mark `ghost_seen`,
+    // and *keep marching* — the loop then ignores future preview hits
+    // (via `skip_preview`) so we naturally find whatever's behind
+    // (another doc cell, an FB cell, or the sky). At terminal-hit time
+    // we alpha-blend the ghost color over that backdrop.
+    bool ghost_active = (u.preview_active != 0) && (u.preview_alpha < 0.999);
+    bool ghost_seen = false;
+    bool skip_preview = false;
+    float3 ghost_color = float3(0.0);
+
     // Dense-doc DDA with a 16³ coarse occupancy oracle. The doc lives
     // in a `texture3d<uint>` sized to the edit volume; the oracle is a
     // 1/16-scale `texture3d<uint>` where each cell is 0 (chunk empty) or
@@ -318,9 +332,12 @@ fragment float4 raycast_fragment(
         // Preview-tex: shape/face/generator tool live preview. Same
         // dims + chunking as the doc tex; gated by preview_active so
         // the rasterizer skips the read entirely between strokes.
+        // Once a ghost has been accumulated, `skip_preview` keeps us
+        // from re-hitting preview cells on subsequent loop iterations
+        // (so the DDA can naturally reach the doc/sky behind).
         bool preview_chunk_empty = true;
         uint val_preview = 0u;
-        if (u.preview_active != 0 && doc_in) {
+        if (u.preview_active != 0 && !skip_preview && doc_in) {
             preview_chunk_empty =
                 (preview_oracle.read(uint3(oracle_c)).r == 0u);
             if (!preview_chunk_empty) {
@@ -354,11 +371,17 @@ fragment float4 raycast_fragment(
         // Outside the union of doc volume + FB extent: ray has exited.
         if (!doc_in && !fb_in) {
             float3 bg = float3(0.118, 0.118, 0.18);
-            return float4(bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max), 1.0);
+            float3 bg_edged = bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max);
+            if (ghost_seen) {
+                return float4(mix(bg_edged, ghost_color, u.preview_alpha), 1.0);
+            }
+            return float4(bg_edged, 1.0);
         }
 
         // Hit detection. Preview-tex wins over everything when active,
-        // then FB, then doc.
+        // then FB, then doc. In ghost mode the first preview hit is
+        // captured rather than returned — the loop keeps marching to
+        // find what's behind, and the terminal-hit branches blend.
         if (val_preview != 0u) {
             float3 grid_normal = float3(0.0);
             if (last_axis == 0) grid_normal.x = -float(step_dir.x);
@@ -368,7 +391,16 @@ fragment float4 raycast_fragment(
             float ndl = max(dot(world_normal, u.light_dir), 0.0);
             float lambert = 0.3 + 0.7 * ndl;
             float3 base = palette[val_preview].rgb;
-            return float4(base * lambert, 1.0);
+            float3 preview_shaded = base * lambert;
+            if (ghost_active) {
+                ghost_color = preview_shaded;
+                ghost_seen = true;
+                skip_preview = true;
+                // Don't return — continue the DDA to find the backdrop.
+                // Fall through to the cell-advance logic at loop bottom.
+            } else {
+                return float4(preview_shaded, 1.0);
+            }
         }
         if (pool_idx_fb != 0u) {
             int3 cell_fb = cell - u.fb_offset;
@@ -386,7 +418,11 @@ fragment float4 raycast_fragment(
                 float ndl = max(dot(world_normal, u.light_dir), 0.0);
                 float lambert = 0.3 + 0.7 * ndl;
                 float3 base = palette[val].rgb;
-                return float4(base * lambert, 1.0);
+                float3 shaded = base * lambert;
+                if (ghost_seen) {
+                    return float4(mix(shaded, ghost_color, u.preview_alpha), 1.0);
+                }
+                return float4(shaded, 1.0);
             }
         }
         if (val_doc != 0u) {
@@ -398,7 +434,11 @@ fragment float4 raycast_fragment(
             float ndl = max(dot(world_normal, u.light_dir), 0.0);
             float lambert = 0.3 + 0.7 * ndl;
             float3 base = palette[val_doc].rgb;
-            return float4(base * lambert, 1.0);
+            float3 shaded = base * lambert;
+            if (ghost_seen) {
+                return float4(mix(shaded, ghost_color, u.preview_alpha), 1.0);
+            }
+            return float4(shaded, 1.0);
         }
 
         // No hit at this cell. If both the doc oracle says this chunk
@@ -471,7 +511,11 @@ fragment float4 raycast_fragment(
         }
     }
     float3 bg = float3(0.118, 0.118, 0.18);
-    return float4(bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max), 1.0);
+    float3 bg_edged = bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max);
+    if (ghost_seen) {
+        return float4(mix(bg_edged, ghost_color, u.preview_alpha), 1.0);
+    }
+    return float4(bg_edged, 1.0);
 }
 )MSL";
 
@@ -723,7 +767,7 @@ fragment float4 raycast_fragment(
     // false on commit/cancel; the rasterizer pays exactly one oracle
     // byte per pixel when inactive.
     u.preview_active = ctx->preview_active ? 1 : 0;
-    u._pad6 = 0;
+    u.preview_alpha = ctx->preview_alpha;
     u._pad7 = 0;
     u._pad8 = 0;
 

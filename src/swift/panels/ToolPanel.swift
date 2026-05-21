@@ -55,6 +55,7 @@ struct ToolPanel: View {
         .init(kind: .box,         symbol: "cube.fill",                                label: "Box",         key: "B"),
         .init(kind: .face,        symbol: "rectangle.portrait.and.arrow.right.fill",  label: "Face",        key: "F"),
         .init(kind: .generator,   symbol: "gearshape.2.fill",                         label: "Generator",   key: nil),
+        .init(kind: .mutator,     symbol: "leaf.fill",                                label: "Mutator",     key: "U"),
         .init(kind: .marquee,     symbol: "square.dashed",                            label: "Marquee",     key: "M"),
         .init(kind: .boxSelect,   symbol: "cube.transparent.fill",                    label: "Box Select",  key: nil),
         .init(kind: .floodSelect, symbol: "paintbrush.fill",                          label: "Flood Select", key: nil),
@@ -106,6 +107,8 @@ struct ToolPanel: View {
     private var showsBrushFootprint: Bool {
         state.toolKind != .face && state.toolKind != .generator
     }
+    // Mutator falls into the showsBrushFootprint=true branch above
+    // because it reuses the brush AOE controls — no extra wiring here.
 
     @ViewBuilder
     private var brushControls: some View {
@@ -222,6 +225,9 @@ struct ToolPanel: View {
             .labelsHidden()
             .pickerStyle(.menu)
             GeneratorControls(state: state)
+        case .mutator:
+            sectionHeader("Mutator")
+            MutatorControls(state: state)
         default:
             EmptyView()
         }

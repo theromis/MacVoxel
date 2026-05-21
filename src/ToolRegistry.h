@@ -9,6 +9,7 @@ namespace macvoxel {
 class BrushTool;
 class FaceTool;
 class GeneratorTool;
+class MutatorTool;
 class OverlayDraw;
 class ShapeTool;
 struct EditorContext;
@@ -35,6 +36,7 @@ public:
     // Tick every owned Tool every frame. Default Tool::Tick is a no-op
     // so this is cheap for tools that don't override.
     void TickAll(EditorContext& ctx, InteractionState& state,
+                 const ViewContext& vc,
                  ToolKind active_tool, bool escape_pressed,
                  EditEngine& engine);
 
@@ -54,6 +56,7 @@ private:
     std::unique_ptr<ShapeTool> shape_tool_;
     std::unique_ptr<FaceTool> face_tool_;
     std::unique_ptr<GeneratorTool> generator_tool_;
+    std::unique_ptr<MutatorTool> mutator_tool_;
 };
 
 }  // namespace macvoxel

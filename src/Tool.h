@@ -48,10 +48,13 @@ public:
 
     // Called every frame from `MetalScene drawInMTKView`. Tools use this
     // for time-based work (Generator's persistent gizmo, cancel-on-Esc,
-    // tool-switch cleanup). `active_tool` is `EditorContext::tool.tool`;
-    // a Tool whose kind no longer matches should Cancel itself.
-    // `escape_pressed` is the per-frame edge for Esc handling.
+    // tool-switch cleanup, Brush/Mutator hover preview). `active_tool`
+    // is `EditorContext::tool.tool`; a Tool whose kind no longer
+    // matches should Cancel itself. `escape_pressed` is the per-frame
+    // edge for Esc handling. `vc` is the current view (camera + view
+    // size) — hover-preview tools use it to pick the cursor cell.
     virtual void Tick(EditorContext& /*ctx*/, InteractionState& /*state*/,
+                      const ViewContext& /*vc*/,
                       ToolKind /*active_tool*/, bool /*escape_pressed*/,
                       EditEngine& /*engine*/) {}
 
