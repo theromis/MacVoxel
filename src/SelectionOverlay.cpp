@@ -254,13 +254,16 @@ void DrawHover(const InteractionState& state, const ViewContext& vc,
     if (vc.ctx == nullptr) return;
 
     const ToolSettings& t = vc.ctx->tool;
-    const bool is_brush = t.tool == ToolKind::Brush;
+    // Brush and Mutator render a ghost-alpha preview of the exact cells
+    // they'll write; a separate cursor wire would just duplicate that.
+    // Two-click tools have no per-cursor preview yet, so they still get
+    // the wire as a target indicator.
     const bool is_two_click = (t.tool == ToolKind::Line ||
                                t.tool == ToolKind::Circle ||
                                t.tool == ToolKind::Square ||
                                t.tool == ToolKind::Box ||
                                t.tool == ToolKind::Generator);
-    if (!is_brush && !is_two_click) return;
+    if (!is_two_click) return;
 
     auto color_for_mode = [](ToolMode m) -> uint32_t {
         switch (m) {
@@ -273,10 +276,7 @@ void DrawHover(const InteractionState& state, const ViewContext& vc,
 
     shapes::Vec3i cell;
     const simd::float2 lp = state.hover.local;
-    const bool ok = is_two_click
-        ? vc.ComputeLineEndpoint(lp.x, lp.y, t.mode, &cell, nullptr)
-        : vc.ComputeTargetCell(lp.x, lp.y, t.mode, &cell, nullptr);
-    if (!ok) return;
+    if (!vc.ComputeLineEndpoint(lp.x, lp.y, t.mode, &cell, nullptr)) return;
     DrawCellWire(cell.x, cell.y, cell.z,
                  color_for_mode(t.mode), 1.5f, vc, od);
 }
