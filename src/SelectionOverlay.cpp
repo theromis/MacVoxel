@@ -161,57 +161,45 @@ void DrawSelection(const ViewContext& vc, OverlayDraw& od) {
                     Rgba8(255, 220, 80, 255), 1.5f, od);
     }
 
-    // Per-voxel highlights for sparse selections. Two passes of
-    // hidden-line removal keep the overlay legible for thousands of
-    // voxels:
-    //  1. Skip faces whose neighbor cell is also selected — internal
-    //     boundaries collapse, leaving only the silhouette.
-    //  2. Of those, skip back-facing faces so we don't double-stroke
-    //     through the silhouette.
-    //
-    // Floating-buffer cell counts blow up faster than doc-side
-    // marquee selections (a 256³ lift would do millions of cells'
-    // worth of OverlayDraw work otherwise); cap there only.
+    // Per-voxel highlights. Doc-side selection now gets a GPU-side
+    // tint via `tex_sel` (sampled in the rasterizer fragment shader);
+    // the only thing the CPU overlay still needs to do for that branch
+    // is the AABB wire above. Floating-buffer cells live at an offset
+    // outside `tex_sel`'s frame of reference, so they keep their CPU-
+    // side per-cell silhouette pass for now (retired when FB itself
+    // retires in a later step).
+    if (!show_floating) return;
+
     constexpr size_t kFloatingWireMax = 200000;
+    const size_t nfilled = static_cast<size_t>(fb.grid.FilledCount());
+    if (nfilled == 0 || nfilled > kFloatingWireMax) return;
 
     const simd::float3 cam = vc.camera.Position();
     const uint32_t voxel_color = Rgba8(255, 220, 80, 200);
 
     std::vector<std::array<int32_t, 3>> cells;
     std::unordered_set<int64_t> selected_set;
-    if (show_floating) {
-        const size_t nfilled = static_cast<size_t>(fb.grid.FilledCount());
-        if (nfilled == 0 || nfilled > kFloatingWireMax) return;
-        cells.reserve(nfilled);
-        selected_set.reserve(nfilled * 2);
-        constexpr uint32_t kCS = VoxelGrid::kChunkSize;
-        for (const auto& [coord, chunk] : fb.grid.chunks()) {
-            if (chunk->filled_count == 0) continue;
-            const int32_t base_x = coord.x * static_cast<int32_t>(kCS);
-            const int32_t base_y = coord.y * static_cast<int32_t>(kCS);
-            const int32_t base_z = coord.z * static_cast<int32_t>(kCS);
-            for (uint32_t lz = 0; lz < kCS; ++lz)
-            for (uint32_t ly = 0; ly < kCS; ++ly)
-            for (uint32_t lx = 0; lx < kCS; ++lx) {
-                const size_t idx = lx + ly * kCS + lz * kCS * kCS;
-                if (chunk->cells[idx] == 0) continue;
-                const int32_t cx = base_x + static_cast<int32_t>(lx)
-                                   + fb.offset_x;
-                const int32_t cy = base_y + static_cast<int32_t>(ly)
-                                   + fb.offset_y;
-                const int32_t cz = base_z + static_cast<int32_t>(lz)
-                                   + fb.offset_z;
-                cells.push_back({cx, cy, cz});
-                selected_set.insert(PackCellKey(cx, cy, cz));
-            }
-        }
-    } else {
-        if (sel.empty()) return;
-        cells.reserve(sel.size());
-        selected_set.reserve(sel.size() * 2);
-        for (const auto& v : sel.voxels()) {
-            cells.push_back(v);
-            selected_set.insert(PackCellKey(v[0], v[1], v[2]));
+    cells.reserve(nfilled);
+    selected_set.reserve(nfilled * 2);
+    constexpr uint32_t kCS = VoxelGrid::kChunkSize;
+    for (const auto& [coord, chunk] : fb.grid.chunks()) {
+        if (chunk->filled_count == 0) continue;
+        const int32_t base_x = coord.x * static_cast<int32_t>(kCS);
+        const int32_t base_y = coord.y * static_cast<int32_t>(kCS);
+        const int32_t base_z = coord.z * static_cast<int32_t>(kCS);
+        for (uint32_t lz = 0; lz < kCS; ++lz)
+        for (uint32_t ly = 0; ly < kCS; ++ly)
+        for (uint32_t lx = 0; lx < kCS; ++lx) {
+            const size_t idx = lx + ly * kCS + lz * kCS * kCS;
+            if (chunk->cells[idx] == 0) continue;
+            const int32_t cx = base_x + static_cast<int32_t>(lx)
+                               + fb.offset_x;
+            const int32_t cy = base_y + static_cast<int32_t>(ly)
+                               + fb.offset_y;
+            const int32_t cz = base_z + static_cast<int32_t>(lz)
+                               + fb.offset_z;
+            cells.push_back({cx, cy, cz});
+            selected_set.insert(PackCellKey(cx, cy, cz));
         }
     }
 

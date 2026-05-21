@@ -3,6 +3,7 @@
 #import <Metal/Metal.h>
 
 namespace macvoxel {
+class Selection;
 class VoxelVolume;
 }
 
@@ -65,6 +66,18 @@ class VoxelVolume;
 // in bm=Erase mode reads this mask in place of tex_t.
 @property(nonatomic, readonly, nonnull) id<MTLTexture> previewRemTexture;
 @property(nonatomic, readonly, nonnull) id<MTLTexture> previewRemOracleTexture;
+
+// Selection mask ("tex_sel" in MagicaVoxel framing). Same dims as the
+// doc tex (R8Uint 256³ + 16³ oracle); a non-zero cell means "the
+// user has selected this cell." The rasterizer samples this during
+// shading and tints occupied doc cells whose selection byte is set;
+// future steps will rebuild transform / cut / copy / delete onto
+// kernels that read this mask. `syncFromSelection:` refreshes the
+// bounded bbox region that changed since the last sync.
+@property(nonatomic, readonly, nonnull) id<MTLTexture> selectionTexture;
+@property(nonatomic, readonly, nonnull) id<MTLTexture> selectionOracleTexture;
+
+- (void)syncFromSelection:(const macvoxel::Selection&)selection;
 
 // Texture dimensions in cells. Mirrors volume.size_{x,y,z}.
 @property(nonatomic, readonly) int sizeX;

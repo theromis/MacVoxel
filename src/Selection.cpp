@@ -34,6 +34,7 @@ Selection& Selection::operator=(const Selection& other) {
     voxels_ = other.voxels_;
     active_ = other.active_;
     membership_.reset();
+    ++version_;
     return *this;
 }
 
@@ -45,6 +46,7 @@ Selection& Selection::operator=(Selection&& other) noexcept {
     membership_ = std::move(other.membership_);
     other.bounds_ = Bounds3{};
     other.active_ = false;
+    ++version_;
     return *this;
 }
 
@@ -64,6 +66,7 @@ void Selection::SetVoxels(std::vector<std::array<int32_t, 3>> voxels) {
     RecomputeBounds();
     active_ = !voxels_.empty();
     membership_.reset();
+    ++version_;
 }
 
 void Selection::SetBox(const Bounds3& box) {
@@ -71,6 +74,7 @@ void Selection::SetBox(const Bounds3& box) {
     voxels_.clear();
     active_ = !box.empty();
     membership_.reset();
+    ++version_;
 }
 
 void Selection::AddVoxel(int32_t x, int32_t y, int32_t z) {
@@ -89,6 +93,7 @@ void Selection::AddVoxel(int32_t x, int32_t y, int32_t z) {
     voxels_.push_back({x, y, z});
     active_ = true;
     membership_.reset();
+    ++version_;
 }
 
 void Selection::Clear() {
@@ -96,6 +101,7 @@ void Selection::Clear() {
     voxels_.clear();
     active_ = false;
     membership_.reset();
+    ++version_;
 }
 
 void Selection::RecomputeBounds() {

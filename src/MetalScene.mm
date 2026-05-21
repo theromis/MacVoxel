@@ -75,6 +75,10 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     // access::read_write, the rasterizer fragment shader reads.
     VolumeTexture *_docVolumeTex;
     uint64_t _docVolumeTexCachedVersion;
+    // Last `Selection::version()` we synced into the GPU selection mask.
+    // Bumped any time the user-space selection mutates; the rasterizer
+    // samples `_docVolumeTex.selectionTexture` to tint occupied cells.
+    uint64_t _selectionCachedVersion;
 
     macvoxel::Camera _camera;
     NSTrackingArea *_trackingArea;
@@ -189,6 +193,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
                 volume:_ctx->document.volume_shadow];
     if (_docVolumeTex == nil) return nil;
     _docVolumeTexCachedVersion = 0;
+    _selectionCachedVersion = 0;
 
     _editEngine = macvoxel::MakeEditEngine(_brushEngine, _shapeEngine,
                                            _generatorEngine, _mutatorEngine,
@@ -232,6 +237,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     // already mark every chunk dirty; resetting the cached version
     // ensures the sync path actually fires.
     _docVolumeTexCachedVersion = 0;
+    _selectionCachedVersion = 0;
 }
 
 - (BOOL)exportRenderToURL:(NSURL *)url error:(NSError **)error {
@@ -532,6 +538,14 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         if (_docVolumeTexCachedVersion != _ctx->document.geometry_version) {
             [_docVolumeTex syncFromVolume:_ctx->document.volume_shadow];
             _docVolumeTexCachedVersion = _ctx->document.geometry_version;
+        }
+        // Sync the selection mask on Selection::version change. The
+        // rasterizer fragment shader reads `selectionTexture` to tint
+        // selected occupied cells; bounded by the union of last + new
+        // bboxes so unchanged regions don't get re-uploaded.
+        if (_selectionCachedVersion != _ctx->selection.version()) {
+            [_docVolumeTex syncFromSelection:_ctx->selection];
+            _selectionCachedVersion = _ctx->selection.version();
         }
 
         id<MTLRenderCommandEncoder> enc =

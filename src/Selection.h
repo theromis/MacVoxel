@@ -45,6 +45,10 @@ public:
     const std::vector<std::array<int32_t, 3>>& voxels() const {
         return voxels_;
     }
+    // Monotonic counter, bumped on every mutation. Renderers cache the
+    // last value they saw against this and re-sync the GPU mirror
+    // (`VolumeTexture.selectionTexture`) only on change.
+    uint64_t version() const { return version_; }
 
     // O(1) amortized membership. First call after a mutation builds
     // a hash set over `voxels_`; subsequent calls hit the cache.
@@ -71,6 +75,7 @@ private:
     Bounds3 bounds_{};
     std::vector<std::array<int32_t, 3>> voxels_;
     bool active_ = false;
+    uint64_t version_ = 0;
     // Lazy O(1) membership. Built on first Contains() after a
     // mutation; mutators reset() to invalidate.
     mutable std::optional<std::unordered_set<int64_t>> membership_;

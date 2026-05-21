@@ -203,7 +203,9 @@ fragment float4 raycast_fragment(
     texture3d<uint, access::read> preview_tex [[texture(2)]],
     texture3d<uint, access::read> preview_oracle [[texture(3)]],
     texture3d<uint, access::read> preview_rem [[texture(4)]],
-    texture3d<uint, access::read> preview_rem_oracle [[texture(5)]])
+    texture3d<uint, access::read> preview_rem_oracle [[texture(5)]],
+    texture3d<uint, access::read> tex_sel [[texture(6)]],
+    texture3d<uint, access::read> sel_oracle [[texture(7)]])
 {
     // Reconstruct world-space ray from NDC.
     float4 near_clip = float4(in.ndc, 0.0, 1.0);
@@ -435,6 +437,14 @@ fragment float4 raycast_fragment(
             float lambert = 0.3 + 0.7 * ndl;
             float3 base = palette[val_doc].rgb;
             float3 shaded = base * lambert;
+            // Selection tint: oracle-gated so non-selected chunks pay
+            // nothing. Mix-toward a shaded warm yellow so the original
+            // palette color stays readable but the cell reads as
+            // "selected" at a glance.
+            if (sel_oracle.read(uint3(oracle_c)).r != 0u &&
+                tex_sel.read(uint3(cell_local)).r != 0u) {
+                shaded = mix(shaded, float3(1.0, 0.9, 0.4) * lambert, 0.45);
+            }
             if (ghost_seen) {
                 return float4(mix(shaded, ghost_color, u.preview_alpha), 1.0);
             }
@@ -788,6 +798,8 @@ fragment float4 raycast_fragment(
     [encoder setFragmentTexture:docVolumeTex.previewOracleTexture atIndex:3];
     [encoder setFragmentTexture:docVolumeTex.previewRemTexture atIndex:4];
     [encoder setFragmentTexture:docVolumeTex.previewRemOracleTexture atIndex:5];
+    [encoder setFragmentTexture:docVolumeTex.selectionTexture atIndex:6];
+    [encoder setFragmentTexture:docVolumeTex.selectionOracleTexture atIndex:7];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:3];
