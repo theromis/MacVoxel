@@ -32,6 +32,11 @@ public:
 
     bool IsDragging() const override { return is_dragging_; }
 
+    void Tick(EditorContext& ctx, InteractionState& state,
+              const ViewContext& vc,
+              ToolKind active_tool, bool escape_pressed,
+              EditEngine& engine) override;
+
     void Cancel(EditorContext& ctx, InteractionState& state,
                 EditEngine& engine) override;
 
@@ -41,6 +46,10 @@ private:
                        EditEngine& engine);
     void SyncStrokeFromTexture(EditorContext& ctx, EditEngine& engine);
     void ResetStrokeState();
+    // Hover preview: dispatch the brush kernel into the preview
+    // surfaces every frame the cursor cell changes; clear the previous
+    // frame's footprint so the rasterizer only composites the current.
+    void ClearHoverPreviewBbox(EditEngine& engine);
 
     bool is_dragging_ = false;
     ToolMode paint_mode_ = ToolMode::Add;
@@ -51,6 +60,15 @@ private:
             stroke_bbox_z0_ = INT32_MAX;
     int32_t stroke_bbox_x1_ = INT32_MIN, stroke_bbox_y1_ = INT32_MIN,
             stroke_bbox_z1_ = INT32_MIN;
+
+    // Hover preview state — separate from stroke_bbox so a drag-start
+    // can flush the hover footprint cleanly without re-flushing the
+    // drag's own bbox math.
+    int32_t hover_bbox_x0_ = INT32_MAX, hover_bbox_y0_ = INT32_MAX,
+            hover_bbox_z0_ = INT32_MAX;
+    int32_t hover_bbox_x1_ = INT32_MIN, hover_bbox_y1_ = INT32_MIN,
+            hover_bbox_z1_ = INT32_MIN;
+    uint64_t hover_last_hash_ = 0;
 
     // MACVOXEL_PERF accumulators. Reset in ResetStrokeState; printed
     // once per stroke in OnMouseUp / Cancel.

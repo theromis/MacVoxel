@@ -187,11 +187,16 @@ bool BrushTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
                             const ViewContext& vc, const MouseEvent& e,
                             EditEngine& engine) {
     const ToolMode mode = e.mods.command ? ToolMode::Remove : ctx.tool.mode;
+    // Drop the hover ghost so the drag starts from a clean tex_t — the
+    // first stamp will re-paint the same cells at full alpha.
+    ClearHoverPreviewBbox(engine);
+    hover_last_hash_ = 0;
     ResetStrokeState();
     paint_mode_ = mode;
     is_dragging_ = true;
     state.drag_mode = DragMode::Paint;
     ctx.preview_active = true;
+    ctx.preview_alpha = 1.0f;  // committed-looking during the actual drag
     ctx.history.BeginOp();
     StampAtCursor(ctx, vc, e, mode, engine);
     return true;
@@ -211,6 +216,7 @@ void BrushTool::OnMouseUp(EditorContext& ctx, InteractionState& /*state*/,
     const auto t_total = perf::Now();
     SyncStrokeFromTexture(ctx, engine);
     ctx.preview_active = false;
+    ctx.preview_alpha = 1.0f;
     ctx.history.CommitOp();
     if (perf::Enabled()) {
         const double total_us = perf::Micros(perf::Now() - t_total);
@@ -226,6 +232,97 @@ void BrushTool::OnMouseUp(EditorContext& ctx, InteractionState& /*state*/,
     ResetStrokeState();
 }
 
+void BrushTool::ClearHoverPreviewBbox(EditEngine& engine) {
+    if (hover_bbox_x0_ > hover_bbox_x1_) return;
+    Bbox3 bb{};
+    bb.x0 = hover_bbox_x0_; bb.y0 = hover_bbox_y0_; bb.z0 = hover_bbox_z0_;
+    bb.x1 = hover_bbox_x1_; bb.y1 = hover_bbox_y1_; bb.z1 = hover_bbox_z1_;
+    engine.ClearPreviewBbox(bb);
+    hover_bbox_x0_ = hover_bbox_y0_ = hover_bbox_z0_ = INT32_MAX;
+    hover_bbox_x1_ = hover_bbox_y1_ = hover_bbox_z1_ = INT32_MIN;
+}
+
+// Per-frame hover preview. Re-dispatches the brush kernel into tex_t /
+// preview_rem whenever the picked cell or brush params change, gated
+// by a hash so a stationary cursor produces zero work. Clears the
+// previous frame's footprint so cells outside the current AOE don't
+// leak across moves.
+void BrushTool::Tick(EditorContext& ctx, InteractionState& state,
+                      const ViewContext& vc, ToolKind active_tool,
+                      bool escape_pressed, EditEngine& engine) {
+    if (is_dragging_) return;
+    const bool tool_active = (active_tool == ToolKind::Brush);
+    const bool eligible = tool_active && state.hover.has_point && !escape_pressed;
+    if (!eligible) {
+        if (hover_bbox_x0_ <= hover_bbox_x1_) {
+            ClearHoverPreviewBbox(engine);
+            ctx.preview_active = false;
+            ctx.preview_alpha = 1.0f;
+        }
+        hover_last_hash_ = 0;
+        return;
+    }
+
+    // Mode comes from the panel state (we can't see Cmd-modifier on a
+    // raw hover — the dispatcher hasn't been told about it). Add =
+    // most common case; Remove/Paint users will still see the right
+    // ghost when they click into Remove/Paint mode explicitly.
+    const ToolMode mode = ctx.tool.mode;
+    shapes::Vec3i target;
+    int face_axis = 2;
+    if (!vc.ComputeTargetCell(state.hover.local.x, state.hover.local.y, mode,
+                              &target, &face_axis)) {
+        if (hover_bbox_x0_ <= hover_bbox_x1_) {
+            ClearHoverPreviewBbox(engine);
+            ctx.preview_active = false;
+            ctx.preview_alpha = 1.0f;
+        }
+        hover_last_hash_ = 0;
+        return;
+    }
+
+    // Hash everything the kernel reads. A repeated dispatch on the same
+    // hash is identical work — skip.
+    auto mix = [](uint64_t h, uint64_t v) {
+        return h ^ (v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+    };
+    uint64_t h = 0xcbf29ce484222325ULL;
+    h = mix(h, static_cast<uint32_t>(target.x));
+    h = mix(h, static_cast<uint32_t>(target.y));
+    h = mix(h, static_cast<uint32_t>(target.z));
+    h = mix(h, static_cast<uint32_t>(face_axis));
+    h = mix(h, static_cast<uint32_t>(mode));
+    h = mix(h, static_cast<uint32_t>(ctx.tool.brush_size));
+    h = mix(h, static_cast<uint32_t>(ctx.tool.brush_shape));
+    h = mix(h, ctx.tool.brush_3d ? 1u : 0u);
+    h = mix(h, ctx.tool.palette_idx);
+    h |= 1ULL;
+    if (h == hover_last_hash_) {
+        // Keep preview_active/alpha pinned so other tools' Ticks
+        // don't accidentally clear them between our frames.
+        ctx.preview_active = true;
+        ctx.preview_alpha = 0.55f;
+        return;
+    }
+    hover_last_hash_ = h;
+
+    // Dispatch + record the new footprint as our owned bbox.
+    ClearHoverPreviewBbox(engine);
+    const BrushParams p = BuildParams(ctx, target.x, target.y, target.z,
+                                       face_axis, mode);
+    engine.BrushStamp(p);
+    const int lo = p.lo_x;
+    const int hi = lo + p.size_x - 1;
+    hover_bbox_x0_ = target.x + lo;
+    hover_bbox_y0_ = target.y + lo;
+    hover_bbox_z0_ = target.z + lo;
+    hover_bbox_x1_ = target.x + hi;
+    hover_bbox_y1_ = target.y + hi;
+    hover_bbox_z1_ = target.z + hi;
+    ctx.preview_active = true;
+    ctx.preview_alpha = 0.55f;
+}
+
 void BrushTool::Cancel(EditorContext& ctx, InteractionState& /*state*/,
                        EditEngine& engine) {
     if (!is_dragging_) return;
@@ -235,6 +332,7 @@ void BrushTool::Cancel(EditorContext& ctx, InteractionState& /*state*/,
     const auto t_total = perf::Now();
     SyncStrokeFromTexture(ctx, engine);
     ctx.preview_active = false;
+    ctx.preview_alpha = 1.0f;
     ctx.history.CommitOp();
     if (perf::Enabled()) {
         const double total_us = perf::Micros(perf::Now() - t_total);
