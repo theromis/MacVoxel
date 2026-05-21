@@ -469,6 +469,24 @@ with `screencapture -R x,y,w,h /tmp/foo.png` and `Read` it; the
 window position + size come from
 `CGWindowListCopyWindowInfo`.
 
+**UI / gesture testing: Paul does it, not you.** Anything that
+requires actually moving the mouse, clicking, dragging, or watching
+a sequence of frames is Paul's job — he'll exercise the change in
+the running app and report back what he sees. Your job is to:
+
+1. Build cleanly (`cmake --build build`).
+2. Run the headless md5 sanity check if the renderer / path tracer
+   could be affected.
+3. Launch the app and (optionally) take a static screenshot of the
+   initial state to confirm the panels / chrome look right.
+4. Hand off — describe what should happen and ask for results.
+
+Do **not** install `cliclick`, drive `osascript` mouse events,
+simulate drags via CGEvent, or otherwise try to puppet the cursor
+to test interaction. Those scripts are flaky on the user's machine
+(focus stealing, accessibility prompts, coordinate space drift) and
+take longer than just asking. Wait for Paul's report.
+
 ## Conventions Paul has set
 
 These came up repeatedly during development and are worth not
