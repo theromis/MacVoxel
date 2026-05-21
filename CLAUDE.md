@@ -41,6 +41,18 @@ commits on `main`. As of 2026-05-16:
   cell-skip so doc cells "disappear" live during the drag.
   `commit_generic bm=Erase` consumes the mask. Unblocked the Face
   and Brush migrations onto `commit_generic`.
+- **Mutators + hover preview (2026-05-21)**: third tool category —
+  cursor-AOE like a Brush, parameterized like a Generator, but reads
+  existing voxel state in its AOE and emits a heterogeneous edit.
+  Foliage v1 (grow new voxels adjacent to seed-color cells) is the
+  first kind. Same change introduced the hover-preview architecture:
+  rasterizer `preview_alpha` uniform alpha-blends preview cells over
+  whatever's behind them; `Tool::Tick` now takes a `ViewContext` so
+  per-frame hover dispatches can pick the cursor cell; Brush + Mutator
+  both dispatch their kernel into `tex_t` on cursor-cell change at
+  alpha 0.55, clearing the previous frame's bbox via
+  `clearPreviewBbox`. See "Mutator architecture" + "Hover preview"
+  below.
 
 The CPU `PreviewOverlay` is dormant — every active-development tool
 now writes `tex_t` instead. The rasterizer still binds the legacy
@@ -51,7 +63,8 @@ can wander outside the EditVolume during drag.
 Deferred polish, not yet implemented:
 
 - Brush-size quick-keys (`[` / `]`). Tool / mode letter keys
-  (V / L / B / F / M / T / R / G) are wired in `MetalScene` keyDown.
+  (V / L / B / F / U / M / T / R / G) are wired in `MetalScene` keyDown
+  (U = Mutator).
 - Drag-drop a `.vox` onto the running window (cold-launch via Finder
   Open With works through `.onOpenURL`).
 - Theme parity vs the old `ui/Theme.cpp` pro-app dark.
@@ -147,12 +160,25 @@ src/
 │                          cell-of-dispatch-bbox, writes palette to
 │                          tex_t when inside shape and in bounds,
 │                          else 0.
+├── MutatorEngine.{h,mm}   Mutator kernel dispatcher. One PSO per
+│                          Kind (v1: Foliage). dispatchInto writes
+│                          a delta into tex_t (+ later preview_rem
+│                          for Erode-style kinds) based on the
+│                          live-composited read of tex_a + tex_t +
+│                          preview_rem.
+├── Mutators.metal         foliage_main — thread-per-cell-of-AOE-bbox,
+│                          live-composited read via mutator_effective
+│                          helper, 6-neighbor seed-color predicate,
+│                          PCG3D `hash3(cell, stroke_id)` density
+│                          gate. Future kinds slot in next to it.
 │
 │   Editor state — the EditorContext bundle
 ├── EditorContext.{h,cpp}  Single-document editor context.
 ├── ToolState.h            `ToolSettings`. (File still named ToolState
 │                          for git-history reasons.)
 ├── GeneratorState.h       Active generator kind + Params.
+├── Mutators.h             `mutators::Kind` + `Params` (pure C++).
+├── MutatorState.h         Active mutator kind + tuned params.
 ├── PanelState.h           Drag-coalescing state for SwiftUI panels.
 ├── RenderState.h          `RenderSettings` + `RenderProgress`.
 ├── EditHistory.{h,cpp}    Stroke-grained undo/redo. `RecordBatch`
@@ -218,6 +244,16 @@ src/
 │                                  commit). Tick-time dirty check via
 │                                  ShouldDispatch. Commit() exposed
 │                                  publicly for Enter-key handler.
+├── MutatorTool.{h,cpp}            Cursor-AOE Mutator. Tick dispatches
+│                                  Foliage kernel into tex_t on cursor-
+│                                  cell change w/ hover stroke_id (ghost
+│                                  preview at alpha 0.55); OnMouseDown
+│                                  adopts the hover stroke_id so the
+│                                  first stamp = ghost cells, just
+│                                  promoted to opaque. DrawOverlay walks
+│                                  AOE-plane bitmaps and XOR-emits
+│                                  boundary edges where AOE contacts
+│                                  doc surfaces / volume walls.
 ├── MarqueeController.{h,cpp}      Selection (unchanged).
 ├── BoxSelectController.{h,cpp}    Selection (unchanged).
 ├── FloodSelectController.{h,cpp}  Selection (unchanged).
@@ -353,18 +389,22 @@ The `Tool` virtual interface:
   - `OnMouseDown` / `OnMouseDragged` / `OnMouseUp` (with
     `EditorContext`, `InteractionState`, `ViewContext`, `MouseEvent`,
     `EditEngine&`)
-  - `Tick` (per-frame, used by Generator for dirty-checking the gizmo)
-  - `DrawOverlay` (overlay rendering — only Generator has one today)
+  - `Tick` (per-frame; takes a `ViewContext` so hover-preview tools
+    can pick the cursor cell. Generator dirty-checks its gizmo;
+    Brush + Mutator dispatch their hover preview kernels)
+  - `DrawOverlay` (overlay rendering — Generator draws its gizmo,
+    Mutator draws the AOE-contact contour)
   - `IsDragging` / `Cancel`
   - `DispatchParamsHash` + `ShouldDispatch` (the dispatch-on-state-change
     helper — see "Tool perf rule" below)
 
 | Tool | File | Notes |
 | --- | --- | --- |
-| Brush | `BrushTool.{h,cpp}` | Writes `tex_t` (Add / Paint) or `preview_rem` (Remove); commits via `commit_generic` at mouseUp. |
+| Brush | `BrushTool.{h,cpp}` | Writes `tex_t` (Add / Paint) or `preview_rem` (Remove); commits via `commit_generic` at mouseUp. `Tick` does the hover ghost dispatch. |
 | Shape | `ShapeTool.{h,cpp}` | Line/Circle/Square/Box. Writes `tex_t` / `preview_rem` per mode; commits via `commit_generic`. `BeginShapeAnchor` is a free function here, also called by Generator. |
 | Face | `FaceTool.{h,cpp}` | CPU flood + `shape_stamp_cells` (per-cell scatter into `tex_t` for palette != 0, `preview_rem` for palette == 0); commits via `commit_generic`. |
 | Generator | `GeneratorTool.{h,cpp}` | Persistent gizmo (drag-out → idle-with-handles → commit). Public `Commit` so MetalScene's Enter-key handler can fire it. `HasActiveGizmo` for the dispatcher's special-case intercept. |
+| Mutator | `MutatorTool.{h,cpp}` | Cursor-AOE. `Tick` dispatches Foliage kernel into `tex_t` on cursor-cell change (ghost preview); `OnMouseDown` adopts the hover `stroke_id` for seamless click → opaque handoff. `DrawOverlay` emits the AOE-contact contour. |
 
 `EditEngine` (`src/EditEngine.{h,mm}`) is the pure-C++ façade tools
 call into instead of the old `std::function` closures. The Obj-C++
@@ -378,6 +418,95 @@ blend (Add / Erase / Replace / Intersect) + brush-source selector
 (`tex_t` / `preview_rem` for the preview path, constant fill
 otherwise). Every volume-writing tool's commit routes through it.
 
+## Mutator architecture (Foliage v1)
+
+A Mutator is a hybrid of Brush and Generator: cursor-centered AOE
+like a brush, parameter-driven like a generator, but the kernel
+**reads existing voxel state in its AOE** and emits a delta. This
+unlocks the class of "look at the neighborhood, then decide" tools
+(foliage growth, erosion, weathering, greebles) that pure-generative
+or stateless-brush tools can't express.
+
+Three things in particular are worth knowing:
+
+1. **Live-composited read.** The kernel doesn't sample `tex_a`
+   directly — it samples `effective(c) = preview_rem ? 0 :
+   (tex_t != 0 ? tex_t : tex_a)`. Inside a single stroke,
+   freshly-stamped cells become seeds for the next stamp, so a
+   bush *grows* under the cursor instead of just stamping the
+   same pattern. The `mutator_effective` helper in
+   `Mutators.metal` implements this.
+
+2. **Hover stroke_id handoff.** The hover Tick allocates a
+   `hover_stroke_id_` once per uninterrupted hover session and
+   uses it as the RNG salt; `OnMouseDown` adopts that same id as
+   the drag's `stroke_id_` so the first stamp produces *exactly
+   the cells the user was already seeing* — only the preview
+   alpha snaps from 0.55 to 1.0. New strokes get a fresh id, so
+   re-strokes produce new candidate cells (the path Paul uses to
+   thicken a bush by clicking over the same area repeatedly).
+
+3. **Two-pass commit.** mouseUp fires `commit_generic bm=Add`
+   then `bm=Erase` over the union bbox. Foliage v1 only writes
+   `tex_t` (the Erase pass is a no-op for it), but the
+   infrastructure is in place so future kinds that need to
+   delete cells (Erode, Weather) wire through the same
+   commit-and-readback path.
+
+The contour outline in `MutatorTool::DrawOverlay` is what
+distinguishes "didn't fire because not in AOE" from "didn't fire
+because the rule said no." For each plane crossing the AOE, build
+a 2D bitmap of "barrier cell-faces" (faces between an occupied
+doc cell and an empty one, or faces on an edit-volume wall) inside
+the AOE footprint, then XOR-walk the 2D edges — emit each edge iff
+exactly one of its adjacent cell-faces is a barrier. Interior
+shared edges cancel; coplanar runs naturally collapse to single
+straight lines without a separate dedup pass.
+
+## Hover preview (ghost composite)
+
+Brush and Mutator dispatch their preview kernel on every frame the
+cursor cell or tool params change, *before* a click. The rasterizer
+alpha-blends the resulting preview cells over whatever's behind
+them at `ctx.preview_alpha = 0.55` (the "ghost"). On `OnMouseDown`
+the tool sets `preview_alpha = 1.0` and the same cells re-render
+opaque — the ghost feels like it "settled" into place.
+
+Implementation invariants:
+
+- **`Tool::Tick(EditorContext&, InteractionState&, ViewContext&,
+  ToolKind active_tool, bool escape, EditEngine&)`** — fires every
+  frame from `MetalScene drawInMTKView`. Tools dispatching hover
+  previews override Tick and use `vc.ComputeTargetCell` to pick
+  the cursor cell.
+
+- **Per-frame bbox clear.** Each tool stores its
+  `hover_bbox_{x,y,z}{0,1}_` from the last dispatch and calls
+  `EditEngine::ClearPreviewBbox` at the start of every new
+  dispatch (or when becoming ineligible — cursor leaves viewport,
+  tool switches, Esc). Without this, previous-frame footprint
+  cells leak across cursor moves.
+
+- **`ctx.preview_active` + `ctx.preview_alpha`.** A tool that
+  *owns* the hover preview sets both (`active = true`, `alpha =
+  0.55`) when dispatching, and clears both back to `false` /
+  `1.0` when becoming ineligible. The Mutator/Brush mutual-
+  exclusion is handled by Tick's `active_tool` check — switching
+  tools triggers the outgoing tool's Tick to clear, the incoming
+  tool's Tick to set.
+
+- **Rasterizer ghost path.** The DDA captures the first preview
+  hit, sets `skip_preview = true` to keep marching, and at the
+  terminal hit (doc cell, FB cell, or sky) returns
+  `mix(backdrop_color, ghost_color, preview_alpha)`. See the
+  `ghost_seen` / `skip_preview` block in `RaycastRenderer.mm`.
+
+The wireframe AOE indicator we briefly tried during development was
+redundant with the ghost cells for Brush (Brush ghost == exactly
+what Brush will write). Mutator still gets a wireframe via
+`DrawOverlay`, but it's the contour outline above, not a floating
+cube — that distinguishes AOE reach from rule-filtered output.
+
 ## Tool perf rule: dispatch only on state change
 
 The single biggest perf lesson from the B3 phase: **don't dispatch
@@ -389,9 +518,15 @@ hash construction:
   - FaceTool hashes `d` + `face_with`.
   - GeneratorTool hashes `gs.active_kind` + bounds + palette + the
     per-kind params; called from `Tick`, not `OnMouseDragged`.
-  - BrushTool skips — each stamp is at a new cursor cell, and
-    `BrushTool::StampAtCursor`'s per-cell `last_drag_edit_cell` check
-    already covers the case.
+  - MutatorTool hashes cursor cell + kind + foliage params + brush
+    size/shape/3d + `stroke_id_`; both the drag-time `OnMouseDragged`
+    and the hover-time `Tick` route through the same hash, with a
+    separate `hover_last_hash_` so hover and drag dispatches don't
+    interfere.
+  - BrushTool skips during drag — each stamp is at a new cursor cell,
+    and `BrushTool::StampAtCursor`'s per-cell `last_drag_edit_cell`
+    check already covers the case. Hover-time Tick uses its own hash
+    over cursor cell + mode + brush params.
 
 If you add a new tool, override `Tool::DispatchParamsHash`, call
 `ResetDispatchHash()` from your `OnMouseDown`, and gate the kernel
