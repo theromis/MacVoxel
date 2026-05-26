@@ -3,7 +3,7 @@
 #include "EditorContext.h"
 #include "Input.h"
 #include "Selection.h"
-#include "SelectionOps.h"
+#include "SelectionLift.h"
 #include "Shapes.h"
 #include "ViewContext.h"
 #include "VoxelGrid.h"
@@ -22,6 +22,8 @@ bool OnMouseDown(EditorContext& ctx, InteractionState& state,
     b.min_x = b.max_x = pick.x;
     b.min_y = b.max_y = pick.y;
     b.min_z = b.max_z = pick.z;
+    // Box-mode preview: stores the bbox on the selection so the
+    // overlay can draw the wireframe during drag. Not a real lift yet.
     ctx.selection.SetBox(b);
     return true;
 }
@@ -43,12 +45,12 @@ void OnMouseDragged(EditorContext& ctx,
 
 void OnMouseUp(EditorContext& ctx) {
     const Bounds3 b = ctx.selection.bounds();
-    SelectCellsWhere(ctx, [&](int32_t cx, int32_t cy, int32_t cz,
-                              uint8_t /*pal*/) {
-        return (cx >= b.min_x && cx <= b.max_x &&
-                cy >= b.min_y && cy <= b.max_y &&
-                cz >= b.min_z && cz <= b.max_z);
-    });
+    // Clear the box-mode preview before lifting (lift sets its own
+    // lift_active+bounds; the box-mode preview was a transient
+    // visualization during the drag).
+    ctx.selection.Clear();
+    if (b.empty()) return;
+    lift::LiftSelection(ctx, b);
 }
 
 }  // namespace macvoxel::box_select_controller

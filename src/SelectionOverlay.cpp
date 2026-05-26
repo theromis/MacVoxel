@@ -1,16 +1,11 @@
 #include "SelectionOverlay.h"
 
-#include <array>
 #include <cstdint>
-#include <unordered_set>
-#include <vector>
 
 #include <simd/simd.h>
 
 #include "Camera.h"
-#include "CellKey.h"
 #include "EditorContext.h"
-#include "FloatingBuffer.h"
 #include "InteractionState.h"
 #include "OverlayDraw.h"
 #include "Selection.h"
@@ -27,34 +22,6 @@ constexpr int kEdges[12][2] = {
     {0, 1}, {1, 2}, {2, 3}, {3, 0},
     {4, 5}, {5, 6}, {6, 7}, {7, 4},
     {0, 4}, {1, 5}, {2, 6}, {3, 7},
-};
-
-// Per-face edge order (4 edges per face) used by the silhouette
-// wireframe. Order: +X, -X, +Y, -Y, +Z, -Z.
-constexpr int kFaceEdges[6][4][2] = {
-    {{1, 2}, {2, 6}, {6, 5}, {5, 1}},
-    {{0, 3}, {3, 7}, {7, 4}, {4, 0}},
-    {{3, 2}, {2, 6}, {6, 7}, {7, 3}},
-    {{0, 1}, {1, 5}, {5, 4}, {4, 0}},
-    {{4, 5}, {5, 6}, {6, 7}, {7, 4}},
-    {{0, 1}, {1, 2}, {2, 3}, {3, 0}},
-};
-
-constexpr int kNeighbor[6][3] = {
-    {+1, 0, 0}, {-1, 0, 0},
-    {0, +1, 0}, {0, -1, 0},
-    {0, 0, +1}, {0, 0, -1},
-};
-
-// Face outward normal in world space (after R = (gx, gz, -gy)):
-// grid +X→world +X, grid +Y→world -Z, grid +Z→world +Y.
-constexpr simd::float3 kFaceNormalWorld[6] = {
-    { 1.0f,  0.0f,  0.0f},
-    {-1.0f,  0.0f,  0.0f},
-    { 0.0f,  0.0f, -1.0f},
-    { 0.0f,  0.0f,  1.0f},
-    { 0.0f,  1.0f,  0.0f},
-    { 0.0f, -1.0f,  0.0f},
 };
 
 void ProjectCorners(simd::float3 gmin, simd::float3 gmax,
@@ -118,10 +85,7 @@ void DrawSelection(const ViewContext& vc, OverlayDraw& od) {
     if (vc.ctx == nullptr) return;
     const EditorContext& ctx = *vc.ctx;
     const Selection& sel = ctx.selection;
-    const FloatingBuffer& fb = ctx.floating_buffer;
-    const bool show_doc_sel = sel.active() && !sel.bounds().empty();
-    const bool show_floating = fb.active && !fb.grid.empty();
-    if (!show_doc_sel && !show_floating) return;
+    if (!sel.active() || sel.bounds().empty()) return;
 
     const float w = vc.viewport_w;
     const float h = vc.viewport_h;
@@ -130,104 +94,21 @@ void DrawSelection(const ViewContext& vc, OverlayDraw& od) {
     const simd::float4x4 vp =
         vc.camera.ProjectionMatrix(aspect) * vc.camera.ViewMatrix();
 
-    // Outer AABB. Voxels span [c, c+1] so the outer faces are at
-    // min..max+1. When the floating buffer is active, take its bounds
-    // + offset; the doc-side selection bounds are stale during a drag
-    // (we don't shift them per frame for performance reasons — the
-    // whole point of FloatingBuffer is O(1) drag work).
-    {
-        Bounds3 b{};
-        if (show_floating) {
-            const Bounds3 gb = fb.grid.Bounds();
-            b.min_x = gb.min_x + fb.offset_x;
-            b.min_y = gb.min_y + fb.offset_y;
-            b.min_z = gb.min_z + fb.offset_z;
-            b.max_x = gb.max_x + fb.offset_x;
-            b.max_y = gb.max_y + fb.offset_y;
-            b.max_z = gb.max_z + fb.offset_z;
-        } else {
-            b = sel.bounds();
-        }
-        const simd::float3 box_min{static_cast<float>(b.min_x),
-                                   static_cast<float>(b.min_y),
-                                   static_cast<float>(b.min_z)};
-        const simd::float3 box_max{static_cast<float>(b.max_x + 1),
-                                   static_cast<float>(b.max_y + 1),
-                                   static_cast<float>(b.max_z + 1)};
-        simd::float2 screen[8];
-        bool valid[8];
-        ProjectCorners(box_min, box_max, vp, w, h, screen, valid);
-        StrokeEdges(screen, valid, kEdges, 12,
-                    Rgba8(255, 220, 80, 255), 1.5f, od);
-    }
-
-    // Per-voxel highlights. Doc-side selection now gets a GPU-side
-    // tint via `tex_sel` (sampled in the rasterizer fragment shader);
-    // the only thing the CPU overlay still needs to do for that branch
-    // is the AABB wire above. Floating-buffer cells live at an offset
-    // outside `tex_sel`'s frame of reference, so they keep their CPU-
-    // side per-cell silhouette pass for now (retired when FB itself
-    // retires in a later step).
-    if (!show_floating) return;
-
-    constexpr size_t kFloatingWireMax = 200000;
-    const size_t nfilled = static_cast<size_t>(fb.grid.FilledCount());
-    if (nfilled == 0 || nfilled > kFloatingWireMax) return;
-
-    const simd::float3 cam = vc.camera.Position();
-    const uint32_t voxel_color = Rgba8(255, 220, 80, 200);
-
-    std::vector<std::array<int32_t, 3>> cells;
-    std::unordered_set<int64_t> selected_set;
-    cells.reserve(nfilled);
-    selected_set.reserve(nfilled * 2);
-    constexpr uint32_t kCS = VoxelGrid::kChunkSize;
-    for (const auto& [coord, chunk] : fb.grid.chunks()) {
-        if (chunk->filled_count == 0) continue;
-        const int32_t base_x = coord.x * static_cast<int32_t>(kCS);
-        const int32_t base_y = coord.y * static_cast<int32_t>(kCS);
-        const int32_t base_z = coord.z * static_cast<int32_t>(kCS);
-        for (uint32_t lz = 0; lz < kCS; ++lz)
-        for (uint32_t ly = 0; ly < kCS; ++ly)
-        for (uint32_t lx = 0; lx < kCS; ++lx) {
-            const size_t idx = lx + ly * kCS + lz * kCS * kCS;
-            if (chunk->cells[idx] == 0) continue;
-            const int32_t cx = base_x + static_cast<int32_t>(lx)
-                               + fb.offset_x;
-            const int32_t cy = base_y + static_cast<int32_t>(ly)
-                               + fb.offset_y;
-            const int32_t cz = base_z + static_cast<int32_t>(lz)
-                               + fb.offset_z;
-            cells.push_back({cx, cy, cz});
-            selected_set.insert(PackCellKey(cx, cy, cz));
-        }
-    }
-
-    for (const auto& v : cells) {
-        const simd::float3 cmin{static_cast<float>(v[0]),
-                                static_cast<float>(v[1]),
-                                static_cast<float>(v[2])};
-        const simd::float3 cmax{cmin.x + 1.0f, cmin.y + 1.0f, cmin.z + 1.0f};
-        simd::float2 screen[8];
-        bool valid[8];
-        ProjectCorners(cmin, cmax, vp, w, h, screen, valid);
-        const simd::float3 center_world{
-            cmin.x + 0.5f, cmin.z + 0.5f, -(cmin.y + 0.5f)};
-        for (int f = 0; f < 6; ++f) {
-            if (selected_set.count(PackCellKey(
-                    v[0] + kNeighbor[f][0],
-                    v[1] + kNeighbor[f][1],
-                    v[2] + kNeighbor[f][2]))) {
-                continue;  // interior face
-            }
-            const simd::float3 to_cam = cam - center_world;
-            if (simd_dot(to_cam, kFaceNormalWorld[f]) <= 0.0f) {
-                continue;  // back-facing
-            }
-            StrokeEdges(screen, valid, kFaceEdges[f], 4,
-                        voxel_color, 1.0f, od);
-        }
-    }
+    // Bbox outline only. Selection contents live in tex_lift (lift
+    // mode) and get their tint from the rasterizer's lift composite;
+    // box-mode preview during the marquee drag draws the wire here.
+    const Bounds3 b = sel.bounds();
+    const simd::float3 box_min{static_cast<float>(b.min_x),
+                               static_cast<float>(b.min_y),
+                               static_cast<float>(b.min_z)};
+    const simd::float3 box_max{static_cast<float>(b.max_x + 1),
+                               static_cast<float>(b.max_y + 1),
+                               static_cast<float>(b.max_z + 1)};
+    simd::float2 screen[8];
+    bool valid[8];
+    ProjectCorners(box_min, box_max, vp, w, h, screen, valid);
+    StrokeEdges(screen, valid, kEdges, 12,
+                Rgba8(255, 220, 80, 255), 1.5f, od);
 }
 
 void DrawHover(const InteractionState& state, const ViewContext& vc,

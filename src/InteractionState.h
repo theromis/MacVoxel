@@ -77,15 +77,15 @@ struct InteractionState {
         shapes::Vec3i anchor{0, 0, 0};
     } box_select;
 
-    // Cmd-drag on a selected voxel = move the selection in the
-    // click face's tangent plane. The actual lift / commit is
-    // delegated to the FloatingBuffer; we just track the drag plane
-    // and the offset value at click time so each frame can compute
-    // a new absolute offset from the cumulative cursor delta.
+    // Cmd-drag on a selected voxel = move the active lift in the
+    // click face's tangent plane. `start_bounds_min` snapshots
+    // sel.bounds().min at mouseDown so each frame can compute the
+    // target bounds min from anchor + cursor delta; the diff against
+    // the live lift_bounds drives the per-frame translate kernel.
     struct MoveSelect {
         int axis = 0;
         simd::float3 anchor_grid{0.0f, 0.0f, 0.0f};
-        shapes::Vec3i start_offset{0, 0, 0};
+        shapes::Vec3i start_bounds_min{0, 0, 0};
     } move_select;
 
     // Floating-buffer transform gizmo. While a buffer is alive we

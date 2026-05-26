@@ -2,6 +2,7 @@
 
 #import "BrushEngine.h"
 #import "GeneratorEngine.h"
+#import "LiftEngine.h"
 #import "MutatorEngine.h"
 #import "PathTraceRenderer.h"
 #import "RaycastRenderer.h"
@@ -24,8 +25,6 @@
 #include "EditHistory.h"
 #include "EditorContext.h"
 #include "FaceTool.h"
-#include "FloatingBuffer.h"
-#include "FloatingBufferOps.h"
 #include "FloodSelectController.h"
 #include "GeneratorState.h"
 #include "GeneratorTool.h"
@@ -38,6 +37,7 @@
 #include "Raycast.h"
 #include "RenderState.h"
 #include "Selection.h"
+#include "SelectionLift.h"
 #include "SelectionOps.h"
 #include "SelectionOverlay.h"
 #include "EditEngine.h"
@@ -68,6 +68,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     SceneOverlayRenderer *_overlayRenderer;
     GeneratorEngine *_generatorEngine;
     MutatorEngine *_mutatorEngine;
+    LiftEngine *_liftEngine;
     BrushEngine *_brushEngine;
     ShapeEngine *_shapeEngine;
     // Per-document GPU mirror of the voxel grid. Both renderers and
@@ -75,20 +76,16 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     // access::read_write, the rasterizer fragment shader reads.
     VolumeTexture *_docVolumeTex;
     uint64_t _docVolumeTexCachedVersion;
-    // Last `Selection::version()` we synced into the GPU selection mask.
-    // Bumped any time the user-space selection mutates; the rasterizer
-    // samples `_docVolumeTex.selectionTexture` to tint occupied cells.
-    uint64_t _selectionCachedVersion;
 
     macvoxel::Camera _camera;
     NSTrackingArea *_trackingArea;
 
-    // Tracks transitions for auto-committing the floating buffer:
-    // tool switch / entering render mode / etc. are "user moved on"
-    // gestures, so we drop whatever's floating before letting the new
-    // context see a stale buffer.
-    macvoxel::ToolKind _lastToolForFB;
-    macvoxel::RenderMode _lastModeForFB;
+    // Tracks transitions for auto-committing the lift: tool switch /
+    // entering render mode / etc. are "user moved on" gestures, so we
+    // commit whatever's lifted before letting the new context see a
+    // stale lift.
+    macvoxel::ToolKind _lastToolForLift;
+    macvoxel::RenderMode _lastModeForLift;
     macvoxel::RenderMode _lastRenderMode;
 
     // Modeling-side gesture state — drag mode + per-tool sub-structs.
@@ -188,23 +185,33 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         initWithDevice:device commandQueue:brushQueue];
     if (_mutatorEngine == nil) return nil;
 
+    // Lift kernel (selection finalize / translate / rotate / flip /
+    // commit / cancel). Same queue as the others — lift mutations are
+    // user-initiated and don't overlap with strokes.
+    _liftEngine = [[LiftEngine alloc]
+        initWithDevice:device commandQueue:brushQueue];
+    if (_liftEngine == nil) return nil;
+
     _docVolumeTex = [[VolumeTexture alloc]
         initWithDevice:device
                 volume:_ctx->document.volume_shadow];
     if (_docVolumeTex == nil) return nil;
     _docVolumeTexCachedVersion = 0;
-    _selectionCachedVersion = 0;
 
     _editEngine = macvoxel::MakeEditEngine(_brushEngine, _shapeEngine,
                                            _generatorEngine, _mutatorEngine,
+                                           _liftEngine,
                                            _docVolumeTex,
                                            _ctx->document.volume);
+    // SelectionOps + bridge actions reach the GPU dispatch through
+    // ctx.engine — same engine MetalScene owns.
+    _ctx->engine = _editEngine.get();
     _toolRegistry = std::make_unique<macvoxel::ToolRegistry>();
     _activeTool = nullptr;
 
     _lastRenderMode = macvoxel::RenderMode::Edit;
-    _lastToolForFB = _ctx->tool.tool;
-    _lastModeForFB = _ctx->render_settings.mode;
+    _lastToolForLift = _ctx->tool.tool;
+    _lastModeForLift = _ctx->render_settings.mode;
     return self;
 }
 
@@ -237,7 +244,6 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     // already mark every chunk dirty; resetting the cached version
     // ensures the sync path actually fires.
     _docVolumeTexCachedVersion = 0;
-    _selectionCachedVersion = 0;
 }
 
 - (BOOL)exportRenderToURL:(NSURL *)url error:(NSError **)error {
@@ -289,8 +295,8 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
             _activeTool = nullptr;
             return;
         }
-        if (_ctx->floating_buffer.active) {
-            [self autoCommitFloatingBuffer];
+        if (_ctx->selection.lift_active()) {
+            [self autoCommitLift];
             return;
         }
         // Nothing live to commit — fall through to super.
@@ -390,9 +396,9 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     return out;
 }
 
-- (void)autoCommitFloatingBuffer {
-    if (!_ctx->floating_buffer.active) return;
-    macvoxel::CommitFloatingBuffer(*_ctx);
+- (void)autoCommitLift {
+    if (!_ctx->selection.lift_active()) return;
+    macvoxel::lift::CommitLift(*_ctx);
 }
 
 // Eyedropper: cast a ray from the click into the grid; if it hits a
@@ -448,24 +454,23 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     _toolRegistry->TickAll(*_ctx, _interaction, [self viewContext],
                             _ctx->tool.tool, escape_now, *_editEngine);
 
-    // Auto-commit the floating buffer on "user moved on" gestures
+    // Auto-commit the active lift on "user moved on" gestures
     // detectable from the per-frame loop: tool switch and render-mode
     // toggle. (Other paths — save / open / new / deselect — handle
     // it themselves through bridge actions.)
     {
-        macvoxel::FloatingBuffer &fb_t = _ctx->floating_buffer;
         const macvoxel::ToolKind cur_tool = _ctx->tool.tool;
         const macvoxel::RenderMode cur_mode = _ctx->render_settings.mode;
-        if (fb_t.active) {
+        if (_ctx->selection.lift_active()) {
             const bool entering_render =
                 cur_mode != macvoxel::RenderMode::Edit &&
-                _lastModeForFB == macvoxel::RenderMode::Edit;
-            if (cur_tool != _lastToolForFB || entering_render) {
-                macvoxel::CommitFloatingBuffer(*_ctx);
+                _lastModeForLift == macvoxel::RenderMode::Edit;
+            if (cur_tool != _lastToolForLift || entering_render) {
+                macvoxel::lift::CommitLift(*_ctx);
             }
         }
-        _lastToolForFB = cur_tool;
-        _lastModeForFB = cur_mode;
+        _lastToolForLift = cur_tool;
+        _lastModeForLift = cur_mode;
     }
 
     // Build the overlay command list for this frame. The overlays draw
@@ -539,14 +544,9 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
             [_docVolumeTex syncFromVolume:_ctx->document.volume_shadow];
             _docVolumeTexCachedVersion = _ctx->document.geometry_version;
         }
-        // Sync the selection mask on Selection::version change. The
-        // rasterizer fragment shader reads `selectionTexture` to tint
-        // selected occupied cells; bounded by the union of last + new
-        // bboxes so unchanged regions don't get re-uploaded.
-        if (_selectionCachedVersion != _ctx->selection.version()) {
-            [_docVolumeTex syncFromSelection:_ctx->selection];
-            _selectionCachedVersion = _ctx->selection.version();
-        }
+        // The lift's GPU state (tex_lift) is mutated directly by lift
+        // kernels — no CPU mirror to sync. The bbox outline drawn by
+        // SelectionOverlay reads sel.bounds() each frame.
 
         id<MTLRenderCommandEncoder> enc =
             [cmd renderCommandEncoderWithDescriptor:pass];
@@ -620,13 +620,13 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     // registered with ToolRegistry; they don't write to the volume,
     // they manipulate the selection. Out of scope for this refactor.
     if (_ctx->tool.tool == macvoxel::ToolKind::Marquee) {
-        [self autoCommitFloatingBuffer];
+        [self autoCommitLift];
         macvoxel::marquee_controller::OnMouseDown(
             _interaction, [self mouseEventFromNSEvent:event]);
         return;
     }
     if (_ctx->tool.tool == macvoxel::ToolKind::BoxSelect) {
-        [self autoCommitFloatingBuffer];
+        [self autoCommitLift];
         if (!macvoxel::box_select_controller::OnMouseDown(
                 *_ctx, _interaction, [self viewContext],
                 [self mouseEventFromNSEvent:event])) {
@@ -635,7 +635,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         return;
     }
     if (_ctx->tool.tool == macvoxel::ToolKind::FloodSelect) {
-        [self autoCommitFloatingBuffer];
+        [self autoCommitLift];
         macvoxel::flood_select_controller::OnMouseDown(
             *_ctx, [self viewContext], [self mouseEventFromNSEvent:event]);
         _interaction.drag_mode = DragMode::None;
@@ -648,7 +648,7 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         _interaction.drag_mode = DragMode::None;
         return;
     }
-    [self autoCommitFloatingBuffer];
+    [self autoCommitLift];
     const macvoxel::MouseEvent me = [self mouseEventFromNSEvent:event];
     if (tool->OnMouseDown(*_ctx, _interaction, [self viewContext], me,
                           *_editEngine)) {

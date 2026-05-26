@@ -4,7 +4,6 @@
 
 #include "Document.h"
 #include "EditorContext.h"
-#include "FloatingBuffer.h"
 #include "Raycast.h"
 #include "Selection.h"
 #include "VoxelGrid.h"
@@ -201,31 +200,16 @@ bool ViewContext::PickCell(float local_x, float local_y,
     simd::float3 ray_origin_grid, ray_dir_grid;
     if (!RayAt(local_x, local_y, &ray_origin_grid, &ray_dir_grid)) return false;
 
-    // Match the GPU dual-volume DDA: raycast both the document grid
-    // and (if active) the floating buffer, take whichever the ray hits
-    // first. Without this, Cmd-drag on a buffer that's been moved off
-    // its lifted-from doc cells fails because the picker can't see
-    // them — they exist only in the buffer.
-    RayHit hit_doc, hit_buf;
-    bool got_doc = Raycast(doc.grid, ray_origin_grid, ray_dir_grid,
-                           4096.0f, &hit_doc);
-    bool got_buf = false;
-    const FloatingBuffer& fb = ctx->floating_buffer;
-    if (fb.active && !fb.grid.empty()) {
-        const simd::float3 origin_buf{
-            ray_origin_grid.x - static_cast<float>(fb.offset_x),
-            ray_origin_grid.y - static_cast<float>(fb.offset_y),
-            ray_origin_grid.z - static_cast<float>(fb.offset_z),
-        };
-        got_buf = Raycast(fb.grid, origin_buf, ray_dir_grid,
-                          4096.0f, &hit_buf);
-    }
-    if (got_doc || got_buf) {
-        const bool from_buf = got_buf && (!got_doc || hit_buf.t < hit_doc.t);
-        const RayHit& hit = from_buf ? hit_buf : hit_doc;
-        out_cell->x = hit.x + (from_buf ? fb.offset_x : 0);
-        out_cell->y = hit.y + (from_buf ? fb.offset_y : 0);
-        out_cell->z = hit.z + (from_buf ? fb.offset_z : 0);
+    // Picking goes against the doc grid only. The lift lives on the
+    // GPU (`tex_lift`); we don't currently maintain a CPU mirror, so
+    // clicking on a lift cell that has wandered off its source isn't
+    // picked here. Cmd-drag uses sel.bounds() as a coarse bbox test
+    // in MoveSelectController to compensate.
+    RayHit hit;
+    if (Raycast(doc.grid, ray_origin_grid, ray_dir_grid, 4096.0f, &hit)) {
+        out_cell->x = hit.x;
+        out_cell->y = hit.y;
+        out_cell->z = hit.z;
         return true;
     }
     // Empty-space fallback: snap to whichever wall of the edit volume
@@ -333,31 +317,13 @@ bool ViewContext::PickFace(float local_x, float local_y,
     simd::float3 ray_origin_grid, ray_dir_grid;
     if (!RayAt(local_x, local_y, &ray_origin_grid, &ray_dir_grid)) return false;
 
-    // Same dual-volume strategy the renderer uses: try both grids and
-    // take whichever is hit first. Without this, Cmd-drag on a moved
-    // floating buffer fails because the doc-only picker can't see the
-    // lifted cells anymore.
-    RayHit hit_doc, hit_buf;
-    bool got_doc = Raycast(doc.grid, ray_origin_grid, ray_dir_grid,
-                           4096.0f, &hit_doc);
-    bool got_buf = false;
-    const FloatingBuffer& fb = ctx->floating_buffer;
-    if (fb.active && !fb.grid.empty()) {
-        const simd::float3 origin_buf{
-            ray_origin_grid.x - static_cast<float>(fb.offset_x),
-            ray_origin_grid.y - static_cast<float>(fb.offset_y),
-            ray_origin_grid.z - static_cast<float>(fb.offset_z),
-        };
-        got_buf = Raycast(fb.grid, origin_buf, ray_dir_grid,
-                          4096.0f, &hit_buf);
-    }
-    if (got_doc || got_buf) {
-        const bool from_buf = got_buf && (!got_doc || hit_buf.t < hit_doc.t);
-        const RayHit& hit = from_buf ? hit_buf : hit_doc;
+    // Doc-only picking (see PickCell for the lift caveat).
+    RayHit hit;
+    if (Raycast(doc.grid, ray_origin_grid, ray_dir_grid, 4096.0f, &hit)) {
         if (hit.axis < 0) return false;  // ray started inside a voxel
-        out_cell->x = hit.x + (from_buf ? fb.offset_x : 0);
-        out_cell->y = hit.y + (from_buf ? fb.offset_y : 0);
-        out_cell->z = hit.z + (from_buf ? fb.offset_z : 0);
+        out_cell->x = hit.x;
+        out_cell->y = hit.y;
+        out_cell->z = hit.z;
         *out_axis = hit.axis;
         *out_sign = hit.sign;
         if (out_color) *out_color = hit.color;
@@ -391,16 +357,11 @@ bool ViewContext::PickFace(float local_x, float local_y,
 
 bool ViewContext::XformGizmoBounds(Bounds3* out) const {
     if (ctx == nullptr) return false;
-    const FloatingBuffer& fb = ctx->floating_buffer;
-    if (fb.active && !fb.grid.empty()) {
-        Bounds3 wb = fb.grid.Bounds();
-        wb.min_x += fb.offset_x; wb.max_x += fb.offset_x;
-        wb.min_y += fb.offset_y; wb.max_y += fb.offset_y;
-        wb.min_z += fb.offset_z; wb.max_z += fb.offset_z;
-        *out = wb;
+    const Selection& sel = ctx->selection;
+    if (sel.lift_active()) {
+        *out = sel.bounds();
         return true;
     }
-    const Selection& sel = ctx->selection;
     if (sel.active() && !sel.empty()) {
         *out = sel.bounds();
         return true;
@@ -455,14 +416,9 @@ int ViewContext::XformHandleDragVoxels(int face,
     const simd::float4x4 vp =
         camera.ProjectionMatrix(aspect) * camera.ViewMatrix();
 
-    // World-space face geometry of the *original* (drag-start) bounds
-    // — anchoring against a moving face would make 1 voxel of cursor
-    // travel ≠ 1 voxel of growth, so the drag mapping would drift.
+    // World-space face geometry of the *original* (drag-start) bounds.
+    // Lift bounds are already in world coords; no offset needed.
     Bounds3 wb = start_bounds;
-    const FloatingBuffer& fb = ctx->floating_buffer;
-    wb.min_x += fb.offset_x; wb.max_x += fb.offset_x;
-    wb.min_y += fb.offset_y; wb.max_y += fb.offset_y;
-    wb.min_z += fb.offset_z; wb.max_z += fb.offset_z;
 
     simd::float3 cw, nw;
     XformFaceWorldGeom(wb, face, &cw, &nw);

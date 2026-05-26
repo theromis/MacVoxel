@@ -1,6 +1,5 @@
 #import "VolumeTexture.h"
 
-#include "Selection.h"
 #include "VoxelGrid.h"  // Bounds3
 #include "VoxelVolume.h"
 
@@ -15,19 +14,14 @@
     id<MTLTexture> _previewOracleTexture;
     id<MTLTexture> _previewRemTexture;
     id<MTLTexture> _previewRemOracleTexture;
-    id<MTLTexture> _selectionTexture;
-    id<MTLTexture> _selectionOracleTexture;
+    id<MTLTexture> _liftTexture;
+    id<MTLTexture> _liftOracleTexture;
+    id<MTLTexture> _liftSnapshotTexture;
     int _chunksX;
     int _chunksY;
     int _chunksZ;
     int _strideX;     // bytes per row in the dense buffer (= size_x)
     int _strideZ;     // bytes per slice (= size_x * size_y)
-    // Last bbox uploaded into _selectionTexture. The next sync zeros
-    // out the leftover region (lastBbox minus newBbox) before painting
-    // the new contents — saves us a full-volume zero on every change.
-    // {INT32_MAX, INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN, INT32_MIN}
-    // is the sentinel for "nothing uploaded yet."
-    macvoxel::Bounds3 _lastSelBbox;
 }
 
 - (nullable instancetype)initWithDevice:(id<MTLDevice>)device
@@ -54,12 +48,7 @@
                                                         mipmapped:NO];
     desc.textureType = MTLTextureType3D;
     desc.depth = (NSUInteger)_sizeZ;
-    // ShaderRead for rasterizer sampling; ShaderWrite so the brush
-    // compute kernel can write through `access::read_write`. R8Uint is
-    // in the Apple Silicon read-write pixel format subset.
     desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-    // Shared storage on Apple Silicon (unified memory). Required for
-    // `replaceRegion:` uploads — Private textures are blit-only.
     desc.storageMode = MTLStorageModeShared;
     _texture = [device newTextureWithDescriptor:desc];
     if (_texture == nil) return nil;
@@ -78,53 +67,38 @@
     if (_oracleTexture == nil) return nil;
     [_oracleTexture setLabel:@"VolumeTexture.oracle"];
 
-    MTLTextureDescriptor* previewDesc =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Uint
-                                                            width:(NSUInteger)_sizeX
-                                                           height:(NSUInteger)_sizeY
-                                                        mipmapped:NO];
-    previewDesc.textureType = MTLTextureType3D;
-    previewDesc.depth = (NSUInteger)_sizeZ;
-    previewDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-    previewDesc.storageMode = MTLStorageModeShared;
-    _previewTexture = [device newTextureWithDescriptor:previewDesc];
+    _previewTexture = [device newTextureWithDescriptor:desc];
     if (_previewTexture == nil) return nil;
     [_previewTexture setLabel:@"VolumeTexture.previewTex"];
 
-    MTLTextureDescriptor* previewOracleDesc =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Uint
-                                                            width:(NSUInteger)_chunksX
-                                                           height:(NSUInteger)_chunksY
-                                                        mipmapped:NO];
-    previewOracleDesc.textureType = MTLTextureType3D;
-    previewOracleDesc.depth = (NSUInteger)_chunksZ;
-    previewOracleDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-    previewOracleDesc.storageMode = MTLStorageModeShared;
-    _previewOracleTexture = [device newTextureWithDescriptor:previewOracleDesc];
+    _previewOracleTexture = [device newTextureWithDescriptor:oracleDesc];
     if (_previewOracleTexture == nil) return nil;
     [_previewOracleTexture setLabel:@"VolumeTexture.previewOracle"];
 
-    // preview_rem mask — same dims/usage as previewTexture; allocated
-    // fresh-zero (Metal default) so a brand-new doc has nothing masked.
-    _previewRemTexture = [device newTextureWithDescriptor:previewDesc];
+    _previewRemTexture = [device newTextureWithDescriptor:desc];
     if (_previewRemTexture == nil) return nil;
     [_previewRemTexture setLabel:@"VolumeTexture.previewRem"];
 
-    _previewRemOracleTexture =
-        [device newTextureWithDescriptor:previewOracleDesc];
+    _previewRemOracleTexture = [device newTextureWithDescriptor:oracleDesc];
     if (_previewRemOracleTexture == nil) return nil;
     [_previewRemOracleTexture setLabel:@"VolumeTexture.previewRemOracle"];
 
-    // Selection mask + its oracle — same dims/usage as the preview pair.
-    _selectionTexture = [device newTextureWithDescriptor:previewDesc];
-    if (_selectionTexture == nil) return nil;
-    [_selectionTexture setLabel:@"VolumeTexture.selectionTex"];
-    _selectionOracleTexture =
-        [device newTextureWithDescriptor:previewOracleDesc];
-    if (_selectionOracleTexture == nil) return nil;
-    [_selectionOracleTexture setLabel:@"VolumeTexture.selectionOracle"];
+    // tex_lift: dense R8Uint 256³, same dims as the doc. Holds palette
+    // indices for the active lift's contents.
+    _liftTexture = [device newTextureWithDescriptor:desc];
+    if (_liftTexture == nil) return nil;
+    [_liftTexture setLabel:@"VolumeTexture.liftTex"];
 
-    _lastSelBbox = macvoxel::Bounds3{};  // empty sentinel
+    _liftOracleTexture = [device newTextureWithDescriptor:oracleDesc];
+    if (_liftOracleTexture == nil) return nil;
+    [_liftOracleTexture setLabel:@"VolumeTexture.liftOracle"];
+
+    // Scratch snapshot for transform kernels — blit lift→snap, kernel
+    // reads snap and writes live lift.
+    _liftSnapshotTexture = [device newTextureWithDescriptor:desc];
+    if (_liftSnapshotTexture == nil) return nil;
+    [_liftSnapshotTexture setLabel:@"VolumeTexture.liftSnap"];
+
     return self;
 }
 
@@ -143,17 +117,6 @@
     const size_t bytes_per_row = (size_t)_strideX;
     const size_t bytes_per_image = (size_t)_strideZ;
 
-    // Upload one 16³ region per dirty bit. The dense source layout
-    // (x-fastest, z-slowest) matches Metal's expected
-    // bytesPerRow / bytesPerImage stride convention, so we can point
-    // straight into `base` without a staging copy. Per-chunk regions
-    // are clamped to the texture's edge for non-multiple-of-16 axes
-    // (default 256³ is clean, but stay safe).
-    //
-    // Each chunk upload also refreshes its corresponding oracle byte:
-    // 0 if the chunk's bytes are all zero, 1 otherwise. Scanning 4 KiB
-    // per chunk on the CPU is much cheaper than the alternative (a
-    // reduction kernel) and stays comparable to the upload itself.
     for (int cz_i = 0; cz_i < cz; ++cz_i) {
         for (int cy_i = 0; cy_i < cy; ++cy_i) {
             for (int cx_i = 0; cx_i < cx; ++cx_i) {
@@ -208,140 +171,38 @@
     }
 }
 
-- (void)syncFromSelection:(const macvoxel::Selection&)sel {
-    using Bounds3 = macvoxel::Bounds3;
-    // newBbox = the bbox the selection currently occupies. For
-    // cell-list selections that's `voxels_`'s AABB; for SetBox preview
-    // (box-select mid-drag) it's the live drag box. Empty = "no
-    // selection visible."
-    const Bounds3 newBbox = sel.active() ? sel.bounds() : Bounds3{};
-    const bool is_box_mode = sel.active() && sel.voxels().empty() &&
-                             !sel.bounds().empty();
+- (void)encodeLiftSnapshot:(id<MTLCommandBuffer>)cmd
+                  worldBbox:(const macvoxel::Bounds3&)world_bbox {
+    if (world_bbox.empty()) return;
+    const int32_t x0 = std::max(world_bbox.min_x, _originX);
+    const int32_t y0 = std::max(world_bbox.min_y, _originY);
+    const int32_t z0 = std::max(world_bbox.min_z, _originZ);
+    const int32_t x1 = std::min(world_bbox.max_x, _originX + _sizeX - 1);
+    const int32_t y1 = std::min(world_bbox.max_y, _originY + _sizeY - 1);
+    const int32_t z1 = std::min(world_bbox.max_z, _originZ + _sizeZ - 1);
+    if (x0 > x1 || y0 > y1 || z0 > z1) return;
 
-    // Refresh region = previous-upload bbox ∪ new bbox. Anything
-    // outside this rectangle is unchanged (either was 0, stays 0).
-    Bounds3 refresh{};
-    if (!_lastSelBbox.empty() && !newBbox.empty()) {
-        refresh.min_x = std::min(_lastSelBbox.min_x, newBbox.min_x);
-        refresh.min_y = std::min(_lastSelBbox.min_y, newBbox.min_y);
-        refresh.min_z = std::min(_lastSelBbox.min_z, newBbox.min_z);
-        refresh.max_x = std::max(_lastSelBbox.max_x, newBbox.max_x);
-        refresh.max_y = std::max(_lastSelBbox.max_y, newBbox.max_y);
-        refresh.max_z = std::max(_lastSelBbox.max_z, newBbox.max_z);
-    } else if (!_lastSelBbox.empty()) {
-        refresh = _lastSelBbox;
-    } else if (!newBbox.empty()) {
-        refresh = newBbox;
-    } else {
-        return;  // nothing was uploaded; nothing to upload.
-    }
+    const NSUInteger lx = (NSUInteger)(x0 - _originX);
+    const NSUInteger ly = (NSUInteger)(y0 - _originY);
+    const NSUInteger lz = (NSUInteger)(z0 - _originZ);
+    const MTLOrigin origin = MTLOriginMake(lx, ly, lz);
+    const MTLSize size = MTLSizeMake(
+        (NSUInteger)(x1 - x0 + 1),
+        (NSUInteger)(y1 - y0 + 1),
+        (NSUInteger)(z1 - z0 + 1));
 
-    // Clip to texture extents.
-    const int32_t tx0 = _originX, ty0 = _originY, tz0 = _originZ;
-    const int32_t tx1 = _originX + _sizeX - 1;
-    const int32_t ty1 = _originY + _sizeY - 1;
-    const int32_t tz1 = _originZ + _sizeZ - 1;
-    refresh.min_x = std::max(refresh.min_x, tx0);
-    refresh.min_y = std::max(refresh.min_y, ty0);
-    refresh.min_z = std::max(refresh.min_z, tz0);
-    refresh.max_x = std::min(refresh.max_x, tx1);
-    refresh.max_y = std::min(refresh.max_y, ty1);
-    refresh.max_z = std::min(refresh.max_z, tz1);
-    if (refresh.empty()) {
-        _lastSelBbox = newBbox;
-        return;
-    }
-
-    const int rx = refresh.size_x();
-    const int ry = refresh.size_y();
-    const int rz = refresh.size_z();
-    std::vector<uint8_t> tile(
-        static_cast<size_t>(rx) * static_cast<size_t>(ry) *
-            static_cast<size_t>(rz),
-        0);
-    auto tile_idx = [&](int32_t x, int32_t y, int32_t z) -> size_t {
-        return static_cast<size_t>(x - refresh.min_x) +
-               static_cast<size_t>(y - refresh.min_y) *
-                   static_cast<size_t>(rx) +
-               static_cast<size_t>(z - refresh.min_z) *
-                   static_cast<size_t>(rx) * static_cast<size_t>(ry);
-    };
-
-    if (is_box_mode) {
-        const int32_t bx0 = std::max(newBbox.min_x, refresh.min_x);
-        const int32_t by0 = std::max(newBbox.min_y, refresh.min_y);
-        const int32_t bz0 = std::max(newBbox.min_z, refresh.min_z);
-        const int32_t bx1 = std::min(newBbox.max_x, refresh.max_x);
-        const int32_t by1 = std::min(newBbox.max_y, refresh.max_y);
-        const int32_t bz1 = std::min(newBbox.max_z, refresh.max_z);
-        for (int32_t z = bz0; z <= bz1; ++z)
-        for (int32_t y = by0; y <= by1; ++y)
-        for (int32_t x = bx0; x <= bx1; ++x) {
-            tile[tile_idx(x, y, z)] = 1;
-        }
-    } else if (!newBbox.empty()) {
-        for (const auto& v : sel.voxels()) {
-            if (v[0] < refresh.min_x || v[0] > refresh.max_x ||
-                v[1] < refresh.min_y || v[1] > refresh.max_y ||
-                v[2] < refresh.min_z || v[2] > refresh.max_z) continue;
-            tile[tile_idx(v[0], v[1], v[2])] = 1;
-        }
-    }
-
-    MTLRegion region = MTLRegionMake3D(
-        (NSUInteger)(refresh.min_x - _originX),
-        (NSUInteger)(refresh.min_y - _originY),
-        (NSUInteger)(refresh.min_z - _originZ),
-        (NSUInteger)rx, (NSUInteger)ry, (NSUInteger)rz);
-    [_selectionTexture replaceRegion:region
-                         mipmapLevel:0
-                               slice:0
-                           withBytes:tile.data()
-                         bytesPerRow:(NSUInteger)rx
-                       bytesPerImage:(NSUInteger)((size_t)rx * (size_t)ry)];
-
-    // Oracle bytes for chunks the refresh region touches. "any" is
-    // recomputed per chunk by scanning the freshly-built tile so a
-    // stale 1 left over from the previous bbox correctly drops to 0
-    // when the new selection no longer covers that chunk.
-    const int chunk = macvoxel::VoxelVolume::kChunkSize;
-    const int32_t cx0 = (refresh.min_x - _originX) / chunk;
-    const int32_t cy0 = (refresh.min_y - _originY) / chunk;
-    const int32_t cz0 = (refresh.min_z - _originZ) / chunk;
-    const int32_t cx1 = (refresh.max_x - _originX) / chunk;
-    const int32_t cy1 = (refresh.max_y - _originY) / chunk;
-    const int32_t cz1 = (refresh.max_z - _originZ) / chunk;
-    for (int32_t cz_i = cz0; cz_i <= cz1; ++cz_i)
-    for (int32_t cy_i = cy0; cy_i <= cy1; ++cy_i)
-    for (int32_t cx_i = cx0; cx_i <= cx1; ++cx_i) {
-        const int32_t lo_x = std::max((cx_i * chunk) + _originX, refresh.min_x);
-        const int32_t lo_y = std::max((cy_i * chunk) + _originY, refresh.min_y);
-        const int32_t lo_z = std::max((cz_i * chunk) + _originZ, refresh.min_z);
-        const int32_t hi_x = std::min(((cx_i + 1) * chunk - 1) + _originX,
-                                       refresh.max_x);
-        const int32_t hi_y = std::min(((cy_i + 1) * chunk - 1) + _originY,
-                                       refresh.max_y);
-        const int32_t hi_z = std::min(((cz_i + 1) * chunk - 1) + _originZ,
-                                       refresh.max_z);
-        uint8_t any = 0;
-        for (int32_t z = lo_z; z <= hi_z && !any; ++z) {
-            for (int32_t y = lo_y; y <= hi_y && !any; ++y) {
-                for (int32_t x = lo_x; x <= hi_x; ++x) {
-                    if (tile[tile_idx(x, y, z)]) { any = 1; break; }
-                }
-            }
-        }
-        MTLRegion oc = MTLRegionMake3D(
-            (NSUInteger)cx_i, (NSUInteger)cy_i, (NSUInteger)cz_i, 1, 1, 1);
-        [_selectionOracleTexture replaceRegion:oc
-                                   mipmapLevel:0
-                                         slice:0
-                                     withBytes:&any
-                                   bytesPerRow:1
-                                 bytesPerImage:1];
-    }
-
-    _lastSelBbox = newBbox;
+    id<MTLBlitCommandEncoder> enc = [cmd blitCommandEncoder];
+    enc.label = @"VolumeTexture.LiftSnapshot";
+    [enc copyFromTexture:_liftTexture
+             sourceSlice:0
+             sourceLevel:0
+            sourceOrigin:origin
+              sourceSize:size
+               toTexture:_liftSnapshotTexture
+        destinationSlice:0
+        destinationLevel:0
+       destinationOrigin:origin];
+    [enc endEncoding];
 }
 
 - (void)markOracleChunkAtX:(int)x y:(int)y z:(int)z {

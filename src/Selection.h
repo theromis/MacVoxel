@@ -10,26 +10,21 @@
 
 namespace macvoxel {
 
-// One voxel-space selection. Sparse-first: the canonical state is a
-// list of selected cell coordinates; the AABB is a derived cache,
-// recomputed whenever the cell list changes.
+// Selection state — Magica-style: at finalize time the marquee /
+// box-select / flood lifts its cells *off* the doc texture into a
+// separate `tex_lift` buffer (see VolumeTexture::liftTexture). From
+// that moment until commit, the doc has a hole at the lift's source
+// positions and the lift's tight bbox is the user-visible selection.
 //
-// Two ways the selection's voxel list gets populated:
-//   - Materialized sources (Marquee mouseUp, Box-select mouseUp,
-//     Flood, palette "Select voxels by color"): caller hands a
-//     vector to SetVoxels; bounds are recomputed.
-//   - Box-select mid-drag: only the AABB is known; the cells inside
-//     haven't been scanned yet. SetBox stores that AABB and leaves
-//     `voxels()` empty until mouseUp materializes it.
+// `lift_active` is the canonical "is there a selection" flag. The
+// `bounds_` field is the lift's tight bbox in world cell coords;
+// `pre_lift_originals_` records the (cell, palette) pairs that were
+// cleared from the doc when the lift was created — used to restore
+// the doc on Cancel and to build the net diff on Commit.
 //
-// Selection-aware operations (copy / cut / delete / paint / move /
-// transform) iterate `voxels()`. The bounds are used for clipboard
-// origin / extent and for AABB outlines in the renderer.
-//
-// Membership queries — "is cell (x, y, z) selected?" — go through
-// Contains, which builds a hash set the first time it's asked and
-// reuses it until the next mutation. Cheap for one-off checks, fast
-// for the interactive case where many cells are queried in a frame.
+// The legacy cell list (`voxels_`) is still populated by the
+// box-mode preview and a handful of consumers that haven't been
+// migrated yet; it will be removed once the migration completes.
 class Selection {
 public:
     Selection() = default;
@@ -39,45 +34,62 @@ public:
     Selection& operator=(Selection&& other) noexcept;
 
     bool active() const { return active_; }
-    bool empty() const { return voxels_.empty(); }
+    bool empty() const { return voxels_.empty() && !lift_active_; }
     size_t size() const { return voxels_.size(); }
     const Bounds3& bounds() const { return bounds_; }
     const std::vector<std::array<int32_t, 3>>& voxels() const {
         return voxels_;
     }
     // Monotonic counter, bumped on every mutation. Renderers cache the
-    // last value they saw against this and re-sync the GPU mirror
-    // (`VolumeTexture.selectionTexture`) only on change.
+    // last value they saw against this and re-sync the GPU mirror only
+    // on change.
     uint64_t version() const { return version_; }
 
-    // O(1) amortized membership. First call after a mutation builds
-    // a hash set over `voxels_`; subsequent calls hit the cache.
     bool Contains(int32_t x, int32_t y, int32_t z) const;
 
-    // Replace the selection with a sparse cell list. Computes the
-    // tight AABB and marks the selection active iff `voxels` is
-    // non-empty. Membership cache is invalidated.
     void SetVoxels(std::vector<std::array<int32_t, 3>> voxels);
-
-    // Set just the AABB (for tools that preview the selection as a
-    // box before materializing cells — Box-select mid-drag, eventually
-    // Marquee). Leaves the voxel list empty; selection is active.
     void SetBox(const Bounds3& box);
-
-    // Append a single cell. Bounds expand to include it. Used by tools
-    // that build the selection one cell at a time (live Marquee
-    // accumulation, eventually shift-click extension).
     void AddVoxel(int32_t x, int32_t y, int32_t z);
-
     void Clear();
+
+    // Lift-state API. A "lift" means: cells listed in
+    // `pre_lift_originals_` have been removed from the doc and
+    // transplanted into `tex_lift` at their (possibly later mutated)
+    // positions. `bounds_` tracks the lift's tight bbox.
+    bool lift_active() const { return lift_active_; }
+    const std::vector<CellChange>& pre_lift_originals() const {
+        return pre_lift_originals_;
+    }
+    std::vector<CellChange>& pre_lift_originals_mutable() {
+        return pre_lift_originals_;
+    }
+
+    // Mark the selection as a lift: stores the originals (cells cleared
+    // from the doc + their pre-lift palettes), sets bounds_ to the
+    // lift's tight bbox, and clears voxels_ (the lift contents are on
+    // the GPU; readers consume them via tex_lift). active_ becomes true.
+    void SetLift(const Bounds3& lift_bounds,
+                 std::vector<CellChange> pre_lift_originals);
+
+    // Update the lift's bounds after a translate / rotate / flip
+    // mutation. Leaves `pre_lift_originals_` untouched (those still
+    // describe what was originally cleared from the doc, regardless of
+    // where the lift currently sits).
+    void UpdateLiftBounds(const Bounds3& lift_bounds);
+
+    // Wipe the lift state without restoring the doc — caller is
+    // responsible for the doc side (Commit writes lift cells into the
+    // doc; Cancel walks `pre_lift_originals_` to restore). After this
+    // returns, active_ is false unless voxels_ still has content.
+    void ClearLift();
 
 private:
     Bounds3 bounds_{};
     std::vector<std::array<int32_t, 3>> voxels_;
     bool active_ = false;
+    bool lift_active_ = false;
+    std::vector<CellChange> pre_lift_originals_;
     uint64_t version_ = 0;
-    // Lazy O(1) membership. Built on first Contains() after a
-    // mutation; mutators reset() to invalidate.
     mutable std::optional<std::unordered_set<int64_t>> membership_;
 
     void RecomputeBounds();

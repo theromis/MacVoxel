@@ -3,7 +3,6 @@
 #include "Clipboard.h"
 #include "Document.h"
 #include "EditHistory.h"
-#include "FloatingBuffer.h"
 #include "GeneratorState.h"
 #include "MutatorState.h"
 #include "PanelState.h"
@@ -12,6 +11,8 @@
 #include "ToolState.h"
 
 namespace macvoxel {
+
+class EditEngine;
 
 // Single-document editor context — the owned home for everything an
 // editing session reads or mutates. Replaces the grab-bag of
@@ -31,7 +32,6 @@ struct EditorContext {
     RenderProgress render_progress;
     GeneratorState generator;
     MutatorState mutator;
-    FloatingBuffer floating_buffer;
     // True while a tool is actively writing the GPU preview texture
     // (tex_t) — gates the rasterizer's `preview_active` uniform so the
     // composite pass only runs during a live shape/face/generator
@@ -47,6 +47,11 @@ struct EditorContext {
     EditHistory history;
     Clipboard clipboard;
     PanelState panel;
+    // Non-owning back-ref so non-Tool paths (SelectionOps, bridge
+    // actions) can reach the GPU dispatch façade. MetalScene sets
+    // this in its init right after MakeEditEngine; clears in dealloc.
+    // Null = CPU-only mode (unit tests / headless render).
+    EditEngine* engine = nullptr;
 
     EditorContext();
 };

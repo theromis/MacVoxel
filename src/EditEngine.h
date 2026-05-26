@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -14,6 +15,9 @@ struct CommitGenericParams;
 struct Bbox3;
 struct EditVolume;
 
+struct Bounds3;
+struct CellChange;
+
 namespace generators {
 struct Bounds3i;
 struct Params;
@@ -21,6 +25,7 @@ enum class Kind : uint32_t;
 }  // namespace generators
 
 struct MutatorDispatchParams;
+struct LiftTransformParams;
 
 // Pure-C++ façade over BrushEngine + ShapeEngine + GeneratorEngine.
 //
@@ -94,6 +99,52 @@ public:
     // Standalone barrier in case a tool needs the GPU drained without
     // an immediate readback (Cancel paths).
     virtual void WaitForPendingWork() = 0;
+
+    // Selection-lift pipeline. The lift is a GPU-resident buffer
+    // (`tex_lift`) holding selected cells removed from `tex_a` for the
+    // duration of the selection. Tools call these to create, mutate,
+    // commit, and tear down the lift.
+    //
+    // All methods operate on the doc's VolumeTexture; callers manage
+    // the CPU-side shadow / grid / history themselves (since EditEngine
+    // doesn't hold a Document reference).
+
+    // Selection finalize from a box: kernel reads tex_a, writes
+    // non-zero cells to tex_lift, zeroes them in tex_a.
+    virtual void LiftBox(const Bounds3& bbox) = 0;
+
+    // Selection finalize from a CPU cell list (flood / palette select).
+    // `cells_xyz` is packed [x, y, z, x, y, z, ...] in world coords.
+    virtual void LiftCells(const int32_t* cells_xyz,
+                            std::size_t cell_count) = 0;
+
+    // Translate lift by `offset`. Kernel reads tex_lift_snap (blit
+    // happens inside) and writes live tex_lift over union(old, new).
+    virtual void TranslateLift(const Bounds3& old_bbox,
+                                const Bounds3& new_bbox,
+                                const int32_t offset[3]) = 0;
+
+    // Rotate / flip lift via Magica's rotate_centered form. Clears
+    // the old lift region first, then dispatches the gather kernel.
+    virtual void TransformLift(const LiftTransformParams& params,
+                                const Bounds3& old_bbox) = 0;
+
+    // Read tex_lift bytes over `bbox` (x-fastest layout, clipped to
+    // the volume). Drains pending lift work first so the read reflects
+    // the latest state. Doesn't modify GPU textures.
+    virtual void ReadbackLift(const Bounds3& bbox,
+                               std::vector<uint8_t>* out_lift_bytes) = 0;
+
+    // Commit lift to doc. Reads tex_lift back (snap blit + getBytes)
+    // to populate `out_lift_bytes` over `bbox` (x-fastest layout),
+    // then dispatches the commit kernel which writes tex_a and zeros
+    // tex_lift. The caller uses `out_lift_bytes` to build the
+    // CellChange diff against `doc.volume_shadow`.
+    virtual void CommitLift(const Bounds3& bbox,
+                             std::vector<uint8_t>* out_lift_bytes) = 0;
+
+    // Zero a tex_lift region without touching tex_a (Cancel path).
+    virtual void ClearLift(const Bounds3& bbox) = 0;
 };
 
 }  // namespace macvoxel
@@ -104,18 +155,20 @@ public:
 @class ShapeEngine;
 @class GeneratorEngine;
 @class MutatorEngine;
+@class LiftEngine;
 @class VolumeTexture;
 
 namespace macvoxel {
 
 // MetalScene constructs one of these in init, passing the engines and
 // the doc's VolumeTexture it already owns. The returned object holds
-// strong (ARC) refs to all five; tools keep a non-owning pointer/ref.
+// strong (ARC) refs to all six; tools keep a non-owning pointer/ref.
 // `vol` is observed by reference and must outlive the EditEngine.
 std::unique_ptr<EditEngine> MakeEditEngine(BrushEngine* brush,
                                            ShapeEngine* shape,
                                            GeneratorEngine* generator,
                                            MutatorEngine* mutator,
+                                           LiftEngine* lift,
                                            VolumeTexture* texture,
                                            const EditVolume& vol);
 

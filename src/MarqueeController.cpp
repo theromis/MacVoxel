@@ -4,6 +4,7 @@
 #include "Input.h"
 #include "OverlayDraw.h"
 #include "Selection.h"
+#include "SelectionLift.h"
 #include "SelectionOps.h"
 #include "ViewContext.h"
 
@@ -49,8 +50,8 @@ void OnMouseUp(EditorContext& ctx,
     const float vw = vc.viewport_w;
     const float vh = vc.viewport_h;
 
-    SelectCellsWhere(ctx, [&](int32_t cx, int32_t cy, int32_t cz,
-                              uint8_t /*pal*/) {
+    auto cells = EnumerateCellsWhere(ctx, [&](int32_t cx, int32_t cy, int32_t cz,
+                                                uint8_t /*pal*/) {
         // Grid → world: R = (gx, gz, -gy) — same convention the
         // renderers and the wireframe overlay use.
         const float gx = static_cast<float>(cx) + 0.5f;
@@ -68,6 +69,11 @@ void OnMouseUp(EditorContext& ctx,
         return (sx >= rx_min && sx <= rx_max &&
                 sy >= ry_min && sy <= ry_max);
     });
+    if (cells.empty()) {
+        ctx.selection.Clear();
+        return;
+    }
+    lift::LiftSelectionCells(ctx, cells);
 }
 
 void DrawOverlay(const InteractionState& state, const ViewContext& vc,

@@ -15,7 +15,9 @@ inline int64_t Key(int32_t x, int32_t y, int32_t z) {
 Selection::Selection(const Selection& other)
     : bounds_(other.bounds_),
       voxels_(other.voxels_),
-      active_(other.active_) {
+      active_(other.active_),
+      lift_active_(other.lift_active_),
+      pre_lift_originals_(other.pre_lift_originals_) {
     // Skip the membership cache; it'll be rebuilt on next Contains().
 }
 
@@ -23,9 +25,12 @@ Selection::Selection(Selection&& other) noexcept
     : bounds_(other.bounds_),
       voxels_(std::move(other.voxels_)),
       active_(other.active_),
+      lift_active_(other.lift_active_),
+      pre_lift_originals_(std::move(other.pre_lift_originals_)),
       membership_(std::move(other.membership_)) {
     other.bounds_ = Bounds3{};
     other.active_ = false;
+    other.lift_active_ = false;
 }
 
 Selection& Selection::operator=(const Selection& other) {
@@ -33,6 +38,8 @@ Selection& Selection::operator=(const Selection& other) {
     bounds_ = other.bounds_;
     voxels_ = other.voxels_;
     active_ = other.active_;
+    lift_active_ = other.lift_active_;
+    pre_lift_originals_ = other.pre_lift_originals_;
     membership_.reset();
     ++version_;
     return *this;
@@ -43,9 +50,12 @@ Selection& Selection::operator=(Selection&& other) noexcept {
     bounds_ = other.bounds_;
     voxels_ = std::move(other.voxels_);
     active_ = other.active_;
+    lift_active_ = other.lift_active_;
+    pre_lift_originals_ = std::move(other.pre_lift_originals_);
     membership_ = std::move(other.membership_);
     other.bounds_ = Bounds3{};
     other.active_ = false;
+    other.lift_active_ = false;
     ++version_;
     return *this;
 }
@@ -64,7 +74,7 @@ bool Selection::Contains(int32_t x, int32_t y, int32_t z) const {
 void Selection::SetVoxels(std::vector<std::array<int32_t, 3>> voxels) {
     voxels_ = std::move(voxels);
     RecomputeBounds();
-    active_ = !voxels_.empty();
+    active_ = !voxels_.empty() || lift_active_;
     membership_.reset();
     ++version_;
 }
@@ -72,7 +82,7 @@ void Selection::SetVoxels(std::vector<std::array<int32_t, 3>> voxels) {
 void Selection::SetBox(const Bounds3& box) {
     bounds_ = box;
     voxels_.clear();
-    active_ = !box.empty();
+    active_ = !box.empty() || lift_active_;
     membership_.reset();
     ++version_;
 }
@@ -100,6 +110,36 @@ void Selection::Clear() {
     bounds_ = Bounds3{};
     voxels_.clear();
     active_ = false;
+    lift_active_ = false;
+    pre_lift_originals_.clear();
+    membership_.reset();
+    ++version_;
+}
+
+void Selection::SetLift(const Bounds3& lift_bounds,
+                         std::vector<CellChange> pre_lift_originals) {
+    bounds_ = lift_bounds;
+    voxels_.clear();
+    pre_lift_originals_ = std::move(pre_lift_originals);
+    lift_active_ = true;
+    active_ = true;
+    membership_.reset();
+    ++version_;
+}
+
+void Selection::UpdateLiftBounds(const Bounds3& lift_bounds) {
+    bounds_ = lift_bounds;
+    membership_.reset();
+    ++version_;
+}
+
+void Selection::ClearLift() {
+    lift_active_ = false;
+    pre_lift_originals_.clear();
+    if (voxels_.empty()) {
+        bounds_ = Bounds3{};
+        active_ = false;
+    }
     membership_.reset();
     ++version_;
 }

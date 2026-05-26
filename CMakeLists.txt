@@ -50,9 +50,9 @@ set(APP_SOURCES
     src/EditEngine.mm
     src/EditHistory.cpp
     src/Selection.cpp
+    src/SelectionLift.cpp
     src/SelectionOps.cpp
     src/SelectionOverlay.cpp
-    src/FloatingBufferOps.cpp
     src/EditorContext.cpp
     src/ViewContext.cpp
     src/BoxSelectController.cpp
@@ -66,6 +66,7 @@ set(APP_SOURCES
     src/MutatorEngine.mm
     src/MutatorTool.cpp
     src/OverlayDraw.cpp
+    src/LiftEngine.mm
     src/ShapeTool.cpp
     src/ToolRegistry.cpp
     src/XformHandleController.cpp
@@ -100,6 +101,7 @@ set(APP_RESOURCES
     src/BrushKernel.metal
     src/Generators.metal
     src/Mutators.metal
+    src/LiftKernel.metal
     src/ShapeKernel.metal
     src/Overlay.metal
     src/PathTrace.metal

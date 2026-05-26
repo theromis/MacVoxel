@@ -16,8 +16,8 @@
 #include "Document.h"
 #include "EditHistory.h"
 #include "EditorContext.h"
-#include "FloatingBuffer.h"
-#include "FloatingBufferOps.h"
+#include "EditEngine.h"
+#include "SelectionLift.h"
 #include "GeneratorState.h"
 #include "Generators.h"
 #include "MutatorState.h"
@@ -102,10 +102,12 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 
 - (void)newDocument {
     macvoxel::Document &doc = _ctx->document;
-    // FloatingBuffer references the doc's grid; discard before replacing
-    // (matches AppDelegate's invariant — see the original comment in
-    // newDocument:).
-    macvoxel::DiscardFloatingBuffer(*_ctx);
+    // Any active lift references the outgoing doc; drop it (no
+    // history entry — same intent as the old DiscardFloatingBuffer).
+    if (_ctx->selection.lift_active()) {
+        macvoxel::lift::CancelLift(*_ctx);
+    }
+    _ctx->selection.Clear();
     [self seedDocumentFromDefault];
     doc.path.clear();
     doc.BumpAll();
@@ -118,7 +120,10 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
             userInfo:@{NSLocalizedDescriptionKey: @"No URL provided."}];
         return NO;
     }
-    macvoxel::DiscardFloatingBuffer(*_ctx);
+    if (_ctx->selection.lift_active()) {
+        macvoxel::lift::CancelLift(*_ctx);
+    }
+    _ctx->selection.Clear();
     const std::string path = [[url path] UTF8String];
     macvoxel::Document fresh;
     std::string err;
@@ -146,8 +151,8 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
             userInfo:@{NSLocalizedDescriptionKey: @"No URL provided."}];
         return NO;
     }
-    if (_ctx->floating_buffer.active) {
-        macvoxel::CommitFloatingBuffer(*_ctx);
+    if (_ctx->selection.lift_active()) {
+        macvoxel::lift::CommitLift(*_ctx);
     }
     macvoxel::Document &doc = _ctx->document;
     const std::string path = [[url path] UTF8String];
@@ -183,7 +188,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 // ---------------------------------------------------------------------------
 
 - (BOOL)canUndo {
-    if (_ctx->floating_buffer.active) return YES;  // undo cancels the lift
+    if (_ctx->selection.lift_active()) return YES;  // undo cancels the lift
     return _ctx->history.CanUndo();
 }
 
@@ -193,14 +198,11 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 
 - (void)undo {
     macvoxel::Document &doc = _ctx->document;
-    macvoxel::FloatingBuffer &fb = _ctx->floating_buffer;
-    if (fb.active) {
-        // Undo while floating cancels the whole move-in-progress; we
-        // restore from the buffer's source snapshot and pop nothing
-        // from history (the lift didn't push an EditOp). Same logic
-        // as AppDelegate's undo:.
-        macvoxel::CancelFloatingLift(*_ctx);
-        doc.BumpGeometry();
+    if (_ctx->selection.lift_active()) {
+        // Undo while lifted cancels the whole move-in-progress: we
+        // restore from pre_lift_originals and pop nothing from history
+        // (the lift didn't push an EditOp).
+        macvoxel::lift::CancelLift(*_ctx);
         return;
     }
     _ctx->history.Undo(doc, &_ctx->selection);
@@ -215,10 +217,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 // ---------------------------------------------------------------------------
 
 - (BOOL)canCutOrCopyOrDelete {
-    const macvoxel::Selection &sel = _ctx->selection;
-    const macvoxel::FloatingBuffer &fb = _ctx->floating_buffer;
-    if (fb.active && !fb.grid.empty()) return YES;
-    return sel.active() && !sel.empty();
+    return _ctx->selection.lift_active();
 }
 
 - (BOOL)canPaste {
@@ -226,51 +225,21 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 }
 
 - (BOOL)canDeselect {
-    return _ctx->selection.active() || _ctx->floating_buffer.active;
+    return _ctx->selection.active();
 }
 
 - (void)copy {
-    macvoxel::Document &doc = _ctx->document;
+    if (!_ctx->selection.lift_active() || _ctx->engine == nullptr) return;
+    const macvoxel::Bounds3 sb = _ctx->selection.bounds();
+    if (sb.empty()) return;
+
+    // Read the lift contents directly — that's the actual set of
+    // selected cells. The bbox alone would pick up neighbour doc
+    // cells the user didn't select.
+    std::vector<uint8_t> lift_bytes;
+    _ctx->engine->ReadbackLift(sb, &lift_bytes);
+
     macvoxel::Clipboard &cb = _ctx->clipboard;
-    macvoxel::FloatingBuffer &fb = _ctx->floating_buffer;
-
-    if (fb.active && !fb.grid.empty()) {
-        const macvoxel::Bounds3 b = fb.grid.Bounds();
-        cb.origin_x = b.min_x + fb.offset_x;
-        cb.origin_y = b.min_y + fb.offset_y;
-        cb.origin_z = b.min_z + fb.offset_z;
-        cb.size_x = static_cast<uint32_t>(b.size_x());
-        cb.size_y = static_cast<uint32_t>(b.size_y());
-        cb.size_z = static_cast<uint32_t>(b.size_z());
-        cb.cells.assign(
-            static_cast<size_t>(cb.size_x) * cb.size_y * cb.size_z, 0);
-        constexpr uint32_t kCS = macvoxel::VoxelGrid::kChunkSize;
-        for (const auto &[coord, chunk] : fb.grid.chunks()) {
-            if (chunk->filled_count == 0) continue;
-            const int32_t base_x = coord.x * static_cast<int32_t>(kCS);
-            const int32_t base_y = coord.y * static_cast<int32_t>(kCS);
-            const int32_t base_z = coord.z * static_cast<int32_t>(kCS);
-            for (uint32_t lz = 0; lz < kCS; ++lz)
-            for (uint32_t ly = 0; ly < kCS; ++ly)
-            for (uint32_t lx = 0; lx < kCS; ++lx) {
-                const size_t idx = lx + ly * kCS + lz * kCS * kCS;
-                const uint8_t pal = chunk->cells[idx];
-                if (pal == 0) continue;
-                const int32_t cx = base_x + static_cast<int32_t>(lx);
-                const int32_t cy = base_y + static_cast<int32_t>(ly);
-                const int32_t cz = base_z + static_cast<int32_t>(lz);
-                cb.cells[cb.LinearIndex(
-                    static_cast<uint32_t>(cx - b.min_x),
-                    static_cast<uint32_t>(cy - b.min_y),
-                    static_cast<uint32_t>(cz - b.min_z))] = pal;
-            }
-        }
-        return;
-    }
-
-    const macvoxel::Selection &sel = _ctx->selection;
-    if (!sel.active() || sel.empty()) return;
-    const macvoxel::Bounds3 &sb = sel.bounds();
     cb.origin_x = sb.min_x;
     cb.origin_y = sb.min_y;
     cb.origin_z = sb.min_z;
@@ -279,65 +248,82 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     cb.size_z = static_cast<uint32_t>(sb.size_z());
     cb.cells.assign(
         static_cast<size_t>(cb.size_x) * cb.size_y * cb.size_z, 0);
-    for (const auto &v : sel.voxels()) {
-        const uint32_t lx = static_cast<uint32_t>(v[0] - sb.min_x);
-        const uint32_t ly = static_cast<uint32_t>(v[1] - sb.min_y);
-        const uint32_t lz = static_cast<uint32_t>(v[2] - sb.min_z);
-        cb.cells[cb.LinearIndex(lx, ly, lz)] =
-            doc.grid.Get(v[0], v[1], v[2]);
+
+    const size_t bw = (size_t)sb.size_x();
+    const size_t bh = (size_t)sb.size_y();
+    const size_t bd = (size_t)sb.size_z();
+    if (lift_bytes.size() < bw * bh * bd) return;
+    for (size_t z = 0; z < bd; ++z)
+    for (size_t y = 0; y < bh; ++y) {
+        const size_t row = (z * bh + y) * bw;
+        for (size_t x = 0; x < bw; ++x) {
+            const uint8_t v = lift_bytes[row + x];
+            if (v == 0) continue;
+            cb.cells[cb.LinearIndex(
+                (uint32_t)x, (uint32_t)y, (uint32_t)z)] = v;
+        }
     }
 }
 
 - (void)cut {
+    if (!_ctx->selection.lift_active()) return;
+    // Snapshot to clipboard first, then drop the lift contents.
     [self copy];
-    [self deleteSelection];
+    macvoxel::lift::DeleteLift(*_ctx);
 }
 
 - (void)deleteSelection {
-    macvoxel::Document &doc = _ctx->document;
-    macvoxel::FloatingBuffer &fb = _ctx->floating_buffer;
-    if (fb.active) {
-        // Floating cells aren't on the doc yet — discarding IS the
-        // delete. The lift that produced this buffer stays on the
-        // undo stack; one more Cmd-Z restores the pre-lift state.
-        macvoxel::DiscardFloatingBuffer(*_ctx);
-        doc.BumpGeometry();
+    if (_ctx->selection.lift_active()) {
+        // Drop the lift contents; pre_lift_originals stays on history
+        // so undo restores the original state.
+        macvoxel::lift::DeleteLift(*_ctx);
         return;
     }
-    const macvoxel::Selection &sel = _ctx->selection;
-    if (!sel.active() || sel.empty()) return;
-    macvoxel::EditHistory &history = _ctx->history;
-    history.BeginOp();
-    for (const auto &v : sel.voxels()) {
-        const uint8_t old = doc.grid.Get(v[0], v[1], v[2]);
-        if (old != 0) {
-            doc.SetCell(v[0], v[1], v[2], 0);
-            history.Record(v[0], v[1], v[2], old, 0);
-        }
-    }
-    history.CommitOp();
-    doc.BumpGeometry();
 }
 
 - (void)paste {
-    macvoxel::Document &doc = _ctx->document;
     const macvoxel::Clipboard &cb = _ctx->clipboard;
     if (cb.empty()) return;
-
-    if (_ctx->floating_buffer.active) {
-        macvoxel::CommitFloatingBuffer(*_ctx);
+    if (_ctx->selection.lift_active()) {
+        macvoxel::lift::CommitLift(*_ctx);
     }
-    // Paste in place: land at the clipboard's recorded source origin.
-    macvoxel::LiftClipboardToFloating(*_ctx, cb,
-                                      cb.origin_x, cb.origin_y, cb.origin_z);
+    // Write clipboard cells into the doc at the recorded origin and
+    // collect their positions; then lift exactly those cells (not the
+    // bbox, which would pick up neighbouring doc cells).
+    macvoxel::Document &doc = _ctx->document;
+    macvoxel::EditHistory &history = _ctx->history;
+    std::vector<std::array<int32_t, 3>> pasted_cells;
+    pasted_cells.reserve(
+        static_cast<size_t>(cb.size_x) * cb.size_y * cb.size_z / 4);
+    history.BeginOp();
+    for (uint32_t z = 0; z < cb.size_z; ++z) {
+        for (uint32_t y = 0; y < cb.size_y; ++y) {
+            for (uint32_t x = 0; x < cb.size_x; ++x) {
+                const uint8_t pal = cb.cells[cb.LinearIndex(x, y, z)];
+                if (pal == 0) continue;
+                const int32_t wx = cb.origin_x + static_cast<int32_t>(x);
+                const int32_t wy = cb.origin_y + static_cast<int32_t>(y);
+                const int32_t wz = cb.origin_z + static_cast<int32_t>(z);
+                if (!doc.volume.Contains(wx, wy, wz)) continue;
+                const uint8_t old = doc.grid.Get(wx, wy, wz);
+                doc.SetCell(wx, wy, wz, pal);
+                if (old != pal) history.Record(wx, wy, wz, old, pal);
+                pasted_cells.push_back({wx, wy, wz});
+            }
+        }
+    }
+    history.CommitOp();
+    if (pasted_cells.empty()) {
+        doc.BumpGeometry();
+        return;
+    }
+    macvoxel::lift::LiftSelectionCells(*_ctx, pasted_cells);
     doc.BumpGeometry();
 }
 
 - (void)deselect {
-    // "Done with this selection" — drop any floating buffer onto the
-    // document, then clear.
-    if (_ctx->floating_buffer.active) {
-        macvoxel::CommitFloatingBuffer(*_ctx);
+    if (_ctx->selection.lift_active()) {
+        macvoxel::lift::CommitLift(*_ctx);
     }
     _ctx->selection.Clear();
 }

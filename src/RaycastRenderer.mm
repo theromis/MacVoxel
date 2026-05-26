@@ -7,10 +7,8 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <vector>
 
 #include "Document.h"
-#include "FloatingBuffer.h"
 
 namespace {
 
@@ -20,39 +18,23 @@ struct Uniforms {
     float _pad0;
     simd::float3 light_dir;
     float _pad1;
-    // FloatingBuffer slot — a sparse grid the shader DDA samples
-    // alongside the doc texture. Renders "on top of" the doc wherever
-    // non-zero. Used for selection lift / paste / move-drag / rotate /
-    // flip; `fb_offset` is the running drag delta (which can place the
-    // FB outside the edit volume, hence the sparse representation).
-    // When `fb_active == 0` all fb_* fields are ignored.
-    simd::int3 fb_coarse_min;
-    int _pad2;
-    simd::int3 fb_coarse_dim;
-    int _pad3;
-    simd::int3 fb_offset;
-    int fb_active;
     // Edit-volume bounds in cell coords. `box_min` is inclusive, `box_max`
     // is exclusive (e.g. EditVolume{x0=-128, x1=127} → box_min.x=-128,
-    // box_max.x=128). Doubles as the doc texture's index space:
-    // `tex_a.read(uint3(cell - int3(box_min)))`.
+    // box_max.x=128). Doubles as the doc texture's index space.
     simd::float3 box_min;
-    float _pad4;
+    float _pad2;
     simd::float3 box_max;
-    float _pad5;
+    float _pad3;
     // Preview-tex slot. When `preview_active != 0` the fragment
-    // shader samples `preview_tex` (dense, same dims as the doc tex)
-    // for each cell after the doc lookup; non-zero preview cells
-    // shade on top of the doc. `preview_tex` has its own 16³ coarse
-    // oracle (`preview_oracle`) so we don't pay a per-cell read
-    // through chunks the preview hasn't touched.
+    // shader samples `preview_tex` for each cell after the doc lookup.
     int preview_active;
-    // < 1.0 enables the "ghost" composite (preview cells alpha-over
-    // whatever's behind them — doc, FB, or sky). 1.0 = opaque (current
-    // drag-stamp behavior). Set by tools per gesture phase.
+    // < 1.0 enables the "ghost" composite. 1.0 = opaque.
     float preview_alpha;
-    int _pad7;
-    int _pad8;
+    // Lift slot. When `lift_active != 0`, non-zero cells of `tex_lift`
+    // override the doc value at the same cell and get the selection
+    // tint applied.
+    int lift_active;
+    int _pad4;
 };
 
 NSString* const kShaderSource = @R"MSL(
@@ -70,24 +52,14 @@ struct Uniforms {
     float    _pad0;
     float3   light_dir;
     float    _pad1;
-    int3     fb_coarse_min;
-    int      _pad2;
-    int3     fb_coarse_dim;
-    int      _pad3;
-    int3     fb_offset;
-    int      fb_active;
     float3   box_min;
-    float    _pad4;
+    float    _pad2;
     float3   box_max;
-    float    _pad5;
+    float    _pad3;
     int      preview_active;
     float    preview_alpha;
-    int      _pad7;
-    int      _pad8;
-};
-
-struct Chunk {
-    uint8_t cells[4096];
+    int      lift_active;
+    int      _pad4;
 };
 
 // Fullscreen triangle covering NDC [-1, 1]² with one extra-large vertex
@@ -103,21 +75,14 @@ vertex VertOut raycast_vertex(uint vid [[vertex_id]]) {
     return o;
 }
 
-constant int kMaxSteps = 4096;
-constant uint kChunkBits = 4;
-constant uint kChunkMask = 15u;
-constant uint kChunkSize = 16u;
-constant uint kChunkVolume = 4096u;
+constexpr constant int kChunkBits = 4;
+constexpr constant int kChunkSize = 1 << kChunkBits;
+constexpr constant int kChunkMask = kChunkSize - 1;
+constexpr constant int kMaxSteps = 1024;
 
-// Closest approach of the forward ray (t ≥ 0) to an axis-aligned
-// infinite line. `axis` is which world axis the line runs along
-// (0=X, 1=Y, 2=Z); (a, b) are the line's two perpendicular
-// coordinates. Returns float3(perp_dist, t_at_closest, along_at_closest)
-// — caller clips along_at_closest to the segment range. Sentinel
-// returns 1e10 when the closest approach is behind the camera or the
-// ray is parallel to the line.
 float3 ray_to_axis_line(float3 ro, float3 rd, int axis, float a, float b) {
-    float2 r_perp, d_perp;
+    float2 r_perp;
+    float2 d_perp;
     float r_along, d_along;
     if (axis == 0) {
         r_perp = float2(ro.y, ro.z); d_perp = float2(rd.y, rd.z);
@@ -139,18 +104,6 @@ float3 ray_to_axis_line(float3 ro, float3 rd, int axis, float a, float b) {
                   r_along + t * d_along);
 }
 
-// Wireframe of (9 of) the 12 cube edges drawn into background pixels.
-// Width scales linearly with depth so edges hold a roughly constant
-// screen width across zoom levels; opacity max-pools so corners don't
-// bloom where edges meet. ro must be the *original* (pre-AABB-clip)
-// camera-space ray origin so edges behind the clip plane render
-// correctly when the ray entered through them.
-//
-// The 3 edges meeting at the cube vertex nearest the camera are
-// hidden — they'd visually plug the front of the box from typical
-// viewing angles. The matching 3 near faces are also excluded from
-// empty-space click anchoring (see ViewContext::IntersectVolumeWall),
-// so the cutaway is consistent between rendering and interaction.
 float3 bbox_edges_color(float3 ro, float3 rd, float3 bg,
                         float3 box_min, float3 box_max) {
     float xs[2] = {box_min.x, box_max.x};
@@ -163,8 +116,6 @@ float3 bbox_edges_color(float3 ro, float3 rd, float3 bg,
     float strongest = 0.0;
     for (int i = 0; i < 2; ++i) {
         for (int j = 0; j < 2; ++j) {
-            // X-axis edge at perpendicular (ys[i], zs[j]). The near
-            // corner's X-edge has y == near_y and z == near_z.
             if (!(i == ny && j == nz)) {
                 float3 ex = ray_to_axis_line(ro, rd, 0, ys[i], zs[j]);
                 if (ex.z >= box_min.x && ex.z <= box_max.x) {
@@ -196,16 +147,14 @@ fragment float4 raycast_fragment(
     VertOut in [[stage_in]],
     constant Uniforms& u [[buffer(0)]],
     constant float4* palette [[buffer(1)]],
-    device const uint* fb_coarse_grid [[buffer(2)]],
-    device const Chunk* fb_chunk_pool [[buffer(3)]],
     texture3d<uint, access::read> tex_a [[texture(0)]],
     texture3d<uint, access::read> doc_oracle [[texture(1)]],
     texture3d<uint, access::read> preview_tex [[texture(2)]],
     texture3d<uint, access::read> preview_oracle [[texture(3)]],
     texture3d<uint, access::read> preview_rem [[texture(4)]],
     texture3d<uint, access::read> preview_rem_oracle [[texture(5)]],
-    texture3d<uint, access::read> tex_sel [[texture(6)]],
-    texture3d<uint, access::read> sel_oracle [[texture(7)]])
+    texture3d<uint, access::read> tex_lift [[texture(6)]],
+    texture3d<uint, access::read> lift_oracle [[texture(7)]])
 {
     // Reconstruct world-space ray from NDC.
     float4 near_clip = float4(in.ndc, 0.0, 1.0);
@@ -218,30 +167,13 @@ fragment float4 raycast_fragment(
     float3 ray_origin_world = u.camera_pos;
 
     // World -> grid: invert the rotation R = (gx, gz, -gy).
-    // R^-1 (wx, wy, wz) = (wx, -wz, wy).
     float3 ray_origin = float3(ray_origin_world.x, -ray_origin_world.z, ray_origin_world.y);
     float3 ray_dir   = float3(ray_dir_world.x,   -ray_dir_world.z,   ray_dir_world.y);
-    // Pre-clip origin, kept across the AABB advance below — bbox-edge
-    // rendering needs the camera position to compute ray-to-edge
-    // distances in front of the clip plane.
     float3 cam_origin = ray_origin;
 
-    // Combined AABB clip. Without the buffer this is just the edit
-    // volume; with it, we expand to include the buffer's footprint
-    // (which can wander outside the volume, e.g. dragging a paste off
-    // into empty space). The early reject keeps cameras far from any
-    // geometry from spinning the DDA in pure void.
     float3 aabb_min = u.box_min;
     float3 aabb_max = u.box_max;
-    if (u.fb_active != 0) {
-        float3 b_min = float3(u.fb_coarse_min) * float(kChunkSize)
-                     + float3(u.fb_offset);
-        float3 b_max = float3(u.fb_coarse_min + u.fb_coarse_dim) * float(kChunkSize)
-                     + float3(u.fb_offset);
-        aabb_min = min(aabb_min, b_min);
-        aabb_max = max(aabb_max, b_max);
-    }
-    float3 inv_dir = 1.0 / ray_dir;  // ±inf for zero components is fine
+    float3 inv_dir = 1.0 / ray_dir;
     float3 t1 = (aabb_min - ray_origin) * inv_dir;
     float3 t2 = (aabb_max - ray_origin) * inv_dir;
     float3 t_lo = min(t1, t2);
@@ -252,13 +184,9 @@ fragment float4 raycast_fragment(
         float3 bg = float3(0.118, 0.118, 0.18);
         return float4(bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max), 1.0);
     }
-    // Advance origin to the entry point if we're outside. The small nudge
-    // past the boundary avoids landing on a cell edge with floor() rounding
-    // ambiguously to the cell on either side.
     float t_start = max(t_enter, 0.0);
     ray_origin = ray_origin + ray_dir * (t_start + 1e-4);
 
-    // 3D DDA setup (using the clipped origin).
     int3 cell = int3(floor(ray_origin));
     int3 step_dir;
     step_dir.x = ray_dir.x > 0.0 ? 1 : (ray_dir.x < 0.0 ? -1 : 0);
@@ -283,30 +211,16 @@ fragment float4 raycast_fragment(
 
     int last_axis = -1;
 
-    // Ghost-composite state. When preview_alpha < 1.0 and we hit a
-    // preview cell, we capture its shaded color, mark `ghost_seen`,
-    // and *keep marching* — the loop then ignores future preview hits
-    // (via `skip_preview`) so we naturally find whatever's behind
-    // (another doc cell, an FB cell, or the sky). At terminal-hit time
-    // we alpha-blend the ghost color over that backdrop.
     bool ghost_active = (u.preview_active != 0) && (u.preview_alpha < 0.999);
     bool ghost_seen = false;
     bool skip_preview = false;
     float3 ghost_color = float3(0.0);
 
-    // Dense-doc DDA with a 16³ coarse occupancy oracle. The doc lives
-    // in a `texture3d<uint>` sized to the edit volume; the oracle is a
-    // 1/16-scale `texture3d<uint>` where each cell is 0 (chunk empty) or
-    // non-zero (chunk has filled voxels). At retina resolution the
-    // per-pixel DDA cost is dominated by empty-space marching, so
-    // skipping a whole 16³ chunk at a time when its oracle entry is 0
-    // is the difference between ~35 ms and ~3 ms per frame.
     int3 box_min_i = int3(int(u.box_min.x), int(u.box_min.y), int(u.box_min.z));
     int3 box_max_i = int3(int(u.box_max.x), int(u.box_max.y), int(u.box_max.z));
     int3 box_chunk_min = box_min_i >> int(kChunkBits);
+
     for (int s = 0; s < kMaxSteps; ++s) {
-        // Doc-side: oracle lookup. Skip the per-cell read when the
-        // chunk is reported empty; only sample tex_a otherwise.
         int3 cell_local = cell - box_min_i;
         bool doc_in = (cell.x >= box_min_i.x && cell.x < box_max_i.x &&
                        cell.y >= box_min_i.y && cell.y < box_max_i.y &&
@@ -322,21 +236,13 @@ fragment float4 raycast_fragment(
                 val_doc = tex_a.read(uint3(cell_local)).r;
             }
         }
-        // preview_rem: Remove-mode preview mask. Non-zero entries hide
-        // the corresponding doc cell during the stroke, so erase shows
-        // up live without mutating tex_a. Only worth probing when the
-        // doc actually has something here to hide.
+        // preview_rem hides doc cells during a Remove stroke.
         if (val_doc != 0u && u.preview_active != 0 &&
             preview_rem_oracle.read(uint3(oracle_c)).r != 0u &&
             preview_rem.read(uint3(cell_local)).r != 0u) {
             val_doc = 0u;
         }
-        // Preview-tex: shape/face/generator tool live preview. Same
-        // dims + chunking as the doc tex; gated by preview_active so
-        // the rasterizer skips the read entirely between strokes.
-        // Once a ghost has been accumulated, `skip_preview` keeps us
-        // from re-hitting preview cells on subsequent loop iterations
-        // (so the DDA can naturally reach the doc/sky behind).
+        // Preview-tex (shape/face/generator/brush live preview).
         bool preview_chunk_empty = true;
         uint val_preview = 0u;
         if (u.preview_active != 0 && !skip_preview && doc_in) {
@@ -346,32 +252,18 @@ fragment float4 raycast_fragment(
                 val_preview = preview_tex.read(uint3(cell_local)).r;
             }
         }
-
-        // FloatingBuffer-side lookup (sparse — FB can wander outside the
-        // edit volume during a drag, so it stays in the coarse+pool form).
-        uint pool_idx_fb = 0u;
-        int3 chunk_c_fb = int3(0);
-        bool fb_in = false;
-        if (u.fb_active != 0) {
-            int3 cell_fb = cell - u.fb_offset;
-            chunk_c_fb.x = cell_fb.x >> int(kChunkBits);
-            chunk_c_fb.y = cell_fb.y >> int(kChunkBits);
-            chunk_c_fb.z = cell_fb.z >> int(kChunkBits);
-            int3 cgb = chunk_c_fb - u.fb_coarse_min;
-            fb_in = (cgb.x >= 0 && cgb.y >= 0 && cgb.z >= 0 &&
-                    cgb.x < u.fb_coarse_dim.x &&
-                    cgb.y < u.fb_coarse_dim.y &&
-                    cgb.z < u.fb_coarse_dim.z);
-            if (fb_in) {
-                uint b_idx = uint(cgb.x) +
-                             uint(cgb.y) * uint(u.fb_coarse_dim.x) +
-                             uint(cgb.z) * uint(u.fb_coarse_dim.x) * uint(u.fb_coarse_dim.y);
-                pool_idx_fb = fb_coarse_grid[b_idx];
+        // Lift texture (selection contents).
+        bool lift_chunk_empty = true;
+        uint val_lift = 0u;
+        if (u.lift_active != 0 && doc_in) {
+            lift_chunk_empty =
+                (lift_oracle.read(uint3(oracle_c)).r == 0u);
+            if (!lift_chunk_empty) {
+                val_lift = tex_lift.read(uint3(cell_local)).r;
             }
         }
 
-        // Outside the union of doc volume + FB extent: ray has exited.
-        if (!doc_in && !fb_in) {
+        if (!doc_in) {
             float3 bg = float3(0.118, 0.118, 0.18);
             float3 bg_edged = bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max);
             if (ghost_seen) {
@@ -380,10 +272,7 @@ fragment float4 raycast_fragment(
             return float4(bg_edged, 1.0);
         }
 
-        // Hit detection. Preview-tex wins over everything when active,
-        // then FB, then doc. In ghost mode the first preview hit is
-        // captured rather than returned — the loop keeps marching to
-        // find what's behind, and the terminal-hit branches blend.
+        // Hit precedence: preview > lift > doc.
         if (val_preview != 0u) {
             float3 grid_normal = float3(0.0);
             if (last_axis == 0) grid_normal.x = -float(step_dir.x);
@@ -398,34 +287,28 @@ fragment float4 raycast_fragment(
                 ghost_color = preview_shaded;
                 ghost_seen = true;
                 skip_preview = true;
-                // Don't return — continue the DDA to find the backdrop.
-                // Fall through to the cell-advance logic at loop bottom.
             } else {
                 return float4(preview_shaded, 1.0);
             }
         }
-        if (pool_idx_fb != 0u) {
-            int3 cell_fb = cell - u.fb_offset;
-            uint lx = uint(cell_fb.x) & kChunkMask;
-            uint ly = uint(cell_fb.y) & kChunkMask;
-            uint lz = uint(cell_fb.z) & kChunkMask;
-            uint local_idx = lx + ly * kChunkSize + lz * kChunkSize * kChunkSize;
-            uint val = uint(fb_chunk_pool[pool_idx_fb - 1u].cells[local_idx]);
-            if (val != 0u) {
-                float3 grid_normal = float3(0.0);
-                if (last_axis == 0) grid_normal.x = -float(step_dir.x);
-                else if (last_axis == 1) grid_normal.y = -float(step_dir.y);
-                else if (last_axis == 2) grid_normal.z = -float(step_dir.z);
-                float3 world_normal = float3(grid_normal.x, grid_normal.z, -grid_normal.y);
-                float ndl = max(dot(world_normal, u.light_dir), 0.0);
-                float lambert = 0.3 + 0.7 * ndl;
-                float3 base = palette[val].rgb;
-                float3 shaded = base * lambert;
-                if (ghost_seen) {
-                    return float4(mix(shaded, ghost_color, u.preview_alpha), 1.0);
-                }
-                return float4(shaded, 1.0);
+        if (val_lift != 0u) {
+            float3 grid_normal = float3(0.0);
+            if (last_axis == 0) grid_normal.x = -float(step_dir.x);
+            else if (last_axis == 1) grid_normal.y = -float(step_dir.y);
+            else if (last_axis == 2) grid_normal.z = -float(step_dir.z);
+            float3 world_normal = float3(grid_normal.x, grid_normal.z, -grid_normal.y);
+            float ndl = max(dot(world_normal, u.light_dir), 0.0);
+            float lambert = 0.3 + 0.7 * ndl;
+            float3 base = palette[val_lift].rgb;
+            float3 shaded = base * lambert;
+            // Selection tint — warm yellow mix so lifted cells read
+            // visually as "selected" while keeping the palette colour
+            // legible.
+            shaded = mix(shaded, float3(1.0, 0.9, 0.4) * lambert, 0.45);
+            if (ghost_seen) {
+                return float4(mix(shaded, ghost_color, u.preview_alpha), 1.0);
             }
+            return float4(shaded, 1.0);
         }
         if (val_doc != 0u) {
             float3 grid_normal = float3(0.0);
@@ -437,57 +320,29 @@ fragment float4 raycast_fragment(
             float lambert = 0.3 + 0.7 * ndl;
             float3 base = palette[val_doc].rgb;
             float3 shaded = base * lambert;
-            // Selection tint: oracle-gated so non-selected chunks pay
-            // nothing. Mix-toward a shaded warm yellow so the original
-            // palette color stays readable but the cell reads as
-            // "selected" at a glance.
-            if (sel_oracle.read(uint3(oracle_c)).r != 0u &&
-                tex_sel.read(uint3(cell_local)).r != 0u) {
-                shaded = mix(shaded, float3(1.0, 0.9, 0.4) * lambert, 0.45);
-            }
             if (ghost_seen) {
                 return float4(mix(shaded, ghost_color, u.preview_alpha), 1.0);
             }
             return float4(shaded, 1.0);
         }
 
-        // No hit at this cell. If both the doc oracle says this chunk
-        // is empty AND the FB pool slot here is empty, coarse-skip to
-        // whichever chunk boundary comes first along the ray. Otherwise
-        // cell-step (the chunk we're in has either doc or FB cells
-        // and we need to keep sampling per cell).
-        if (doc_chunk_empty && pool_idx_fb == 0u && preview_chunk_empty) {
+        // No hit at this cell. If doc + preview + lift chunks are all
+        // empty, coarse-skip to the next chunk boundary.
+        if (doc_chunk_empty && preview_chunk_empty && lift_chunk_empty) {
             float3 chunk_min_doc = float3(doc_chunk_c) * float(kChunkSize);
             float3 chunk_max_doc = chunk_min_doc + float(kChunkSize);
-            float3 exit_face_doc = select(chunk_min_doc, chunk_max_doc, step_dir > 0);
-            float3 t_face_doc = (exit_face_doc - ray_origin) * inv_dir;
-            if (step_dir.x == 0) t_face_doc.x = INFINITY;
-            if (step_dir.y == 0) t_face_doc.y = INFINITY;
-            if (step_dir.z == 0) t_face_doc.z = INFINITY;
-            float t_exit_doc = min(min(t_face_doc.x, t_face_doc.y), t_face_doc.z);
-
-            float t_exit_fb = INFINITY;
-            float3 t_face_fb = float3(INFINITY);
-            if (u.fb_active != 0) {
-                float3 chunk_min_fb = float3(chunk_c_fb) * float(kChunkSize)
-                                    + float3(u.fb_offset);
-                float3 chunk_max_fb = chunk_min_fb + float(kChunkSize);
-                float3 exit_face_fb = select(chunk_min_fb, chunk_max_fb, step_dir > 0);
-                t_face_fb = (exit_face_fb - ray_origin) * inv_dir;
-                if (step_dir.x == 0) t_face_fb.x = INFINITY;
-                if (step_dir.y == 0) t_face_fb.y = INFINITY;
-                if (step_dir.z == 0) t_face_fb.z = INFINITY;
-                t_exit_fb = min(min(t_face_fb.x, t_face_fb.y), t_face_fb.z);
-            }
-
-            float t_skip = min(t_exit_doc, t_exit_fb);
-            float3 t_face = (t_exit_doc <= t_exit_fb) ? t_face_doc : t_face_fb;
+            float3 exit_face = select(chunk_min_doc, chunk_max_doc, step_dir > 0);
+            float3 t_face = (exit_face - ray_origin) * inv_dir;
+            if (step_dir.x == 0) t_face.x = INFINITY;
+            if (step_dir.y == 0) t_face.y = INFINITY;
+            if (step_dir.z == 0) t_face.z = INFINITY;
+            float t_exit_doc = min(min(t_face.x, t_face.y), t_face.z);
             int exit_axis = (t_face.x <= t_face.y && t_face.x <= t_face.z) ? 0
                           : (t_face.y <= t_face.z) ? 1 : 2;
             last_axis = exit_axis;
 
-            float eps = max(1e-3, t_skip * 1e-5);
-            float3 pos = ray_origin + ray_dir * (t_skip + eps);
+            float eps = max(1e-3, t_exit_doc * 1e-5);
+            float3 pos = ray_origin + ray_dir * (t_exit_doc + eps);
             cell.x = int(floor(pos.x));
             cell.y = int(floor(pos.y));
             cell.z = int(floor(pos.z));
@@ -537,19 +392,6 @@ fragment float4 raycast_fragment(
     id<MTLBuffer> _paletteBuffer;
     uint64_t _cachedPaletteVersion;
     BOOL _cacheValid;
-    // FloatingBuffer GPU mirror. Sparse coarse-grid + chunk-pool because
-    // FB can wander outside the edit volume during a drag, so a dense
-    // texture won't represent it. Rebuilt when fb.version bumps.
-    id<MTLBuffer> _fbCoarseBuffer;
-    id<MTLBuffer> _fbPoolBuffer;
-    uint64_t _fbLastVersion;
-    BOOL _fbBuilt;
-    simd::int3 _fbCoarseMin;
-    simd::int3 _fbCoarseDim;
-    // Stub buffer bound at the FB slots whenever no FB is active —
-    // Metal needs a non-nil backing for every declared fragment buffer
-    // even when `fb_active == 0` in the uniforms.
-    id<MTLBuffer> _stubBuffer;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -584,18 +426,10 @@ fragment float4 raycast_fragment(
                 [[error localizedDescription] UTF8String]);
         return nil;
     }
-    // 4-byte stub: bound at the floating-buffer slots whenever no
-    // buffer is active, just so Metal sees a non-nil binding.
-    _stubBuffer = [_device newBufferWithLength:sizeof(uint32_t)
-                                       options:MTLResourceStorageModeShared];
-    _stubBuffer.label = @"RaycastBufStub";
     return self;
 }
 
 - (uint32_t)lastChunkCount {
-    // Dense texture has no chunk count of its own — report nothing.
-    // Field stays in the API for the SwiftUI stats panel, which now
-    // reads chunk counts off VoxelGrid directly.
     return 0;
 }
 
@@ -609,79 +443,6 @@ fragment float4 raycast_fragment(
     _cachedPaletteVersion = 0;
 }
 
-// ---------------------------------------------------------------------------
-// GPU upload. The hot path is incremental: drain the grid's dirty-chunk
-// set and update only the affected slots in the chunk pool. Wholesale
-// rebuild is reserved for the cases where the chunk-coord bounds shift
-// (a fresh document, or an edit that places voxels past the previous
-// extents) — there the coarse grid itself has to be reshaped.
-// ---------------------------------------------------------------------------
-
-// Build (or rebuild) the FloatingBuffer GPU mirror from a sparse
-// VoxelGrid. Same coarse-grid + chunk-pool layout as the document, just
-// smaller — kept sparse because the FB can wander outside the edit
-// volume during a drag, which the dense doc texture can't represent.
-- (void)rebuildSparseSlotFromGrid:(const macvoxel::VoxelGrid&)grid
-                           coarse:(__strong id<MTLBuffer>* _Nonnull)coarseOut
-                             pool:(__strong id<MTLBuffer>* _Nonnull)poolOut
-                        coarseMin:(simd::int3* _Nonnull)minOut
-                        coarseDim:(simd::int3* _Nonnull)dimOut
-                       coarseName:(NSString*)coarseLabel
-                         poolName:(NSString*)poolLabel {
-    using VG = macvoxel::VoxelGrid;
-    const auto& chunks = grid.chunks();
-    if (chunks.empty()) {
-        *coarseOut = nil;
-        *poolOut = nil;
-        *minOut = simd::int3{0, 0, 0};
-        *dimOut = simd::int3{0, 0, 0};
-        return;
-    }
-
-    int32_t min_cx = INT32_MAX, min_cy = INT32_MAX, min_cz = INT32_MAX;
-    int32_t max_cx = INT32_MIN, max_cy = INT32_MIN, max_cz = INT32_MIN;
-    for (const auto& [coord, chunk] : chunks) {
-        min_cx = std::min(min_cx, coord.x); max_cx = std::max(max_cx, coord.x);
-        min_cy = std::min(min_cy, coord.y); max_cy = std::max(max_cy, coord.y);
-        min_cz = std::min(min_cz, coord.z); max_cz = std::max(max_cz, coord.z);
-    }
-    *minOut = simd::int3{min_cx, min_cy, min_cz};
-    *dimOut = simd::int3{max_cx - min_cx + 1,
-                         max_cy - min_cy + 1,
-                         max_cz - min_cz + 1};
-
-    const size_t coarse_count =
-        static_cast<size_t>((*dimOut).x) *
-        static_cast<size_t>((*dimOut).y) *
-        static_cast<size_t>((*dimOut).z);
-    std::vector<uint32_t> coarse(coarse_count, 0);
-    const size_t pool_bytes = chunks.size() * VG::kChunkVolume;
-    *poolOut = [_device newBufferWithLength:pool_bytes
-                                    options:MTLResourceStorageModeShared];
-    (*poolOut).label = poolLabel;
-    auto* pool = static_cast<uint8_t*>((*poolOut).contents);
-    uint32_t pool_idx = 1;
-    for (const auto& [coord, chunk] : chunks) {
-        const size_t cgi =
-            static_cast<size_t>(coord.x - min_cx) +
-            static_cast<size_t>(coord.y - min_cy) *
-                static_cast<size_t>((*dimOut).x) +
-            static_cast<size_t>(coord.z - min_cz) *
-                static_cast<size_t>((*dimOut).x) *
-                static_cast<size_t>((*dimOut).y);
-        coarse[cgi] = pool_idx;
-        std::memcpy(pool + (pool_idx - 1) * VG::kChunkVolume,
-                    chunk->cells, VG::kChunkVolume);
-        ++pool_idx;
-    }
-    *coarseOut = [_device newBufferWithBytes:coarse.data()
-                                     length:coarse.size() * sizeof(uint32_t)
-                                    options:MTLResourceStorageModeShared];
-    (*coarseOut).label = coarseLabel;
-}
-
-// Upload the palette into its GPU buffer. Lazy-allocates _paletteBuffer
-// on first call. Cheap (1 KB memcpy).
 - (void)uploadPalette:(macvoxel::Document*)doc {
     std::array<simd::float4, 256> pal_floats{};
     for (size_t i = 0; i < 256; ++i) {
@@ -701,7 +462,6 @@ fragment float4 raycast_fragment(
     std::memcpy(_paletteBuffer.contents, pal_floats.data(), sizeof(pal_floats));
 }
 
-
 - (void)encodeWithEncoder:(id<MTLRenderCommandEncoder>)encoder
                      view:(simd::float4x4)view
                projection:(simd::float4x4)projection
@@ -710,8 +470,6 @@ fragment float4 raycast_fragment(
             volumeTexture:(VolumeTexture*)docVolumeTex {
     if (ctx == nullptr || docVolumeTex == nil) return;
     macvoxel::Document* doc = &ctx->document;
-    // Palette upload is independent of geometry; doc volume is synced
-    // by the owner (MetalScene) before this encode.
     if (_paletteBuffer == nil ||
         _cachedPaletteVersion != doc->palette_version) {
         [self uploadPalette:doc];
@@ -720,48 +478,12 @@ fragment float4 raycast_fragment(
     if (_paletteBuffer == nil) return;
     _cacheValid = YES;
 
-    // FloatingBuffer: rebuild GPU mirror whenever the version bumps,
-    // drop it whenever FB goes inactive.
-    const macvoxel::FloatingBuffer& fb = ctx->floating_buffer;
-    if (fb.active) {
-        if (!_fbBuilt || _fbLastVersion != fb.version) {
-            [self rebuildSparseSlotFromGrid:fb.grid
-                                     coarse:&_fbCoarseBuffer
-                                       pool:&_fbPoolBuffer
-                                  coarseMin:&_fbCoarseMin
-                                  coarseDim:&_fbCoarseDim
-                                 coarseName:@"RaycastFbCoarse"
-                                   poolName:@"RaycastFbPool"];
-            _fbBuilt = (_fbCoarseBuffer != nil);
-            _fbLastVersion = fb.version;
-        }
-    } else if (_fbBuilt) {
-        _fbCoarseBuffer = nil;
-        _fbPoolBuffer = nil;
-        _fbBuilt = NO;
-    }
-
     Uniforms u;
     u.inv_vp = simd_inverse(projection * view);
     u.camera_pos = cameraWorld;
     u._pad0 = 0.0f;
     u.light_dir = simd::normalize(simd::float3{0.4f, 0.7f, 0.5f});
     u._pad1 = 0.0f;
-
-    const bool fb_drawable = _fbBuilt && _fbCoarseBuffer != nil;
-    if (fb_drawable) {
-        u.fb_coarse_min = _fbCoarseMin;
-        u.fb_coarse_dim = _fbCoarseDim;
-        u.fb_offset = simd::int3{fb.offset_x, fb.offset_y, fb.offset_z};
-        u.fb_active = 1;
-    } else {
-        u.fb_coarse_min = simd::int3{0, 0, 0};
-        u.fb_coarse_dim = simd::int3{0, 0, 0};
-        u.fb_offset = simd::int3{0, 0, 0};
-        u.fb_active = 0;
-    }
-    u._pad2 = 0;
-    u._pad3 = 0;
 
     const macvoxel::EditVolume& vol = doc->volume;
     u.box_min = simd::float3{static_cast<float>(vol.x0),
@@ -770,36 +492,26 @@ fragment float4 raycast_fragment(
     u.box_max = simd::float3{static_cast<float>(vol.x1 + 1),
                              static_cast<float>(vol.y1 + 1),
                              static_cast<float>(vol.z1 + 1)};
-    u._pad4 = 0.0f;
-    u._pad5 = 0.0f;
-    // Preview-tex is active when a shape/face/generator stroke is
-    // mid-flight. Tools flip ctx->preview_active true on first stamp,
-    // false on commit/cancel; the rasterizer pays exactly one oracle
-    // byte per pixel when inactive.
+    u._pad2 = 0.0f;
+    u._pad3 = 0.0f;
     u.preview_active = ctx->preview_active ? 1 : 0;
     u.preview_alpha = ctx->preview_alpha;
-    u._pad7 = 0;
-    u._pad8 = 0;
+    u.lift_active = ctx->selection.lift_active() ? 1 : 0;
+    u._pad4 = 0;
 
     [encoder pushDebugGroup:@"Voxels (raycast)"];
     [encoder setRenderPipelineState:_pipeline];
     [encoder setCullMode:MTLCullModeNone];
     [encoder setFragmentBytes:&u length:sizeof(u) atIndex:0];
     [encoder setFragmentBuffer:_paletteBuffer offset:0 atIndex:1];
-    [encoder setFragmentBuffer:(fb_drawable ? _fbCoarseBuffer : _stubBuffer)
-                        offset:0
-                       atIndex:2];
-    [encoder setFragmentBuffer:(fb_drawable ? _fbPoolBuffer : _stubBuffer)
-                        offset:0
-                       atIndex:3];
     [encoder setFragmentTexture:docVolumeTex.texture atIndex:0];
     [encoder setFragmentTexture:docVolumeTex.oracleTexture atIndex:1];
     [encoder setFragmentTexture:docVolumeTex.previewTexture atIndex:2];
     [encoder setFragmentTexture:docVolumeTex.previewOracleTexture atIndex:3];
     [encoder setFragmentTexture:docVolumeTex.previewRemTexture atIndex:4];
     [encoder setFragmentTexture:docVolumeTex.previewRemOracleTexture atIndex:5];
-    [encoder setFragmentTexture:docVolumeTex.selectionTexture atIndex:6];
-    [encoder setFragmentTexture:docVolumeTex.selectionOracleTexture atIndex:7];
+    [encoder setFragmentTexture:docVolumeTex.liftTexture atIndex:6];
+    [encoder setFragmentTexture:docVolumeTex.liftOracleTexture atIndex:7];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:3];

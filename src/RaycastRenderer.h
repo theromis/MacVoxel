@@ -11,18 +11,14 @@ namespace macvoxel { struct EditorContext; }
 // fragment shader marches a ray (3D DDA) through the document's voxels
 // and outputs the color of the first filled cell hit.
 //
-// Layout uploaded to GPU (Phase A2):
+// Layout uploaded to GPU:
 //   * Doc texture: a `texture3d<uint, R8Uint>` sized to the EditVolume
-//     (default 256³). Per-cell lookup is a direct `tex.read(uint3)`.
-//     Maintained by the `VolumeTexture` helper, which uploads dirty
-//     16³ chunks from `doc.volume_shadow` on geometry_version change.
-//   * FloatingBuffer slot: coarse-grid + chunk-pool buffers for the
-//     selection lift/paste/move. Stays sparse because the FB can wander
-//     outside the edit volume during a drag, which the dense doc
-//     texture can't represent.
+//     (default 256³). Maintained by the `VolumeTexture` helper.
+//   * Lift texture: same dims as the doc. Holds the contents of an
+//     active selection (lift). Composited on top of the doc with a
+//     selection tint when non-zero.
 //   * Preview texture: dense R8Uint, same dims as the doc. Composited
 //     over the doc by the fragment shader when `preview_active != 0`.
-//     Filled by ShapeEngine / GeneratorEngine kernels during a gesture.
 //   * Palette: 256 RGBA floats.
 @interface RaycastRenderer : NSObject
 
@@ -38,15 +34,7 @@ namespace macvoxel { struct EditorContext; }
             volumeTexture:(VolumeTexture*)docVolumeTex;
 
 - (uint32_t)lastChunkCount;
-
-// Total GPU memory occupied by the renderer's voxel data structures
-// (doc texture, in bytes).
 - (size_t)lastGPUBytes;
-
-// Drop the GPU cache so the next encode rebuilds from scratch. Called
-// when the document is replaced wholesale (load, new) — the new
-// document's shadow may be a different size, and any prior chunk
-// state must be discarded.
 - (void)invalidate;
 
 @end
