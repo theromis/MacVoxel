@@ -20,6 +20,7 @@ typedef NS_ENUM(NSInteger, BridgeGeneratorKind) {
     BridgeGeneratorKindPyramid   NS_SWIFT_NAME(pyramid)   = 3,
     BridgeGeneratorKindPerlin    NS_SWIFT_NAME(perlin)    = 4,
     BridgeGeneratorKindTorus     NS_SWIFT_NAME(torus)     = 5,
+    BridgeGeneratorKindTree      NS_SWIFT_NAME(tree)      = 6,
 };
 
 // Mirror of macvoxel::ToolKind.

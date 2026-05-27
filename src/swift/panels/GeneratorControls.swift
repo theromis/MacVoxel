@@ -23,6 +23,9 @@ struct GeneratorControls: View {
                 torusRows
             case .perlin:
                 perlinRows
+            case .tree:
+                axisRow
+                treeRows
             @unknown default:
                 EmptyView()
             }
@@ -64,6 +67,56 @@ struct GeneratorControls: View {
                 ),
                 range: 0.05...1.0,
                 format: "%.2f")
+        }
+    }
+
+    @ViewBuilder
+    private var treeRows: some View {
+        labeled("Depth") {
+            IntSliderRow(
+                value: Binding(
+                    get: { state.generatorPerlinOctaves },
+                    set: { state.generatorPerlinOctaves = $0 }
+                ),
+                range: 1...5)
+        }
+        labeled("Wildness") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorPerlinThreshold },
+                    set: { state.generatorPerlinThreshold = $0 }
+                ),
+                range: 0.0...1.0,
+                format: "%.2f")
+        }
+        labeled("Trunk radius") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorTorusTube },
+                    set: { state.generatorTorusTube = $0 }
+                ),
+                range: 0.20...1.50,
+                format: "%.2f")
+        }
+        labeled("Leaf color") {
+            paletteIndexRow(binding: Binding(
+                get: { state.generatorPerlinPaletteHi },
+                set: { state.generatorPerlinPaletteHi = $0 }
+            ))
+        }
+        labeled("Seed") {
+            HStack(spacing: 6) {
+                TextField("", value: Binding(
+                    get: { state.generatorPerlinSeed },
+                    set: { state.generatorPerlinSeed = $0 }
+                ), format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                Button("Randomize") {
+                    state.generatorPerlinSeed = Int.random(in: 1...Int(Int32.max))
+                }
+                .controlSize(.small)
+            }
         }
     }
 

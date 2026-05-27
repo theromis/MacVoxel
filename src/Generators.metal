@@ -272,6 +272,216 @@ static float perlin3(float3 p, uint seed) {
     return mix(nxy0, nxy1, f.z);
 }
 
+// --- Explicit recursive-branching tree ------------------------------------
+//
+// Per cell, walk every branch in a fixed-depth nested tree (K=3 children
+// per node, max depth 5) and take the min capsule SDF. Each child's
+// `(pos, dir, length)` is computed from its parent's state via a
+// hash-jittered tilt/rotation, so branches genuinely emerge from their
+// parent's tip. This is brute-force but stays entirely on GPU and
+// produces a real tree shape — no fractal-attractor sparseness, no
+// KIFS rotation drift.
+//
+// Reused uniform fields:
+//   noise_octaves   = max recursion depth (clamped 1..5)
+//   noise_threshold = "wildness" — adds hash-based rotation jitter
+//   noise_seed      = re-roll without changing other params
+//   torus_tube      = base branch radius (trunk thickness); deeper
+//                     levels taper by 0.78× per generation
+//   palette_idx     = bark color
+//   axis            = world axis pointing "up"
+//
+// `noise_scale` is ignored in this generator (kept for backward
+// compatibility with the shared Perlin slider plumbing).
+
+constant float TREE_BASE_LENGTH = 1.0;
+constant float TREE_LENGTH_FALLOFF = 0.72;
+constant float TREE_RADIUS_FALLOFF = 0.78;
+constant float TREE_MAX_HEIGHT = TREE_BASE_LENGTH / (1.0 - TREE_LENGTH_FALLOFF);
+
+static float tree_hash11(uint n) {
+    n = (n ^ 61u) ^ (n >> 16);
+    n *= 9u;
+    n ^= n >> 4;
+    n *= 0x27d4eb2du;
+    n ^= n >> 15;
+    return float(n & 0x00ffffffu) / float(0x01000000u);
+}
+
+static uint tree_mix_seed(uint a, uint b) {
+    return a ^ (b + 0x9e3779b9u + (a << 6) + (a >> 2));
+}
+
+static float tree_capsule_de(float3 p, float3 a, float3 b, float r) {
+    float3 ab = b - a;
+    float3 ap = p - a;
+    float ll = dot(ab, ab);
+    float t = (ll > 1e-6) ? clamp(dot(ap, ab) / ll, 0.0, 1.0) : 0.0;
+    float3 qv = ap - ab * t;
+    return length(qv) - r;
+}
+
+static float3 tree_perp(float3 dir) {
+    float3 ref = (abs(dir.x) < 0.9) ? float3(1.0, 0.0, 0.0)
+                                    : float3(0.0, 0.0, 1.0);
+    return normalize(cross(dir, ref));
+}
+
+// Compute child branch tip from parent tip+dir+segment_length. K=3
+// children per parent, evenly distributed around `dir` axis with
+// per-child hash jitter. tilt = base_tilt * (1 + jitter).
+static void tree_grow_child(thread float3& pos, thread float3& dir,
+                            thread float& seg_len, uint digit,
+                            uint branch_seed, float base_tilt, float wild) {
+    float3 perp1 = tree_perp(dir);
+    float3 perp2 = cross(dir, perp1);
+
+    const float K_INV = 1.0 / 3.0;
+    float angle = (float(digit) + 0.5) * (2.0 * 3.14159265 * K_INV)
+                + (tree_hash11(branch_seed + 13u) - 0.5) * wild * 0.7;
+    float tilt = base_tilt
+               * (1.0 + (tree_hash11(branch_seed + 29u) - 0.5) * wild * 0.5);
+
+    seg_len *= TREE_LENGTH_FALLOFF;
+    float ct = cos(tilt), st = sin(tilt);
+    float ca = cos(angle), sa = sin(angle);
+    float3 new_dir = ct * dir + st * (ca * perp1 + sa * perp2);
+    pos = pos + new_dir * seg_len;
+    dir = new_dir;
+}
+
+// Two-color tree evaluation. Bark de tracks the trunk plus all
+// intermediate-level branches; leaf de only catches the deepest
+// (depth==user's max) level. Caller picks palette based on which is
+// smaller and ≤ 0.
+static void tree_de(float3 p, constant Uniforms& u,
+                    thread float& de_bark, thread float& de_leaf) {
+    const uint depth = clamp(u.noise_octaves, 1u, 5u);
+    const float base_radius = max(u.torus_tube, 0.05);
+    const float wild = clamp(u.noise_threshold, 0.0, 1.0);
+    const float base_tilt = mix(0.45, 0.85, wild);
+    const uint root_seed = u.noise_seed * 2654435761u + 1u;
+
+    // Trunk is always bark.
+    float3 trunk_base = float3(0.0, 0.0, 0.0);
+    float3 trunk_top  = float3(0.0, TREE_BASE_LENGTH, 0.0);
+    float3 trunk_dir  = float3(0.0, 1.0, 0.0);
+    float  trunk_len  = TREE_BASE_LENGTH;
+    de_bark = tree_capsule_de(p, trunk_base, trunk_top, base_radius);
+    de_leaf = 1e10;
+
+    // 5 nested levels, unrolled. At each level we ask whether this is
+    // the user's deepest level (level == depth) — if so the capsule
+    // goes to leaf, else to bark.
+    const uint K = 3u;
+    if (depth >= 1u) {
+        float r1 = base_radius * TREE_RADIUS_FALLOFF;
+        bool leaf1 = (depth == 1u);
+        for (uint d1 = 0u; d1 < K; ++d1) {
+            float3 p1 = trunk_top; float3 v1 = trunk_dir; float l1 = trunk_len;
+            uint s1 = tree_mix_seed(root_seed, d1 + 1u);
+            tree_grow_child(p1, v1, l1, d1, s1, base_tilt, wild);
+            float cd1 = tree_capsule_de(p, trunk_top, p1, r1);
+            if (leaf1) de_leaf = min(de_leaf, cd1);
+            else       de_bark = min(de_bark, cd1);
+
+            if (depth >= 2u) {
+                float r2 = r1 * TREE_RADIUS_FALLOFF;
+                bool leaf2 = (depth == 2u);
+                for (uint d2 = 0u; d2 < K; ++d2) {
+                    float3 p2 = p1; float3 v2 = v1; float l2 = l1;
+                    uint s2 = tree_mix_seed(s1, d2 + 1u);
+                    tree_grow_child(p2, v2, l2, d2, s2, base_tilt, wild);
+                    float cd2 = tree_capsule_de(p, p1, p2, r2);
+                    if (leaf2) de_leaf = min(de_leaf, cd2);
+                    else       de_bark = min(de_bark, cd2);
+
+                    if (depth >= 3u) {
+                        float r3 = r2 * TREE_RADIUS_FALLOFF;
+                        bool leaf3 = (depth == 3u);
+                        for (uint d3 = 0u; d3 < K; ++d3) {
+                            float3 p3 = p2; float3 v3 = v2; float l3 = l2;
+                            uint s3 = tree_mix_seed(s2, d3 + 1u);
+                            tree_grow_child(p3, v3, l3, d3, s3, base_tilt, wild);
+                            float cd3 = tree_capsule_de(p, p2, p3, r3);
+                            if (leaf3) de_leaf = min(de_leaf, cd3);
+                            else       de_bark = min(de_bark, cd3);
+
+                            if (depth >= 4u) {
+                                float r4 = r3 * TREE_RADIUS_FALLOFF;
+                                bool leaf4 = (depth == 4u);
+                                for (uint d4 = 0u; d4 < K; ++d4) {
+                                    float3 p4 = p3; float3 v4 = v3; float l4 = l3;
+                                    uint s4 = tree_mix_seed(s3, d4 + 1u);
+                                    tree_grow_child(p4, v4, l4, d4, s4, base_tilt, wild);
+                                    float cd4 = tree_capsule_de(p, p3, p4, r4);
+                                    if (leaf4) de_leaf = min(de_leaf, cd4);
+                                    else       de_bark = min(de_bark, cd4);
+
+                                    if (depth >= 5u) {
+                                        float r5 = r4 * TREE_RADIUS_FALLOFF;
+                                        for (uint d5 = 0u; d5 < K; ++d5) {
+                                            float3 p5 = p4; float3 v5 = v4; float l5 = l4;
+                                            uint s5 = tree_mix_seed(s4, d5 + 1u);
+                                            tree_grow_child(p5, v5, l5, d5, s5, base_tilt, wild);
+                                            // depth==5: deepest, always leaf.
+                                            de_leaf = min(de_leaf,
+                                                tree_capsule_de(p, p4, p5, r5));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+kernel void generate_tree(
+    constant Uniforms& u                  [[buffer(0)]],
+    texture3d<uint, access::write> tex_t  [[texture(0)]],
+    texture3d<uint, access::write> oracle [[texture(1)]],
+    uint3 gid                             [[thread_position_in_grid]])
+{
+    int3 cell_local, cell_world;
+    if (!resolve_cell(gid, u, cell_local, cell_world)) return;
+
+    uint write_val = 0u;
+    if (in_bounds(cell_world, u)) {
+        AxisView v = make_axis_view(cell_world, u);
+        int axis = int(u.axis);
+        int u_a = (axis == 0) ? 1 : 0;
+        int v_a = (axis == 2) ? 1 : 2;
+
+        // Fit gizmo's up-axis to the tree's maximum (perfectly vertical)
+        // height — the geometric series sum of segment lengths. Real
+        // trees rarely reach the full vertical extent because branches
+        // tilt outward, so we give a bit of headroom (1.05×).
+        const float fit = max(v.dim[axis] / (TREE_MAX_HEIGHT * 1.05), 0.0001);
+
+        float up     = (v.pos[axis] - v.lo[axis]) / fit;
+        float side_a = (v.pos[u_a] - (v.lo[u_a] + v.dim[u_a] * 0.5)) / fit;
+        float side_b = (v.pos[v_a] - (v.lo[v_a] + v.dim[v_a] * 0.5)) / fit;
+        // Optional flip so apex_at_max=0 grows the tree from the +axis face.
+        if (u.apex_at_max == 0u) up = v.dim[axis] / fit - up;
+
+        float3 p = float3(side_a, up, side_b);
+        float de_bark, de_leaf;
+        tree_de(p, u, de_bark, de_leaf);
+        // Leaf wins when it's both inside and closer than bark; bark
+        // covers everything else. perlin_palette_hi doubles as the
+        // leaf color for Tree (the field is otherwise unused here).
+        if (de_leaf <= 0.0 && de_leaf <= de_bark) {
+            write_val = u.perlin_palette_hi;
+        } else if (de_bark <= 0.0) {
+            write_val = u.palette_idx;
+        }
+    }
+    write_cell(cell_local, write_val, tex_t, oracle);
+}
+
 kernel void generate_perlin(
     constant Uniforms& u                  [[buffer(0)]],
     texture3d<uint, access::write> tex_t  [[texture(0)]],

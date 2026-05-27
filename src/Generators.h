@@ -38,6 +38,7 @@ enum class Kind : uint32_t {
     Pyramid,
     Perlin,
     Torus,
+    Tree,
     // Maze, Fractal — added in follow-ups
     Count_,
 };
