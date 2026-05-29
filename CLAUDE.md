@@ -53,6 +53,16 @@ commits on `main`. As of 2026-05-16:
   alpha 0.55, clearing the previous frame's bbox via
   `clearPreviewBbox`. See "Mutator architecture" + "Hover preview"
   below.
+- **Tree generator (2026-05-29)**: a new `gen::Kind::Tree` that draws
+  a recursive-branching tree entirely on the GPU — no CPU skeleton,
+  no segment buffer. The kernel evaluates a fixed-depth K=3 branching
+  tree per cell (capsule-SDF union, 5 nested levels unrolled), each
+  child's pose derived from its parent's tip. Deepest-level branches
+  stamp a separate palette index so the result pairs with the Foliage
+  Mutator. Reuses the shared `Params` / Perlin-slider plumbing rather
+  than adding new fields. We first tried a KIFS (fold-based fractal)
+  approach and abandoned it — see "Tree generator" below for the
+  algorithm and the KIFS post-mortem.
 
 The CPU `PreviewOverlay` is dormant — every active-development tool
 now writes `tex_t` instead. The rasterizer still binds the legacy
@@ -156,7 +166,8 @@ src/
 │                          last_bounds_dispatched) means shrinking
 │                          bounds naturally clear in-place.
 ├── Generators.metal       generate_ellipsoid / cylinder / cone /
-│                          pyramid / torus / perlin — thread-per-
+│                          pyramid / torus / perlin / tree / helix —
+│                          thread-per-
 │                          cell-of-dispatch-bbox, writes palette to
 │                          tex_t when inside shape and in bounds,
 │                          else 0.
@@ -506,6 +517,85 @@ redundant with the ghost cells for Brush (Brush ghost == exactly
 what Brush will write). Mutator still gets a wireframe via
 `DrawOverlay`, but it's the contour outline above, not a floating
 cube — that distinguishes AOE reach from rule-filtered output.
+
+## Tree generator (recursive branching, GPU-only)
+
+`gen::Kind::Tree` (`generate_tree` in `Generators.metal`) makes a
+tree shape with no CPU work and no extra buffer bindings — the hard
+constraint Paul set was "do not touch the CPU." It's a per-cell
+distance-field evaluation of an explicit recursive-branching tree:
+
+- A trunk capsule, then K=3 children per node, recursion **unrolled
+  to 5 nested levels** (Metal has no recursion, hence the literal
+  nesting). Each cell takes the `min` capsule-SDF over every branch;
+  `de <= 0` writes a voxel.
+- Each child's pose is computed **from scratch** from its parent's
+  tip + direction + segment length via `tree_grow_child`: tilt away
+  from the parent axis by `base_tilt`, rotate around it by
+  `(digit + 0.5) * 2π/K`, both perturbed by a per-branch hash of the
+  seed. Length and radius taper by fixed falloffs per generation.
+- The deepest level (`level == depth`) routes its capsules to a
+  separate `de_leaf` accumulator; everything shallower goes to
+  `de_bark`. The kernel writes `perlin_palette_hi` when leaf wins,
+  `palette_idx` otherwise. That two-color split is what makes the
+  tree pair cleanly with the Foliage Mutator — flood the leaf color
+  to grow a canopy without the bark contaminating the seed check.
+
+**Param remapping** (no new `Params` fields — reuses the Perlin
+slider plumbing, relabeled in `GeneratorControls`):
+  - `noise_octaves` → recursion **Depth** (1..5)
+  - `noise_threshold` → **Wildness** (hash-jitter on tilt + rotation)
+  - `noise_seed` → re-roll
+  - `torus_tube` → trunk/base branch **radius**
+  - `palette_idx` → bark color; `perlin_palette_hi` → leaf color
+  - `noise_scale` is **ignored** by Tree (left in the struct for the
+    shared plumbing).
+
+The gizmo up-axis is fit to `TREE_MAX_HEIGHT` (the geometric series
+sum of segment lengths) so the tree fills the bounds; **a roughly
+cubical-or-wider gizmo is needed** or the laterally-spreading
+branches clip against the side walls.
+
+### Why not KIFS (the post-mortem)
+
+The first instinct — and the genuinely elegant demoscene answer —
+was a **KIFS** (Kaleidoscopic Iterated Function System): fold space
+with `abs() + diagonal-sort` rotations each iteration, draw one
+capsule, divide the SDF by accumulated scale. Two or three lines of
+inner loop, fixed cost regardless of branch count. We tried several
+variants and abandoned all of them. What broke, in order of
+discovery:
+
+1. **A terminal-sphere DE binarizes to nothing.** A proper KIFS
+   distance estimator (`length(p)/scale - r`) is tuned for
+   *raymarching*, where the surface shows up via SDF gradients. The
+   `de <= 0` solid region is essentially the fractal skeleton —
+   near-zero volume — so voxelizing it gives an empty or near-empty
+   grid.
+2. **Union-of-capsules-per-level collapses to the trunk.** Drawing a
+   trunk capsule at every fold level *seems* to give volume, but the
+   fold's `abs + sort` canonicalization maps every on-axis capsule
+   back onto the same y-axis segment — so all levels draw the same
+   trunk and no branches appear. A laterally-offset capsule unfolds
+   to 8 copies, but a *vertical* offset capsule just makes parallel
+   fence-pickets, not outward limbs.
+3. **Cumulative rotation + lateral drift.** Chaining each level's
+   capsule from the previous tip (forward-folding the endpoint to
+   keep them connected) finally produced branches — but each
+   iteration adds a fixed tilt+twist, so after ~6 levels the chain
+   has spun >3 radians and is *spiraling*, not growing outward. Deep
+   iterations either clip outside the gizmo or wrap back in at
+   unrelated positions ("detached hovering voxels").
+
+The through-line: KIFS gives you a *fractal attractor*, and a tree
+is not its attractor — it's a finite recursive structure where each
+branch needs an independent, non-accumulating pose. The explicit
+unrolled version costs more per cell (≈3^depth capsule evals, a few
+hundred ms at depth 5) but every branch's transform is computed
+fresh from its path, so there's no drift and no sparseness. If this
+ever needs to be faster, a 16³ branch-bucket oracle or a coarse
+bounding-sphere reject per subtree is the move — not a return to
+folds.
 
 ## Tool perf rule: dispatch only on state change
 
