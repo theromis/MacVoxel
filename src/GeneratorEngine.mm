@@ -40,6 +40,7 @@ NSString* KernelNameForKind(gen::Kind k) {
         case gen::Kind::Perlin:    return @"generate_perlin";
         case gen::Kind::Torus:     return @"generate_torus";
         case gen::Kind::Tree:      return @"generate_tree";
+        case gen::Kind::Helix:     return @"generate_helix";
         case gen::Kind::Count_:    return nil;
     }
     return nil;
@@ -62,11 +63,15 @@ struct Uniforms {
     uint32_t perlin_palette_lo;
     uint32_t perlin_palette_hi;
     uint32_t pad1;
+    float    helix_turns;
+    float    helix_radius;
+    float    helix_tube;
+    uint32_t helix_clockwise;
     int32_t  dispatch_lo[4];
     int32_t  dispatch_size[4];
     int32_t  tex_origin[4];
 };
-static_assert(sizeof(Uniforms) == 128, "GeneratorUniforms layout drift");
+static_assert(sizeof(Uniforms) == 144, "GeneratorUniforms layout drift");
 
 }  // namespace
 
@@ -180,6 +185,10 @@ static_assert(sizeof(Uniforms) == 128, "GeneratorUniforms layout drift");
     u.torus_tube = params.torus_tube;
     u.perlin_palette_lo = params.perlin_palette_lo;
     u.perlin_palette_hi = params.perlin_palette_hi;
+    u.helix_turns = params.helix_turns;
+    u.helix_radius = params.helix_radius;
+    u.helix_tube = params.helix_tube;
+    u.helix_clockwise = params.helix_clockwise;
     u.dispatch_lo[0] = ux0 - tex_lo_x;
     u.dispatch_lo[1] = uy0 - tex_lo_y;
     u.dispatch_lo[2] = uz0 - tex_lo_z;

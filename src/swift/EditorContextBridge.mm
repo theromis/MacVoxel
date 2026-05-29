@@ -447,6 +447,38 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
         static_cast<uint32_t>(std::clamp<NSInteger>(idx, 0, 255));
 }
 
+- (float)generatorHelixTurns {
+    return _ctx->generator.params.helix_turns;
+}
+
+- (void)setGeneratorHelixTurns:(float)turns {
+    _ctx->generator.params.helix_turns = turns;
+}
+
+- (float)generatorHelixRadius {
+    return _ctx->generator.params.helix_radius;
+}
+
+- (void)setGeneratorHelixRadius:(float)radius {
+    _ctx->generator.params.helix_radius = radius;
+}
+
+- (float)generatorHelixTube {
+    return _ctx->generator.params.helix_tube;
+}
+
+- (void)setGeneratorHelixTube:(float)tube {
+    _ctx->generator.params.helix_tube = tube;
+}
+
+- (BOOL)generatorHelixClockwise {
+    return _ctx->generator.params.helix_clockwise != 0;
+}
+
+- (void)setGeneratorHelixClockwise:(BOOL)clockwise {
+    _ctx->generator.params.helix_clockwise = clockwise ? 1u : 0u;
+}
+
 // ---------------------------------------------------------------------------
 // Mutator panel state
 // ---------------------------------------------------------------------------

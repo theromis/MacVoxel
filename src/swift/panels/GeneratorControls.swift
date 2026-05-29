@@ -26,6 +26,9 @@ struct GeneratorControls: View {
             case .tree:
                 axisRow
                 treeRows
+            case .helix:
+                axisRow
+                helixRows
             @unknown default:
                 EmptyView()
             }
@@ -117,6 +120,45 @@ struct GeneratorControls: View {
                 }
                 .controlSize(.small)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var helixRows: some View {
+        labeled("Turns") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorHelixTurns },
+                    set: { state.generatorHelixTurns = $0 }
+                ),
+                range: 0.25...12.0,
+                format: "%.2f")
+        }
+        labeled("Radius") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorHelixRadius },
+                    set: { state.generatorHelixRadius = $0 }
+                ),
+                range: 0.0...1.0,
+                format: "%.2f")
+        }
+        labeled("Tube") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorHelixTube },
+                    set: { state.generatorHelixTube = $0 }
+                ),
+                range: 0.02...0.90,
+                format: "%.2f")
+        }
+        labeled("Winding") {
+            Picker("Winding", selection: helixClockwiseBinding) {
+                Text("CCW").tag(false)
+                Text("CW").tag(true)
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
         }
     }
 
@@ -240,6 +282,11 @@ struct GeneratorControls: View {
     private var apexBinding: Binding<Bool> {
         Binding(get: { state.generatorApexAtMax },
                 set: { state.generatorApexAtMax = $0 })
+    }
+
+    private var helixClockwiseBinding: Binding<Bool> {
+        Binding(get: { state.generatorHelixClockwise },
+                set: { state.generatorHelixClockwise = $0 })
     }
 }
 

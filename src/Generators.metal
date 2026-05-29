@@ -34,6 +34,10 @@ struct Uniforms {
     uint  perlin_palette_lo;  // Perlin: gradient endpoint at fBm = threshold
     uint  perlin_palette_hi;  // Perlin: gradient endpoint at fBm = 1
     uint  pad1;
+    float helix_turns;        // Helix: complete rotations over the axial extent
+    float helix_radius;       // Helix: radius as fraction of available radial room
+    float helix_tube;         // Helix: tube radius as fraction of radial half-extent
+    uint  helix_clockwise;    // Helix: non-zero reverses winding
     int3  dispatch_lo;        // texture-local dispatch min
     int3  dispatch_size;      // dispatch dims
     int3  tex_origin;         // texture (0,0,0) in world cells (== EditVolume.lo)
@@ -218,6 +222,74 @@ kernel void generate_torus(
             float dr = radial - (1.0 - tube);
             float er = dr / tube;
             if (er * er + n_a * n_a <= 1.0) write_val = u.palette_idx;
+        }
+    }
+    write_cell(cell_local, write_val, tex_t, oracle);
+}
+
+// Circular tube wound around the selected axis. Newton refinement finds
+// the closest curve point for each voxel rather than evaluating only at
+// the voxel's height, keeping the tube coherent on steep coils.
+kernel void generate_helix(
+    constant Uniforms& u                  [[buffer(0)]],
+    texture3d<uint, access::write> tex_t  [[texture(0)]],
+    texture3d<uint, access::write> oracle [[texture(1)]],
+    uint3 gid                             [[thread_position_in_grid]])
+{
+    int3 cell_local, cell_world;
+    if (!resolve_cell(gid, u, cell_local, cell_world)) return;
+
+    uint write_val = 0u;
+    if (in_bounds(cell_world, u)) {
+        int axis = int(u.axis);
+        int u_a = (axis == 0) ? 1 : 0;
+        int v_a = (axis == 2) ? 1 : 2;
+        AxisView v = make_axis_view(cell_world, u);
+
+        float radial_half = min(v.dim[u_a], v.dim[v_a]) * 0.5;
+        float tube = max(clamp(u.helix_tube, 0.02, 0.9) * radial_half, 0.45);
+        float radius = max(radial_half - tube, 0.0) *
+                       clamp(u.helix_radius, 0.0, 1.0);
+        float axial_lo = v.lo[axis] + tube;
+        float axial_span = max(v.dim[axis] - 2.0 * tube, 0.0);
+        float center_u = v.lo[u_a] + v.dim[u_a] * 0.5;
+        float center_v = v.lo[v_a] + v.dim[v_a] * 0.5;
+        float turns = max(u.helix_turns, 0.05);
+        float winding = (u.helix_clockwise != 0u) ? -1.0 : 1.0;
+        float omega = winding * 2.0 * M_PI_F * turns;
+
+        float p[3] = {v.pos[0], v.pos[1], v.pos[2]};
+        float s = (axial_span > 1e-5) ?
+                  clamp((p[axis] - axial_lo) / axial_span, 0.0, 1.0) : 0.5;
+        for (uint i = 0u; i < 5u; ++i) {
+            float theta = omega * s;
+            float ct = cos(theta);
+            float st = sin(theta);
+            float q[3] = {center_u, center_v, axial_lo + axial_span * s};
+            float dq[3] = {-radius * st * omega,
+                            radius * ct * omega,
+                            axial_span};
+            float ddq[3] = {-radius * ct * omega * omega,
+                             -radius * st * omega * omega,
+                             0.0};
+            float delta[3] = {q[0] - p[u_a],
+                              q[1] - p[v_a],
+                              q[2] - p[axis]};
+            float first = delta[0] * dq[0] + delta[1] * dq[1] +
+                          delta[2] * dq[2];
+            float second = dq[0] * dq[0] + dq[1] * dq[1] +
+                           dq[2] * dq[2] + delta[0] * ddq[0] +
+                           delta[1] * ddq[1] + delta[2] * ddq[2];
+            if (abs(second) < 1e-5) break;
+            s = clamp(s - first / second, 0.0, 1.0);
+        }
+
+        float theta = omega * s;
+        float du = p[u_a] - (center_u + radius * cos(theta));
+        float dv = p[v_a] - (center_v + radius * sin(theta));
+        float da = p[axis] - (axial_lo + axial_span * s);
+        if (du * du + dv * dv + da * da <= tube * tube) {
+            write_val = u.palette_idx;
         }
     }
     write_cell(cell_local, write_val, tex_t, oracle);

@@ -39,6 +39,7 @@ enum class Kind : uint32_t {
     Perlin,
     Torus,
     Tree,
+    Helix,
     // Maze, Fractal — added in follow-ups
     Count_,
 };
@@ -83,6 +84,16 @@ struct Params {
     // radial half-extent. 0 = vanishing; 1 = degenerate ellipsoid /
     // cylinder. Default 0.3 looks like a classic donut.
     float    torus_tube = 0.3f;
+    // Helix: number of complete rotations from the min-axis face to
+    // the max-axis face.
+    float    helix_turns = 2.0f;
+    // Helix: orbit radius as a fraction of the radial room remaining
+    // after the tube is fitted inside the bounding box.
+    float    helix_radius = 0.75f;
+    // Helix: tube radius as a fraction of the smaller radial half-extent.
+    float    helix_tube = 0.16f;
+    // Helix: reverse the winding direction around its positive axis.
+    uint32_t helix_clockwise = 0;
 };
 
 }  // namespace macvoxel::generators

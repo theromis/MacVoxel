@@ -250,7 +250,11 @@ void GeneratorTool::Tick(EditorContext& ctx, InteractionState& state,
     h = mix_f(h, gs.params.torus_tube);
     h = mix(h, gs.params.perlin_palette_lo);
     h = mix(h, gs.params.perlin_palette_hi);
-    if (!ShouldDispatch(h | 1ULL)) return;
+    h = mix_f(h, gs.params.helix_turns);
+    h = mix_f(h, gs.params.helix_radius);
+    h = mix_f(h, gs.params.helix_tube);
+    h = mix(h, gs.params.helix_clockwise);
+    if (!ShouldDispatch(h == 0 ? 1ULL : h)) return;
 
     Regenerate(ctx, state, bounds_, engine);
 }

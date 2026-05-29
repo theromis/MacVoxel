@@ -256,6 +256,26 @@ final class EditorState {
         set { bridge.generatorPerlinPaletteHi = newValue; tick &+= 1 }
     }
 
+    var generatorHelixTurns: Float {
+        get { _ = tick; return bridge.generatorHelixTurns }
+        set { bridge.generatorHelixTurns = newValue; tick &+= 1 }
+    }
+
+    var generatorHelixRadius: Float {
+        get { _ = tick; return bridge.generatorHelixRadius }
+        set { bridge.generatorHelixRadius = newValue; tick &+= 1 }
+    }
+
+    var generatorHelixTube: Float {
+        get { _ = tick; return bridge.generatorHelixTube }
+        set { bridge.generatorHelixTube = newValue; tick &+= 1 }
+    }
+
+    var generatorHelixClockwise: Bool {
+        get { _ = tick; return bridge.generatorHelixClockwise }
+        set { bridge.generatorHelixClockwise = newValue; tick &+= 1 }
+    }
+
     // ---- Mutator (panel-facing) ----
 
     var mutatorFoliageSeedColor: Int {

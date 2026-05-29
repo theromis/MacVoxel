@@ -21,6 +21,7 @@ typedef NS_ENUM(NSInteger, BridgeGeneratorKind) {
     BridgeGeneratorKindPerlin    NS_SWIFT_NAME(perlin)    = 4,
     BridgeGeneratorKindTorus     NS_SWIFT_NAME(torus)     = 5,
     BridgeGeneratorKindTree      NS_SWIFT_NAME(tree)      = 6,
+    BridgeGeneratorKindHelix     NS_SWIFT_NAME(helix)     = 7,
 };
 
 // Mirror of macvoxel::ToolKind.
@@ -189,6 +190,10 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, assign) float generatorTorusTube;
 @property (nonatomic, assign) NSInteger generatorPerlinPaletteLo;
 @property (nonatomic, assign) NSInteger generatorPerlinPaletteHi;
+@property (nonatomic, assign) float generatorHelixTurns;
+@property (nonatomic, assign) float generatorHelixRadius;
+@property (nonatomic, assign) float generatorHelixTube;
+@property (nonatomic, assign) BOOL generatorHelixClockwise;
 
 // ---------------------------------------------------------------------------
 // Mutator panel state. v1 holds Foliage only; future kinds add fields.
