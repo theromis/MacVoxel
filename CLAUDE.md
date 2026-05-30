@@ -315,6 +315,53 @@ version costs ~3^depth capsule evals (a few hundred ms at depth 5) but
 has no drift. If it ever needs to be faster: a 16³ branch-bucket oracle
 or per-subtree bounding-sphere reject — not a return to folds.
 
+## Conifer generator (primitives + noise, GPU-only)
+
+`gen::Kind::Conifer` (`generate_conifer` in `Generators.metal`) is the
+*other* tree: a deliberately un-fractal pine built from primitives +
+noise, which turned out far more tunable than the recursive Tree. Per
+cell:
+
+- **Foliage envelope** = `max` over N overlapping drooping cone tiers
+  (each tier wider at its base than the one above → the stepped skirt
+  silhouette that reads as "conifer"). The structure is the tiers, *not*
+  the noise.
+- **Noise carve is cylindrical, not 3D.** It's a 2D field over
+  `(height, angle-around-trunk)` — never radius — sampled as
+  `conifer_fbm(cos θ·ring, sin θ·ring, axial/scale)`. The `(cos, sin)`
+  ring makes it seamless across the ±π wrap (no vertical seam crack). A
+  radius-independent cut means every kept cell sits on an unbroken radial
+  run to the core, so clumps stay branch-like protrusions instead of
+  free-floating shells. **This is the load-bearing idea** — a naive 3D
+  carve strands disconnected voxels everywhere.
+- **Trunk** = bark cone (tapered, floored at 1 voxel so it never
+  sub-voxel-dissolves near the top).
+
+Two anti-floater clamps layered on top, both about discrete-grid
+connectivity:
+
+1. **Near-axis fade.** `θ = atan2(n_v, n_u)` is unstable at the trunk, so
+   the `(cos,sin)` sample thrashes between adjacent inner cells. Carve is
+   smoothstep-faded to zero across a fixed ~3-voxel band around the axis,
+   keeping the spine solid.
+2. **Crown LoD.** Thin upper branches have little radial depth, so a deep
+   high-freq carve strands them with no long path to self-heal. Above
+   ~0.6 height the carve eases toward chunkier (higher clump) + shallower
+   (lower raggedness); a real conifer is tighter up top, so it reads
+   right too. Exposed as the **Crown blend** slider (0 = crown carves
+   like the base, 1 = full LoD).
+
+**Param remapping** (reuses the Perlin/Helix slider plumbing, relabeled
+in `GeneratorControls` — same trick as Tree): `noise_octaves` → Tiers
+(2..5); `noise_threshold` → Raggedness; `noise_scale` → Clump size;
+`noise_seed` → re-roll; `torus_tube` → trunk radius; `helix_radius` →
+Crown blend; `palette_idx` → bark, `perlin_palette_hi` → needle. The
+gizmo up-axis is "up"; use a roughly cubical-or-taller gizmo so the
+bottom skirt doesn't clip the side walls.
+
+Known soft spot: the guaranteed solid foliage core can eclipse the bark
+trunk near the very top. Acceptable; not yet addressed.
+
 ## Tool perf rule: dispatch only on state change
 
 The biggest perf lesson from the B3 phase: **don't dispatch every
