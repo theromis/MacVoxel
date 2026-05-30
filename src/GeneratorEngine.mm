@@ -41,6 +41,7 @@ NSString* KernelNameForKind(gen::Kind k) {
         case gen::Kind::Torus:     return @"generate_torus";
         case gen::Kind::Tree:      return @"generate_tree";
         case gen::Kind::Helix:     return @"generate_helix";
+        case gen::Kind::Conifer:   return @"generate_conifer";
         case gen::Kind::Count_:    return nil;
     }
     return nil;

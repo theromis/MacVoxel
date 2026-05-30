@@ -40,6 +40,7 @@ enum class Kind : uint32_t {
     Torus,
     Tree,
     Helix,
+    Conifer,
     // Maze, Fractal — added in follow-ups
     Count_,
 };

@@ -223,6 +223,7 @@ struct ToolPanel: View {
                 Text("Perlin").tag(BridgeGeneratorKind.perlin)
                 Text("Tree").tag(BridgeGeneratorKind.tree)
                 Text("Helix").tag(BridgeGeneratorKind.helix)
+                Text("Conifer").tag(BridgeGeneratorKind.conifer)
             }
             .labelsHidden()
             .pickerStyle(.menu)

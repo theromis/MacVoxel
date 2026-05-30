@@ -589,3 +589,131 @@ kernel void generate_perlin(
     }
     write_cell(cell_local, write_val, tex_t, oracle);
 }
+
+// --- Conifer: trunk cylinder + stacked drooping cones, noise-carved -------
+//
+// A deliberately un-fractal pine. The foliage is the union of N cone
+// "tiers" — each tier wider at its base than the one above it, so the
+// silhouette steps down in the drooping-skirt pattern that reads as a
+// conifer at voxel resolution. That body is then carved *inward* by an
+// fBm field, which only touches the surface (the solid core sits at
+// rad << r), so the edge breaks into needle clumps instead of staying a
+// clean cone. A thin bark cylinder fills the trunk below the skirt.
+//
+// Reused uniform fields:
+//   axis              = world up axis (base at -axis face, apex at +axis)
+//   noise_octaves     = tier count N (clamped 2..5)
+//   noise_threshold   = raggedness — how deep the noise carves the surface
+//   noise_scale       = clump feature size (voxels per feature)
+//   noise_seed        = re-roll
+//   torus_tube        = trunk radius (fraction of cross-section half-extent)
+//   palette_idx       = bark color
+//   perlin_palette_hi = needle color
+
+static float conifer_fbm(float3 p, uint seed) {
+    return perlin3(p, seed) * 0.7 +
+           perlin3(p * 2.3 + 11.0, seed ^ 0x68bc21ebu) * 0.3;
+}
+
+kernel void generate_conifer(
+    constant Uniforms& u                  [[buffer(0)]],
+    texture3d<uint, access::write> tex_t  [[texture(0)]],
+    texture3d<uint, access::write> oracle [[texture(1)]],
+    uint3 gid                             [[thread_position_in_grid]])
+{
+    int3 cell_local, cell_world;
+    if (!resolve_cell(gid, u, cell_local, cell_world)) return;
+
+    uint write_val = 0u;
+    if (in_bounds(cell_world, u)) {
+        int axis = int(u.axis);
+        int u_a = (axis == 0) ? 1 : 0;
+        int v_a = (axis == 2) ? 1 : 2;
+        AxisView v = make_axis_view(cell_world, u);
+
+        float t = (v.pos[axis] - v.lo[axis]) / v.dim[axis];   // 0 base .. 1 top
+        float center_u = v.lo[u_a] + v.dim[u_a] * 0.5;
+        float center_v = v.lo[v_a] + v.dim[v_a] * 0.5;
+        float n_u = (v.pos[u_a] - center_u) / (v.dim[u_a] * 0.5);
+        float n_v = (v.pos[v_a] - center_v) / (v.dim[v_a] * 0.5);
+        float rad = sqrt(n_u * n_u + n_v * n_v);
+
+        // One voxel expressed in the normalized radius units `rad` uses —
+        // the conversion both clamps below depend on.
+        float radial_half = 0.5 * min(v.dim[u_a], v.dim[v_a]);
+        float voxel_rn = 1.0 / max(radial_half, 1.0);
+
+        // Foliage envelope: max over N overlapping drooping cone tiers.
+        const float kFoliageBase = 0.08;
+        float N = float(clamp(u.noise_octaves, 2u, 5u));
+        float r = 0.0;
+        if (t >= kFoliageBase) {
+            float tf = (t - kFoliageBase) / (1.0 - kFoliageBase);   // 0..1
+            float tierH = 2.0 / N;                  // overlap factor 2
+            for (uint i = 0u; i < uint(N); ++i) {
+                float base_tf = float(i) / N;
+                float local = (tf - base_tf) / tierH;   // 0 tier base .. 1 apex
+                if (local >= 0.0 && local <= 1.0) {
+                    float envelope = 1.0 - base_tf;     // outer master-cone radius
+                    r = max(r, envelope * (1.0 - local));
+                }
+            }
+        }
+
+        bool foliage = false;
+        if (r > 0.0) {
+            // Carve the envelope with a *cylindrical* field over
+            // (height, angle-around-trunk) only — never radius. A cut
+            // that's constant along the radius leaves every kept cell on
+            // an unbroken radial run to the core, so each clump stays a
+            // branch-like protrusion attached to the trunk rather than a
+            // free-floating shell. Angle is sampled as a (cos, sin) ring
+            // so the field is seamless across the ±pi wrap (no vertical
+            // crack at the seam).
+            //
+            // Height LoD: ease toward a chunkier, shallower carve in the
+            // crown. Thin upper branches have little radial depth, so a
+            // deep high-frequency carve there strands clumps with no long
+            // path to self-heal; a real conifer is also tighter and finer
+            // up top, so this reads correctly as well as fixing floaters.
+            // The "Crown blend" knob (helix_radius) scales the whole
+            // effect: 0 = crown carves like the base, 1 = full LoD.
+            float crown_amt = clamp(u.helix_radius, 0.0, 1.0);
+            float crown = smoothstep(0.6, 1.0, t) * crown_amt;
+            float scale = max(u.noise_scale, 1.0) * mix(1.0, 2.0, crown);
+            float ragg = clamp(u.noise_threshold, 0.0, 1.0) * mix(1.0, 0.6, crown);
+
+            float theta = atan2(n_v, n_u);
+            float axial = v.pos[axis];
+            float ring = max(radial_half / scale * 0.6, 0.4);
+            float3 np = float3(cos(theta) * ring, sin(theta) * ring,
+                               axial / scale);
+            float nval = conifer_fbm(np, u.noise_seed);
+            float n01 = clamp(nval * 0.9 + 0.5, 0.0, 1.0);
+            float carve = ragg * n01;
+            // Fade the carve out across a fixed near-axis band. atan2's
+            // angle is unstable near the trunk, so the (cos, sin) noise
+            // sample thrashes between adjacent inner cells and strands
+            // clumps. Damping carve there keeps the spine solid and, along
+            // any radial ray, r_eff crosses rad exactly once — so every
+            // kept cell is a contiguous run to the axis (no floaters). The
+            // band is voxel-fixed, so the thin top of the tree falls almost
+            // entirely inside it and reads as a near-solid tip.
+            float axis_fade = smoothstep(0.0, 3.0 * voxel_rn, rad);
+            float r_eff = r - carve * axis_fade;
+            foliage = (rad <= r_eff);
+        }
+
+        if (foliage) {
+            write_val = u.perlin_palette_hi;
+        } else {
+            const float trunk_top = 0.97;
+            float trunk_r0 = clamp(u.torus_tube, 0.05, 1.5) * 0.14;
+            // Taper to the apex, but never thinner than one voxel or the
+            // trunk dissolves into a sub-voxel gap near the top.
+            float trunk_rn = max(trunk_r0 * (1.0 - t / trunk_top), voxel_rn);
+            if (t <= trunk_top && rad <= trunk_rn) write_val = u.palette_idx;
+        }
+    }
+    write_cell(cell_local, write_val, tex_t, oracle);
+}

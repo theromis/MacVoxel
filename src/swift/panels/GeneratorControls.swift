@@ -29,6 +29,9 @@ struct GeneratorControls: View {
             case .helix:
                 axisRow
                 helixRows
+            case .conifer:
+                axisRow
+                coniferRows
             @unknown default:
                 EmptyView()
             }
@@ -102,6 +105,74 @@ struct GeneratorControls: View {
                 format: "%.2f")
         }
         labeled("Leaf color") {
+            paletteIndexRow(binding: Binding(
+                get: { state.generatorPerlinPaletteHi },
+                set: { state.generatorPerlinPaletteHi = $0 }
+            ))
+        }
+        labeled("Seed") {
+            HStack(spacing: 6) {
+                TextField("", value: Binding(
+                    get: { state.generatorPerlinSeed },
+                    set: { state.generatorPerlinSeed = $0 }
+                ), format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                Button("Randomize") {
+                    state.generatorPerlinSeed = Int.random(in: 1...Int(Int32.max))
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var coniferRows: some View {
+        labeled("Tiers") {
+            IntSliderRow(
+                value: Binding(
+                    get: { state.generatorPerlinOctaves },
+                    set: { state.generatorPerlinOctaves = $0 }
+                ),
+                range: 2...5)
+        }
+        labeled("Raggedness") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorPerlinThreshold },
+                    set: { state.generatorPerlinThreshold = $0 }
+                ),
+                range: 0.0...1.0,
+                format: "%.2f")
+        }
+        labeled("Clump size") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorPerlinScale },
+                    set: { state.generatorPerlinScale = $0 }
+                ),
+                range: 2.0...24.0,
+                format: "%.1f")
+        }
+        labeled("Trunk radius") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorTorusTube },
+                    set: { state.generatorTorusTube = $0 }
+                ),
+                range: 0.20...1.50,
+                format: "%.2f")
+        }
+        labeled("Crown blend") {
+            FloatSliderRow(
+                value: Binding(
+                    get: { state.generatorHelixRadius },
+                    set: { state.generatorHelixRadius = $0 }
+                ),
+                range: 0.0...1.0,
+                format: "%.2f")
+        }
+        labeled("Needle color") {
             paletteIndexRow(binding: Binding(
                 get: { state.generatorPerlinPaletteHi },
                 set: { state.generatorPerlinPaletteHi = $0 }
