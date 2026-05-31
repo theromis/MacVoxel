@@ -62,8 +62,12 @@ namespace macvoxel { class Camera; }
 // selects the tone-mapping curve at write time so the user's panel
 // toggle picks up between render and save. Returns YES on success;
 // on failure, *outError carries an explanation.
+// When `denoise` is YES, the accumulated frame is run through Open Image
+// Denoise (color + albedo + normal guides) before tonemap; NO is the
+// byte-for-byte original path.
 - (BOOL)exportPNGToURL:(NSURL*)url
           acesTonemap:(BOOL)acesTonemap
+              denoise:(BOOL)denoise
           commandQueue:(id<MTLCommandQueue>)queue
                  error:(NSError**)outError;
 

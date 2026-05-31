@@ -31,6 +31,7 @@ struct Args {
     int bounces = 5;
     uint32_t seed = 1;
     bool aces = true;
+    bool denoise = false;  // --denoise: run OIDN over the result
     bool stochastic_gi = true;
     bool reference = false;  // --reference: PCG-only unbiased path
     bool override_sky_intensity = false;
@@ -51,7 +52,7 @@ void PrintUsage() {
         "usage: MacVoxel render --input <file.vox> --output <file.png>\n"
         "                       [--width N] [--height N]\n"
         "                       [--samples N] [--bounces N] [--seed N]\n"
-        "                       [--no-aces] [--no-stochastic-gi]\n"
+        "                       [--no-aces] [--denoise] [--no-stochastic-gi]\n"
         "                       [--reference]\n"
         "                       [--sky-intensity F] [--sun-intensity F]\n"
         "                       [--clamp-L F]\n"
@@ -94,6 +95,8 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
             out->seed = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
         } else if (eq("--no-aces")) {
             out->aces = false;
+        } else if (eq("--denoise")) {
+            out->denoise = true;
         } else if (eq("--no-stochastic-gi") || eq("--no-area-nee")) {
             // --no-area-nee accepted as a transitional alias.
             out->stochastic_gi = false;
@@ -270,6 +273,7 @@ int RunCliRender(int argc, const char* argv[]) {
         }
         if (![renderer exportPNGToURL:url
                           acesTonemap:args.aces ? YES : NO
+                              denoise:args.denoise ? YES : NO
                          commandQueue:queue
                                 error:&nerr]) {
             std::fprintf(stderr, "export failed: %s\n",

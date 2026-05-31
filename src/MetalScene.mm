@@ -253,8 +253,10 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         return NO;
     }
     const BOOL aces = _ctx->render_settings.aces_tonemap ? YES : NO;
+    const BOOL denoise = _ctx->render_settings.denoise ? YES : NO;
     return [_pathTraceRenderer exportPNGToURL:url
                                   acesTonemap:aces
+                                      denoise:denoise
                                  commandQueue:_commandQueue
                                         error:error];
 }

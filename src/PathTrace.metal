@@ -1830,3 +1830,39 @@ fragment float4 aov_resolve_fragment(
     }
     return float4(c, 1.0);
 }
+
+// Resolves the accumulated radiance + AOV textures into three tightly-laid-
+// out float4 buffers for Open Image Denoise: linear-HDR color, albedo, and
+// a renormalized normal. Buffers are row-major (idx = y*width + x), matching
+// the blit back into _denoisedTex; OIDN reads them as FLOAT3 with a 16-byte
+// pixel stride (the .a is ignored).
+struct AovResolveUniforms {
+    uint width;
+    uint height;
+    uint sample_count;
+};
+
+kernel void aov_resolve_compute(
+    texture2d<float, access::read> accum     [[texture(0)]],
+    texture2d<float, access::read> aovAlbedo [[texture(1)]],
+    texture2d<float, access::read> aovNormal [[texture(2)]],
+    device float4* colorBuf  [[buffer(0)]],
+    device float4* albedoBuf [[buffer(1)]],
+    device float4* normalBuf [[buffer(2)]],
+    constant AovResolveUniforms& u [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= u.width || gid.y >= u.height) return;
+    uint idx = gid.y * u.width + gid.x;
+    float n = max(1.0, float(u.sample_count));
+
+    float3 color  = accum.read(gid).rgb / n;
+    float3 albedo = aovAlbedo.read(gid).rgb / n;
+    float3 nv     = aovNormal.read(gid).rgb / n;
+    float len = length(nv);
+    float3 normal = len > 1e-6 ? nv / len : float3(0.0);
+
+    colorBuf[idx]  = float4(max(color, 0.0), 1.0);
+    albedoBuf[idx] = float4(saturate(albedo), 1.0);
+    normalBuf[idx] = float4(normal, 0.0);
+}

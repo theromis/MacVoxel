@@ -42,6 +42,7 @@ struct RenderSettings {
     // GPU time. Camera or doc changes invalidate and start the count over.
     int max_samples = 1024;
     bool aces_tonemap = true;  // off = gamma-2.2 only, for before/after compare
+    bool denoise = false;      // run OIDN over the frame on PNG export
     // Path-trace target resolution. When `match_window` is true, the
     // tracer renders at the drawable's pixel size (the values below are
     // ignored). Otherwise it renders at exactly (render_width,

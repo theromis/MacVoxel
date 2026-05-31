@@ -3,6 +3,10 @@
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+// Metal interop types (MTLCommandQueue_id / MTLBuffer_id) resolve to the
+// Obj-C id<> protocols because this is compiled as Obj-C++ after Metal.
+#include <OpenImageDenoise/oidn.h>
+
 #import <cstdio>
 #include <array>
 #include <cstdint>
@@ -126,6 +130,13 @@ struct AovUniforms {
     uint32_t mode;
 };
 
+// CPU mirror of AovResolveUniforms in PathTrace.metal.
+struct AovResolveUniforms {
+    uint32_t width;
+    uint32_t height;
+    uint32_t sample_count;
+};
+
 // MSL source for both pt_fragment (the path-trace pass) and
 // display_fragment (tonemap + sRGB encode) lives in src/PathTrace.metal,
 // shipped in the app bundle's Resources directory and loaded as a string
@@ -155,6 +166,27 @@ struct AovUniforms {
     // accum-sized, accumulated alongside _accumTexture as MRT targets 1/2.
     id<MTLTexture> _aovAlbedo;
     id<MTLTexture> _aovNormal;
+
+    // OIDN denoise path (Metal backend). The resolve compute kernel packs
+    // accum + AOVs into these float4 buffers; OIDN denoises color in place
+    // of _dnOutput; the result is blitted into _denoisedTex for tonemap.
+    id<MTLComputePipelineState> _aovResolveCompute;
+    id<MTLBuffer> _dnColor;
+    id<MTLBuffer> _dnAlbedo;
+    id<MTLBuffer> _dnNormal;
+    id<MTLBuffer> _dnOutput;
+    id<MTLTexture> _denoisedTex;
+    // OIDN Metal device + the queue it wraps. Created lazily on first
+    // denoise, cached for the renderer's lifetime (device init is costly).
+    OIDNDevice _oidnDevice;
+    id<MTLCommandQueue> _oidnQueue;
+    // Live-viewport denoise bookkeeping. `_denoiseValid` gates swapping the
+    // display over to _denoisedTex (false until the first denoise after a
+    // reset, so camera moves don't flash a stale/black frame).
+    // `_lastDenoisedSample` skips re-denoising a sample count we already
+    // did — so a converged still image stops costing GPU.
+    BOOL _denoiseValid;
+    uint32_t _lastDenoisedSample;
     // Temporal-EMA history texture. The compose pass renders into this
     // with hardware alpha-blending using blend_color.a = ema_weight as
     // the source factor, so the texture content evolves as
@@ -375,6 +407,19 @@ struct AovUniforms {
             [_device newRenderPipelineStateWithDescriptor:d error:&error];
         if (_aovResolvePipeline == nil) {
             fprintf(stderr, "MacVoxel: failed to build AOV resolve pipeline: %s\n",
+                    [[error localizedDescription] UTF8String]);
+            return nil;
+        }
+    }
+
+    // Compute pipeline that packs accum + AOV textures into the float4
+    // buffers OIDN denoises.
+    {
+        id<MTLFunction> fn = [library newFunctionWithName:@"aov_resolve_compute"];
+        _aovResolveCompute =
+            [_device newComputePipelineStateWithFunction:fn error:&error];
+        if (_aovResolveCompute == nil) {
+            fprintf(stderr, "MacVoxel: failed to build AOV resolve compute: %s\n",
                     [[error localizedDescription] UTF8String]);
             return nil;
         }
@@ -742,6 +787,26 @@ struct AovUniforms {
     _aovNormal = [_device newTextureWithDescriptor:tda];
     _aovNormal.label = @"PTAOVNormal";
 
+    // OIDN I/O: one packed float4 per pixel per channel, Private (the whole
+    // denoise round-trip stays on-GPU). _denoisedTex receives the result
+    // for the existing tonemap pass.
+    const NSUInteger pixels =
+        static_cast<NSUInteger>(size.width) * static_cast<NSUInteger>(size.height);
+    const NSUInteger bufLen = pixels * 4 * sizeof(float);
+    _dnColor  = [_device newBufferWithLength:bufLen options:MTLResourceStorageModePrivate];
+    _dnAlbedo = [_device newBufferWithLength:bufLen options:MTLResourceStorageModePrivate];
+    _dnNormal = [_device newBufferWithLength:bufLen options:MTLResourceStorageModePrivate];
+    _dnOutput = [_device newBufferWithLength:bufLen options:MTLResourceStorageModePrivate];
+    MTLTextureDescriptor* tdd =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+                                                           width:static_cast<NSUInteger>(size.width)
+                                                          height:static_cast<NSUInteger>(size.height)
+                                                       mipmapped:NO];
+    tdd.usage = MTLTextureUsageShaderRead;
+    tdd.storageMode = MTLStorageModePrivate;
+    _denoisedTex = [_device newTextureWithDescriptor:tdd];
+    _denoisedTex.label = @"PTDenoised";
+
     _accumSize = size;
     _wantsClear = YES;
 }
@@ -868,6 +933,9 @@ struct AovUniforms {
         // pre-reset pixels (which would produce a "fade-from-old"
         // ghost).
         _emaHistoryValid = NO;
+        // Likewise the denoised frame: don't display it until a fresh
+        // denoise runs against the post-reset accumulator.
+        _denoiseValid = NO;
     }
 
     if (_coarseBuffer == nil || _poolBuffer == nil ||
@@ -886,6 +954,29 @@ struct AovUniforms {
     const bool accumulate_more =
         _sampleCount < static_cast<uint32_t>(max_samples_cfg) &&
         [NSApp isActive];
+
+    // ---------- Pass 0: optional OIDN denoise of the live viewport -------
+    // Only once accumulation has reached the sample target — denoising
+    // intermediate frames is wasted work and would hitch camera moves (which
+    // reset the count). While converging, the viewport shows the normal
+    // progressive image; on hitting the cap we denoise exactly once (the
+    // count stops changing) and display that until the next reset. The
+    // denoise reads the accumulator committed through the previous frame, so
+    // the resolve divides by the matching _sampleCount. It runs its own
+    // command buffers + blocking waits on the frame queue, before the
+    // drawable is acquired, so there's no present stall.
+    BOOL useDenoised = NO;
+    const bool reachedTarget =
+        _sampleCount >= static_cast<uint32_t>(max_samples_cfg);
+    if (rs.denoise && reachedTarget) {
+        if (_sampleCount != _lastDenoisedSample) {
+            if ([self denoiseAccumulatedWithQueue:cmd.commandQueue]) {
+                _lastDenoisedSample = _sampleCount;
+                _denoiseValid = YES;
+            }
+        }
+        useDenoised = _denoiseValid;
+    }
 
     // ---------- Pass 1: accumulate one new sample into accum texture ----------
     if (accumulate_more) {
@@ -981,8 +1072,12 @@ struct AovUniforms {
         // a reset displays the unblended current value.
         const float blend_a = _emaHistoryValid ? ema_weight : 1.0f;
         [enc setBlendColorRed:0.0 green:0.0 blue:0.0 alpha:blend_a];
-        [enc setFragmentBytes:&du length:sizeof(du) atIndex:0];
-        [enc setFragmentTexture:_accumTexture atIndex:0];
+        // The denoised texture is already a per-sample mean, so the compose
+        // pass must not divide it again — feed it with sample_count = 1.
+        DisplayUniforms duCompose = du;
+        if (useDenoised) duCompose.sample_count = 1u;
+        [enc setFragmentBytes:&duCompose length:sizeof(duCompose) atIndex:0];
+        [enc setFragmentTexture:(useDenoised ? _denoisedTex : _accumTexture) atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [enc endEncoding];
     }
@@ -1259,8 +1354,121 @@ struct AovUniforms {
     return YES;
 }
 
+- (void)dealloc {
+    if (_oidnDevice != nullptr) {
+        oidnReleaseDevice(_oidnDevice);
+        _oidnDevice = nullptr;
+    }
+}
+
+// Runs OIDN over the accumulated frame: resolve textures → packed buffers,
+// denoise on the Metal device, blit the result into _denoisedTex. Returns
+// NO (leaving _denoisedTex untouched) if the device or filter errors, so
+// callers can fall back to the raw accumulator.
+- (BOOL)denoiseAccumulatedWithQueue:(id<MTLCommandQueue>)queue {
+    const NSUInteger w = static_cast<NSUInteger>(_accumSize.width);
+    const NSUInteger h = static_cast<NSUInteger>(_accumSize.height);
+    if (w == 0 || h == 0 || _dnColor == nil || _aovResolveCompute == nil) {
+        return NO;
+    }
+
+    if (_oidnDevice == nullptr) {
+        _oidnQueue = [_device newCommandQueue];
+        _oidnQueue.label = @"OIDNQueue";
+        MTLCommandQueue_id q = _oidnQueue;
+        _oidnDevice = oidnNewMetalDevice(&q, 1);
+        if (_oidnDevice == nullptr) {
+            fprintf(stderr, "MacVoxel: oidnNewMetalDevice returned null\n");
+            return NO;
+        }
+        oidnCommitDevice(_oidnDevice);
+        const char* derr = nullptr;
+        if (oidnGetDeviceError(_oidnDevice, &derr) != OIDN_ERROR_NONE) {
+            fprintf(stderr, "MacVoxel: OIDN device error: %s\n",
+                    derr ? derr : "(none)");
+            oidnReleaseDevice(_oidnDevice);
+            _oidnDevice = nullptr;
+            return NO;
+        }
+    }
+
+    // 1. Pack accum + AOVs into the OIDN input buffers.
+    {
+        id<MTLCommandBuffer> cmd = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:_aovResolveCompute];
+        [enc setTexture:_accumTexture atIndex:0];
+        [enc setTexture:_aovAlbedo atIndex:1];
+        [enc setTexture:_aovNormal atIndex:2];
+        [enc setBuffer:_dnColor offset:0 atIndex:0];
+        [enc setBuffer:_dnAlbedo offset:0 atIndex:1];
+        [enc setBuffer:_dnNormal offset:0 atIndex:2];
+        AovResolveUniforms ru;
+        ru.width = static_cast<uint32_t>(w);
+        ru.height = static_cast<uint32_t>(h);
+        ru.sample_count = _sampleCount;
+        [enc setBytes:&ru length:sizeof(ru) atIndex:3];
+        const MTLSize tg = MTLSizeMake(8, 8, 1);
+        const MTLSize groups = MTLSizeMake((w + 7) / 8, (h + 7) / 8, 1);
+        [enc dispatchThreadgroups:groups threadsPerThreadgroup:tg];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+
+    // 2. Denoise. cleanAux=true: our albedo/normal are noise-free, so OIDN
+    //    skips aux prefiltering (faster + sharper). FLOAT3 over a 16-byte
+    //    pixel stride reads rgb from each packed float4.
+    OIDNBuffer cb = oidnNewSharedBufferFromMetal(_oidnDevice, _dnColor);
+    OIDNBuffer ab = oidnNewSharedBufferFromMetal(_oidnDevice, _dnAlbedo);
+    OIDNBuffer nb = oidnNewSharedBufferFromMetal(_oidnDevice, _dnNormal);
+    OIDNBuffer ob = oidnNewSharedBufferFromMetal(_oidnDevice, _dnOutput);
+    OIDNFilter f = oidnNewFilter(_oidnDevice, "RT");
+    const size_t pxStride = 4 * sizeof(float);
+    const size_t rowStride = static_cast<size_t>(w) * pxStride;
+    oidnSetFilterImage(f, "color",  cb, OIDN_FORMAT_FLOAT3, w, h, 0, pxStride, rowStride);
+    oidnSetFilterImage(f, "albedo", ab, OIDN_FORMAT_FLOAT3, w, h, 0, pxStride, rowStride);
+    oidnSetFilterImage(f, "normal", nb, OIDN_FORMAT_FLOAT3, w, h, 0, pxStride, rowStride);
+    oidnSetFilterImage(f, "output", ob, OIDN_FORMAT_FLOAT3, w, h, 0, pxStride, rowStride);
+    oidnSetFilterBool(f, "hdr", true);
+    oidnSetFilterBool(f, "cleanAux", true);
+    oidnCommitFilter(f);
+    oidnExecuteFilter(f);
+    const char* ferr = nullptr;
+    const OIDNError ec = oidnGetDeviceError(_oidnDevice, &ferr);
+    oidnReleaseFilter(f);
+    oidnReleaseBuffer(cb);
+    oidnReleaseBuffer(ab);
+    oidnReleaseBuffer(nb);
+    oidnReleaseBuffer(ob);
+    if (ec != OIDN_ERROR_NONE) {
+        fprintf(stderr, "MacVoxel: OIDN filter error: %s\n", ferr ? ferr : "(none)");
+        return NO;
+    }
+
+    // 3. Denoised buffer → texture for the existing tonemap pass.
+    {
+        id<MTLCommandBuffer> cmd = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        [blit copyFromBuffer:_dnOutput
+                sourceOffset:0
+           sourceBytesPerRow:rowStride
+         sourceBytesPerImage:rowStride * h
+                  sourceSize:MTLSizeMake(w, h, 1)
+                   toTexture:_denoisedTex
+            destinationSlice:0
+            destinationLevel:0
+           destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+    return YES;
+}
+
 - (BOOL)exportPNGToURL:(NSURL*)url
           acesTonemap:(BOOL)acesTonemap
+              denoise:(BOOL)denoise
           commandQueue:(id<MTLCommandQueue>)queue
                  error:(NSError**)outError {
     if (_accumTexture == nil || _displayPipeline == nil) {
@@ -1287,6 +1495,14 @@ struct AovUniforms {
         }
         return NO;
     }
+
+    // Denoise into _denoisedTex (which is already a per-sample mean). On
+    // failure we fall back to the raw accumulator so export never aborts.
+    const BOOL denoised = denoise ? [self denoiseAccumulatedWithQueue:queue] : NO;
+    if (denoise && !denoised) {
+        fprintf(stderr, "MacVoxel: denoise failed; exporting un-denoised frame\n");
+    }
+
     MTLTextureDescriptor* td =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:_colorFormat
                                                            width:w
@@ -1309,7 +1525,9 @@ struct AovUniforms {
     id<MTLRenderCommandEncoder> enc =
         [cmd renderCommandEncoderWithDescriptor:rpd];
     DisplayUniforms du;
-    du.sample_count = _sampleCount;
+    // The denoised texture is already a mean; the raw accumulator is a sum
+    // the tonemap divides by sample_count.
+    du.sample_count = denoised ? 1u : _sampleCount;
     du.aces_tonemap = acesTonemap ? 1u : 0u;
     // Export target matches the accum exactly — no letterbox.
     du.region_w = 1.0f;
@@ -1322,7 +1540,7 @@ struct AovUniforms {
     [enc setRenderPipelineState:_displayDirectPipeline];
     [enc setCullMode:MTLCullModeNone];
     [enc setFragmentBytes:&du length:sizeof(du) atIndex:0];
-    [enc setFragmentTexture:_accumTexture atIndex:0];
+    [enc setFragmentTexture:(denoised ? _denoisedTex : _accumTexture) atIndex:0];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [enc endEncoding];
 
