@@ -9,9 +9,11 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "CellKey.h"
 #include "Clipboard.h"
 #include "Document.h"
 #include "EditHistory.h"
@@ -949,31 +951,94 @@ static uint8_t SlotIndexAt(int col, int row) {
             }
         }
     }
-    _ctx->selection.SetVoxels(std::move(matched));
+    // Replace any prior selection: a lift must be torn down (doc
+    // restored) before a new one can be created.
+    if (_ctx->selection.lift_active()) macvoxel::lift::CancelLift(*_ctx);
+    if (matched.empty()) {
+        _ctx->selection.Clear();
+        return;
+    }
+    macvoxel::lift::LiftSelectionCells(*_ctx, matched);
 }
 
-// Shared painter for the two voxel-paint context-menu items. `choose`
-// returns the palette index to write per voxel; called once per
-// non-empty voxel in the selection.
+// Shared painter for the two voxel-paint context-menu items. A voxel
+// selection is a GPU lift (its cells live in tex_lift, removed from
+// tex_a). Recolor the lift's current contents and land them back into
+// the doc in one undoable op, dropping the lift. `choose` returns the
+// palette index to write per voxel; called once per lifted voxel.
 template <class Choose>
 static void PaintSelectedVoxels(macvoxel::EditorContext &ctx, Choose choose) {
     macvoxel::Selection &sel = ctx.selection;
-    if (!sel.active() || sel.empty()) return;
+    if (ctx.engine == nullptr || !sel.lift_active()) return;
+    const macvoxel::Bounds3 lift_b = sel.bounds();
+    if (lift_b.empty()) return;
+
     macvoxel::Document &doc = ctx.document;
     macvoxel::EditHistory &hist = ctx.history;
-    hist.BeginOp();
-    bool any = false;
-    for (const auto &v : sel.voxels()) {
-        const uint8_t old = doc.grid.Get(v[0], v[1], v[2]);
-        if (old == 0) continue;  // empty cells aren't "voxels"
-        const uint8_t nv = choose();
-        if (nv == 0 || nv == old) continue;
-        doc.SetCell(v[0], v[1], v[2], nv);
-        hist.Record(v[0], v[1], v[2], old, nv);
-        any = true;
+
+    // Current lift contents (handles lifts that were moved/rotated).
+    std::vector<uint8_t> lift_bytes;
+    ctx.engine->ReadbackLift(lift_b, &lift_bytes);
+
+    // Net diff, pre_lift state → painted result. Mirrors CommitLift's
+    // merge of source holes (→ 0) with landed lift cells (→ new color).
+    struct Delta { uint8_t old_val; uint8_t new_val; };
+    std::unordered_map<int64_t, Delta> changes;
+    changes.reserve(sel.pre_lift_originals().size() * 2 + 64);
+    for (const auto &orig : sel.pre_lift_originals()) {
+        changes[macvoxel::PackCellKey(orig.x, orig.y, orig.z)] =
+            {orig.old_val, 0};
     }
+
+    macvoxel::Bounds3 rb = lift_b;
+    rb.min_x = std::max(rb.min_x, doc.volume.x0);
+    rb.min_y = std::max(rb.min_y, doc.volume.y0);
+    rb.min_z = std::max(rb.min_z, doc.volume.z0);
+    rb.max_x = std::min(rb.max_x, doc.volume.x1);
+    rb.max_y = std::min(rb.max_y, doc.volume.y1);
+    rb.max_z = std::min(rb.max_z, doc.volume.z1);
+    if (!rb.empty()) {
+        const size_t bw = (size_t)rb.size_x();
+        const size_t bh = (size_t)rb.size_y();
+        const size_t bd = (size_t)rb.size_z();
+        if (lift_bytes.size() >= bw * bh * bd) {
+            for (size_t z = 0; z < bd; ++z)
+            for (size_t y = 0; y < bh; ++y) {
+                const size_t row = (z * bh + y) * bw;
+                for (size_t x = 0; x < bw; ++x) {
+                    const uint8_t v = lift_bytes[row + x];
+                    if (v == 0) continue;
+                    const int32_t wx = rb.min_x + (int32_t)x;
+                    const int32_t wy = rb.min_y + (int32_t)y;
+                    const int32_t wz = rb.min_z + (int32_t)z;
+                    uint8_t nc = choose();
+                    if (nc == 0) nc = v;  // never paint to empty
+                    const int64_t k = macvoxel::PackCellKey(wx, wy, wz);
+                    auto it = changes.find(k);
+                    if (it != changes.end()) {
+                        it->second.new_val = nc;
+                    } else {
+                        changes[k] = {doc.volume_shadow.Get(wx, wy, wz), nc};
+                    }
+                }
+            }
+        }
+    }
+
+    // Drop the GPU lift; the painted cells reach tex_a via doc.SetCell's
+    // dirty-chunk sync on the next frame (BumpGeometry below).
+    ctx.engine->ClearLift(lift_b);
+
+    hist.BeginOp();
+    for (const auto &[k, d] : changes) {
+        int32_t x, y, z;
+        macvoxel::UnpackCellKey(k, &x, &y, &z);
+        if (doc.grid.Get(x, y, z) != d.new_val) doc.SetCell(x, y, z, d.new_val);
+        if (d.old_val != d.new_val) hist.Record(x, y, z, d.old_val, d.new_val);
+    }
+    sel.ClearLift();
     hist.CommitOp();
-    if (any) doc.BumpGeometry();
+    doc.BumpGeometry();
 }
 
 - (void)paintSelectedVoxelsWithColorAnchor:(NSInteger)anchor {
