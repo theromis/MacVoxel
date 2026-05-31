@@ -153,6 +153,42 @@ target_link_libraries(${APP_NAME} PRIVATE
     ${UTI_LIBRARY}
 )
 
+# ---------------------------------------------------------------------------
+# Intel Open Image Denoise (path-tracer denoiser)
+# ---------------------------------------------------------------------------
+# Homebrew's oidn is built CPU-only (no Metal device module). We use the
+# on-GPU Metal backend, so we pull Intel's official arm64 prebuilt, which
+# ships libOpenImageDenoise_device_metal. Fetched (not vendored in git) and
+# cached under build/_deps; integrity-pinned by hash. Apple-Silicon only.
+include(FetchContent)
+FetchContent_Declare(oidn
+    URL https://github.com/RenderKit/oidn/releases/download/v2.4.1/oidn-2.4.1.arm64.macos.tar.gz
+    URL_HASH SHA256=f1d7370bc09242bbd72d405b424ba240fd4d64103f3e607cdfeeaa2f2718cfb8
+)
+FetchContent_MakeAvailable(oidn)
+set(OIDN_INCLUDE_DIR ${oidn_SOURCE_DIR}/include)
+set(OIDN_LIB_DIR     ${oidn_SOURCE_DIR}/lib)
+
+target_include_directories(${APP_NAME} PRIVATE ${OIDN_INCLUDE_DIR})
+target_link_libraries(${APP_NAME} PRIVATE
+    ${OIDN_LIB_DIR}/libOpenImageDenoise.dylib)
+
+# The prebuilt dylibs already carry @rpath install-names and @rpath inter-
+# dependency references, so no install_name_tool surgery is needed: copy
+# them next to each other in Contents/Frameworks (oidn core dlopens the
+# device module from its own directory) and point the executable there.
+# swiftc is the link driver, so let CMake emit the rpath (-Xlinker -rpath)
+# rather than a raw -Wl, flag swiftc would reject.
+set_property(TARGET ${APP_NAME} APPEND PROPERTY
+    BUILD_RPATH "@executable_path/../Frameworks")
+add_custom_command(TARGET ${APP_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_BUNDLE_CONTENT_DIR:${APP_NAME}>/Frameworks"
+    COMMAND cp -R "${OIDN_LIB_DIR}/."
+        "$<TARGET_BUNDLE_CONTENT_DIR:${APP_NAME}>/Frameworks/"
+    VERBATIM
+    COMMENT "Bundling Open Image Denoise dylibs into Contents/Frameworks")
+
 # ARC for Obj-C++.
 target_compile_options(${APP_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
