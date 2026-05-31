@@ -314,6 +314,10 @@ final class EditorState {
         get { _ = tick; return bridge.acesTonemap }
         set { bridge.acesTonemap = newValue; tick &+= 1 }
     }
+    var denoise: Bool {
+        get { _ = tick; return bridge.denoise }
+        set { bridge.denoise = newValue; tick &+= 1 }
+    }
     var powerWeightedNEE: Bool {
         get { _ = tick; return bridge.powerWeightedNEE }
         set { bridge.powerWeightedNEE = newValue; tick &+= 1 }

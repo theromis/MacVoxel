@@ -63,6 +63,7 @@ struct RenderPanel: View {
 
                 sectionHeader("Camera")
                 Toggle("ACES tonemap", isOn: $state.acesTonemap)
+                Toggle("Denoise (OIDN)", isOn: $state.denoise)
 
                 HStack(spacing: 6) {
                     Text("Aperture")

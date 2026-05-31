@@ -213,6 +213,7 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, assign) NSInteger maxSamples;     // 1..N
 @property (nonatomic, assign) BridgeRenderMode renderMode;
 @property (nonatomic, assign) BOOL acesTonemap;
+@property (nonatomic, assign) BOOL denoise;  // OIDN on PNG export
 // MagicaVoxel's "Stochastic Sampling GI" toggle (= OPT_AREA). On =
 // area-light NEE active in the path tracer; off = emissives
 // discovered only by BSDF random walk.

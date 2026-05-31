@@ -527,6 +527,9 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 - (BOOL)acesTonemap { return RS.aces_tonemap; }
 - (void)setAcesTonemap:(BOOL)v { RS.aces_tonemap = (v == YES); }
 
+- (BOOL)denoise { return RS.denoise; }
+- (void)setDenoise:(BOOL)v { RS.denoise = (v == YES); }
+
 - (BOOL)powerWeightedNEE { return RS.power_weighted_nee; }
 - (void)setPowerWeightedNEE:(BOOL)v { RS.power_weighted_nee = (v == YES); }
 
