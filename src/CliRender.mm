@@ -23,6 +23,8 @@ namespace {
 struct Args {
     const char* input = nullptr;
     const char* output = nullptr;
+    const char* aov_albedo = nullptr;  // optional first-hit albedo PNG dump
+    const char* aov_normal = nullptr;  // optional first-hit normal PNG dump
     int width = 512;
     int height = 512;
     int samples = 64;
@@ -54,7 +56,8 @@ void PrintUsage() {
         "                       [--sky-intensity F] [--sun-intensity F]\n"
         "                       [--clamp-L F]\n"
         "                       [--aperture F] [--focus F]\n"
-        "                       [--glass-mode probabilistic|absorption]\n");
+        "                       [--glass-mode probabilistic|absorption]\n"
+        "                       [--aov-albedo <file.png>] [--aov-normal <file.png>]\n");
 }
 
 bool ParseArgs(int argc, const char* argv[], Args* out) {
@@ -127,6 +130,12 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
                     "--glass-mode must be 'probabilistic' or 'absorption'\n");
                 return false;
             }
+        } else if (eq("--aov-albedo")) {
+            const char* v = need_val("--aov-albedo"); if (!v) return false;
+            out->aov_albedo = v;
+        } else if (eq("--aov-normal")) {
+            const char* v = need_val("--aov-normal"); if (!v) return false;
+            out->aov_normal = v;
         } else if (eq("-h") || eq("--help")) {
             PrintUsage();
             return false;
@@ -268,6 +277,29 @@ int RunCliRender(int argc, const char* argv[]) {
             return 1;
         }
         std::fprintf(stderr, "wrote %s\n", args.output);
+
+        if (args.aov_albedo != nullptr) {
+            NSURL* aurl = [NSURL fileURLWithPath:
+                [NSString stringWithUTF8String:args.aov_albedo]];
+            if (![renderer exportAOVToURL:aurl kind:0
+                             commandQueue:queue error:&nerr]) {
+                std::fprintf(stderr, "albedo AOV export failed: %s\n",
+                    [[nerr localizedDescription] UTF8String]);
+                return 1;
+            }
+            std::fprintf(stderr, "wrote %s\n", args.aov_albedo);
+        }
+        if (args.aov_normal != nullptr) {
+            NSURL* nurl = [NSURL fileURLWithPath:
+                [NSString stringWithUTF8String:args.aov_normal]];
+            if (![renderer exportAOVToURL:nurl kind:1
+                             commandQueue:queue error:&nerr]) {
+                std::fprintf(stderr, "normal AOV export failed: %s\n",
+                    [[nerr localizedDescription] UTF8String]);
+                return 1;
+            }
+            std::fprintf(stderr, "wrote %s\n", args.aov_normal);
+        }
     }
     return 0;
 }
