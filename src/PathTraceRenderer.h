@@ -67,4 +67,13 @@ namespace macvoxel { class Camera; }
           commandQueue:(id<MTLCommandQueue>)queue
                  error:(NSError**)outError;
 
+// Render an accumulated denoiser guide buffer to a PNG at `url` for
+// inspection. `kind`: 0 = albedo (linear base color, sRGB-encoded),
+// 1 = normal (grid-space face normal, remapped to [0,1]). Mirrors
+// exportPNGToURL:'s one-shot readback. Returns YES on success.
+- (BOOL)exportAOVToURL:(NSURL*)url
+                  kind:(NSInteger)kind
+          commandQueue:(id<MTLCommandQueue>)queue
+                 error:(NSError**)outError;
+
 @end

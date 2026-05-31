@@ -1075,7 +1075,18 @@ float3 nee_ggx_mis(NEELight L, float3 omega_o, float3 n_x,
     return brdf_cos_i * L.le * w / L.pdf_solid;
 }
 
-fragment float4 pt_fragment(
+// Path-trace fragment writes three render targets: radiance (color(0),
+// additively accumulated as before) plus two denoiser guide buffers —
+// first-hit albedo (color(1)) and first-hit grid-space normal (color(2)),
+// both accumulated the same additive way and resolved by dividing by the
+// sample count at readback.
+struct PTFragOut {
+    float4 radiance [[color(0)]];
+    float4 albedo   [[color(1)]];
+    float4 normal   [[color(2)]];
+};
+
+fragment PTFragOut pt_fragment(
     VertOut in [[stage_in]],
     constant PathUniforms& u [[buffer(0)]],
     device const uint* coarse_grid [[buffer(1)]],
@@ -1206,6 +1217,12 @@ fragment float4 pt_fragment(
     const float3 kGroundAlbedo = float3(0.262, 0.218, 0.178);  // warm grey, linear
     const float3 kGroundNormal = float3(0.0, 0.0, 1.0);
 
+    // Denoiser guide buffers, captured at the first surface the camera ray
+    // meets (b == 0): albedo = linear base color, normal = grid-space face
+    // normal. Background pixels keep normal = 0 and albedo = the sky color.
+    float3 first_albedo = float3(0.0);
+    float3 first_normal = float3(0.0);
+
     for (uint b = 0u; b <= u.max_bounces; ++b) {
         DDAHit h = dda_traverse(ray_origin, ray_dir, u,
                                 coarse_grid, chunk_pool, medium_mat);
@@ -1298,6 +1315,10 @@ fragment float4 pt_fragment(
                         // termination case for consistency.
                         break;
                     }
+                    if (b == 0u) {
+                        first_albedo = kGroundAlbedo;
+                        first_normal = kGroundNormal;
+                    }
                     // Aerial perspective at the horizon: a grazing
                     // primary ray traverses a long air column whose
                     // in-scattering looks like the sky in that
@@ -1376,10 +1397,23 @@ fragment float4 pt_fragment(
             } else {
                 radiance += throughput * u.sky_color;
             }
+            if (b == 0u) {
+                first_albedo = (u.atmospheric_sky != 0u)
+                    ? nishita_sky_radiance(ray_dir, u.sun_dir_grid,
+                                           u.sun_radiance,
+                                           u.sun_cos_half_angle)
+                    : u.sky_color;
+            }
             break;
         }
         float3 albedo = palette[h.cell_val].rgb;
         GpuMaterial mat = materials[h.cell_val];
+        if (b == 0u) {
+            first_albedo = albedo;
+            if      (h.axis == 0) first_normal.x = float(h.sign);
+            else if (h.axis == 1) first_normal.y = float(h.sign);
+            else if (h.axis == 2) first_normal.z = float(h.sign);
+        }
         uint mat_type = uint(mat.type);
 
         // Emissive cells are light sources. The BSDF arrival has
@@ -1640,7 +1674,11 @@ fragment float4 pt_fragment(
             throughput /= p;
         }
     }
-    return float4(radiance, 1.0);
+    return PTFragOut{
+        float4(radiance, 1.0),
+        float4(first_albedo, 1.0),
+        float4(first_normal, 1.0)
+    };
 }
 
 // Temporal-EMA compose pass — Magica's `pt_post.glsl mix(tex_last, dst,
@@ -1755,6 +1793,40 @@ fragment float4 display_fragment_direct(
     } else {
         // Gamma-2.2 fallback for before/after comparison.
         c = pow(c, 1.0 / 2.2);
+    }
+    return float4(c, 1.0);
+}
+
+// Resolves an accumulated AOV buffer to a viewable LDR image for the CLI
+// dump path. mode 0 = albedo (mean, clamped, sRGB-encoded); mode 1 =
+// normal (mean, renormalized, remapped from [-1,1] to [0,1]).
+struct AovUniforms {
+    uint sample_count;
+    uint mode;
+};
+
+fragment float4 aov_resolve_fragment(
+    VertOut in [[stage_in]],
+    constant AovUniforms& u [[buffer(0)]],
+    texture2d<float, access::sample> aov [[texture(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::nearest);
+    float2 uv = in.ndc * 0.5 + 0.5;
+    uv.y = 1.0 - uv.y;
+
+    float n = max(1.0, float(u.sample_count));
+    float3 v = aov.sample(s, uv).rgb / n;
+
+    float3 c;
+    if (u.mode == 0u) {
+        c = saturate(v);
+        c = select(12.92 * c,
+                   1.055 * pow(c, 1.0 / 2.4) - 0.055,
+                   c > 0.0031308);
+    } else {
+        float len = length(v);
+        float3 nrm = len > 1e-6 ? v / len : float3(0.0);
+        c = saturate(nrm * 0.5 + 0.5);
     }
     return float4(c, 1.0);
 }

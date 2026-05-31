@@ -120,6 +120,12 @@ struct DisplayUniforms {
     float ema_weight;
 };
 
+// CPU mirror of AovUniforms in PathTrace.metal. mode: 0 = albedo, 1 = normal.
+struct AovUniforms {
+    uint32_t sample_count;
+    uint32_t mode;
+};
+
 // MSL source for both pt_fragment (the path-trace pass) and
 // display_fragment (tonemap + sRGB encode) lives in src/PathTrace.metal,
 // shipped in the app bundle's Resources directory and loaded as a string
@@ -141,7 +147,14 @@ struct DisplayUniforms {
     // The display pipeline then samples that history into the drawable.
     // Mirrors MagicaVoxel's pt_post.glsl mix pattern.
     id<MTLRenderPipelineState> _emaComposePipeline;
+    // Resolves an accumulated AOV buffer (albedo or normal) to a viewable
+    // LDR image for the CLI dump path.
+    id<MTLRenderPipelineState> _aovResolvePipeline;
     id<MTLTexture> _accumTexture;
+    // Denoiser guide buffers (first-hit albedo + grid-space normal),
+    // accum-sized, accumulated alongside _accumTexture as MRT targets 1/2.
+    id<MTLTexture> _aovAlbedo;
+    id<MTLTexture> _aovNormal;
     // Temporal-EMA history texture. The compose pass renders into this
     // with hardware alpha-blending using blend_color.a = ema_weight as
     // the source factor, so the texture content evolves as
@@ -241,6 +254,7 @@ struct DisplayUniforms {
     id<MTLFunction> emaffn = [library newFunctionWithName:@"ema_compose_fragment"];
     id<MTLFunction> dispffn = [library newFunctionWithName:@"display_fragment"];
     id<MTLFunction> dispdirffn = [library newFunctionWithName:@"display_fragment_direct"];
+    id<MTLFunction> aovffn = [library newFunctionWithName:@"aov_resolve_fragment"];
 
     // Accumulation pipeline: writes float4 RGBA, additive blend (One/One)
     // so each frame's contribution adds into the accum texture.
@@ -257,6 +271,18 @@ struct DisplayUniforms {
         d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
         d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
         d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        // AOV guide buffers (albedo / normal) accumulate the same additive
+        // way so they pick up free anti-aliasing from per-sample jitter.
+        for (NSUInteger i = 1; i <= 2; ++i) {
+            d.colorAttachments[i].pixelFormat = MTLPixelFormatRGBA16Float;
+            d.colorAttachments[i].blendingEnabled = YES;
+            d.colorAttachments[i].rgbBlendOperation = MTLBlendOperationAdd;
+            d.colorAttachments[i].alphaBlendOperation = MTLBlendOperationAdd;
+            d.colorAttachments[i].sourceRGBBlendFactor = MTLBlendFactorOne;
+            d.colorAttachments[i].sourceAlphaBlendFactor = MTLBlendFactorOne;
+            d.colorAttachments[i].destinationRGBBlendFactor = MTLBlendFactorOne;
+            d.colorAttachments[i].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        }
         _pathPipeline = [_device newRenderPipelineStateWithDescriptor:d error:&error];
         if (_pathPipeline == nil) {
             fprintf(stderr, "MacVoxel: failed to build path-trace pipeline: %s\n",
@@ -332,6 +358,23 @@ struct DisplayUniforms {
             [_device newRenderPipelineStateWithDescriptor:d error:&error];
         if (_displayDirectPipeline == nil) {
             fprintf(stderr, "MacVoxel: failed to build direct-display pipeline: %s\n",
+                    [[error localizedDescription] UTF8String]);
+            return nil;
+        }
+    }
+
+    // AOV resolve pipeline: one-shot mean + remap of an accumulated guide
+    // buffer to an LDR image for the CLI dump path.
+    {
+        MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+        d.label = @"PathTraceAOVResolve";
+        d.vertexFunction = vfn;
+        d.fragmentFunction = aovffn;
+        d.colorAttachments[0].pixelFormat = colorFormat;
+        _aovResolvePipeline =
+            [_device newRenderPipelineStateWithDescriptor:d error:&error];
+        if (_aovResolvePipeline == nil) {
+            fprintf(stderr, "MacVoxel: failed to build AOV resolve pipeline: %s\n",
                     [[error localizedDescription] UTF8String]);
             return nil;
         }
@@ -684,6 +727,21 @@ struct DisplayUniforms {
     _emaHistory.label = @"PTEMAHistory";
     _emaHistoryValid = NO;
 
+    // Denoiser guide buffers: accum-sized RGBA16Float (signed-capable for
+    // the normal), accumulated as MRT targets alongside _accumTexture and
+    // resolved by exportAOVToURL.
+    MTLTextureDescriptor* tda =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                           width:static_cast<NSUInteger>(size.width)
+                                                          height:static_cast<NSUInteger>(size.height)
+                                                       mipmapped:NO];
+    tda.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    tda.storageMode = MTLStorageModePrivate;
+    _aovAlbedo = [_device newTextureWithDescriptor:tda];
+    _aovAlbedo.label = @"PTAOVAlbedo";
+    _aovNormal = [_device newTextureWithDescriptor:tda];
+    _aovNormal.label = @"PTAOVNormal";
+
     _accumSize = size;
     _wantsClear = YES;
 }
@@ -967,6 +1025,18 @@ struct DisplayUniforms {
         (_sampleCount == 0) ? MTLLoadActionClear : MTLLoadActionLoad;
     rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
     rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    // AOV guide buffers ride the same load/store/clear lifecycle as accum
+    // so they stay in lockstep with the sample count and the camera-reset
+    // clear.
+    id<MTLTexture> aovTex[2] = { _aovAlbedo, _aovNormal };
+    for (NSUInteger i = 0; i < 2; ++i) {
+        rpd.colorAttachments[i + 1].texture = aovTex[i];
+        rpd.colorAttachments[i + 1].loadAction =
+            (_sampleCount == 0) ? MTLLoadActionClear : MTLLoadActionLoad;
+        rpd.colorAttachments[i + 1].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        rpd.colorAttachments[i + 1].storeAction = MTLStoreActionStore;
+    }
 
     id<MTLRenderCommandEncoder> enc =
         [cmd renderCommandEncoderWithDescriptor:rpd];
@@ -1261,6 +1331,128 @@ struct DisplayUniforms {
 
     // Pull pixels into a CPU buffer. We encode as RGBA so ImageIO
     // doesn't have to swap the channels itself.
+    const size_t bytes_per_row = w * 4;
+    std::vector<uint8_t> rgba(bytes_per_row * h);
+    [shot getBytes:rgba.data()
+       bytesPerRow:bytes_per_row
+        fromRegion:MTLRegionMake2D(0, 0, w, h)
+       mipmapLevel:0];
+    if (_colorFormat == MTLPixelFormatBGRA8Unorm) {
+        for (size_t i = 0; i < rgba.size(); i += 4) {
+            std::swap(rgba[i + 0], rgba[i + 2]);
+        }
+    }
+
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGDataProviderRef provider =
+        CGDataProviderCreateWithData(nullptr, rgba.data(),
+                                     rgba.size(), nullptr);
+    const uint32_t bitmap_info = static_cast<uint32_t>(kCGBitmapByteOrderDefault) |
+                                 static_cast<uint32_t>(kCGImageAlphaPremultipliedLast);
+    CGImageRef img = CGImageCreate(
+        w, h, 8, 32, bytes_per_row, cs, bitmap_info,
+        provider, nullptr, false, kCGRenderingIntentDefault);
+    CGDataProviderRelease(provider);
+    CGColorSpaceRelease(cs);
+    if (img == nullptr) {
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelExport" code:3
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"CGImageCreate failed"}];
+        }
+        return NO;
+    }
+
+    CGImageDestinationRef dest = CGImageDestinationCreateWithURL(
+        (__bridge CFURLRef)url, (__bridge CFStringRef)UTTypePNG.identifier,
+        1, nullptr);
+    if (dest == nullptr) {
+        CGImageRelease(img);
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelExport" code:4
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"could not create PNG destination"}];
+        }
+        return NO;
+    }
+    CGImageDestinationAddImage(dest, img, nullptr);
+    const bool ok = CGImageDestinationFinalize(dest);
+    CFRelease(dest);
+    CGImageRelease(img);
+    if (!ok) {
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelExport" code:5
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"PNG write failed"}];
+        }
+        return NO;
+    }
+    return YES;
+}
+
+- (BOOL)exportAOVToURL:(NSURL*)url
+                  kind:(NSInteger)kind
+          commandQueue:(id<MTLCommandQueue>)queue
+                 error:(NSError**)outError {
+    id<MTLTexture> src = (kind == 0) ? _aovAlbedo : _aovNormal;
+    if (src == nil || _aovResolvePipeline == nil) {
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelExport" code:1
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"nothing rendered yet"}];
+        }
+        return NO;
+    }
+
+    const NSUInteger w = static_cast<NSUInteger>(_accumSize.width);
+    const NSUInteger h = static_cast<NSUInteger>(_accumSize.height);
+    if (w == 0 || h == 0) {
+        if (outError) {
+            *outError = [NSError
+                errorWithDomain:@"MacVoxelExport" code:2
+                       userInfo:@{NSLocalizedDescriptionKey:
+                                      @"render target has zero size"}];
+        }
+        return NO;
+    }
+    MTLTextureDescriptor* td =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:_colorFormat
+                                                           width:w
+                                                          height:h
+                                                       mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> shot = [_device newTextureWithDescriptor:td];
+    shot.label = @"PathTraceAOVExport";
+
+    id<MTLCommandBuffer> cmd = [queue commandBuffer];
+    cmd.label = @"PathTraceAOVExport";
+
+    MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+    rpd.colorAttachments[0].texture = shot;
+    rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
+    rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+    rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    id<MTLRenderCommandEncoder> enc =
+        [cmd renderCommandEncoderWithDescriptor:rpd];
+    AovUniforms au;
+    au.sample_count = _sampleCount;
+    au.mode = (kind == 0) ? 0u : 1u;
+    [enc setRenderPipelineState:_aovResolvePipeline];
+    [enc setCullMode:MTLCullModeNone];
+    [enc setFragmentBytes:&au length:sizeof(au) atIndex:0];
+    [enc setFragmentTexture:src atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [enc endEncoding];
+
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
     const size_t bytes_per_row = w * 4;
     std::vector<uint8_t> rgba(bytes_per_row * h);
     [shot getBytes:rgba.data()
