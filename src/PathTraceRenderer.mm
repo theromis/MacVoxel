@@ -969,7 +969,12 @@ struct AovResolveUniforms {
     const bool reachedTarget =
         _sampleCount >= static_cast<uint32_t>(max_samples_cfg);
     if (rs.denoise && reachedTarget) {
-        if (_sampleCount != _lastDenoisedSample) {
+        // Re-denoise when this accumulation epoch hasn't been denoised yet
+        // (!_denoiseValid is cleared on every reset, e.g. a camera move) or
+        // the target moved without a reset (max_samples raised). Without the
+        // !_denoiseValid term, a post-reset re-converge that lands on the
+        // same sample cap would match _lastDenoisedSample and never denoise.
+        if (!_denoiseValid || _sampleCount != _lastDenoisedSample) {
             if ([self denoiseAccumulatedWithQueue:cmd.commandQueue]) {
                 _lastDenoisedSample = _sampleCount;
                 _denoiseValid = YES;
