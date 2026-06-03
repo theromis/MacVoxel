@@ -25,15 +25,19 @@ The `-G Ninja` flag is optional but produces faster, cleaner builds.
   (nTRN/nGRP/nSHP) is honored on load. Material chunks (MATL) are parsed —
   `_diffuse`, `_metal`, `_glass`, `_emit` types come through with their
   roughness, metallic, transparency, IOR, and emission settings.
-- Edits voxels with place / erase / paint / pick tools, brush sizes 1–8.
-  Drag-paint streams cells into one undoable stroke. Box selection with cut /
-  copy / paste / delete.
+- Edits voxels with a family of tools: brush (place / erase / paint / pick,
+  sizes 1–8), shapes (line / circle / square / box), face-fill flood,
+  parametric generators (ellipsoid, cylinder, cone, pyramid, torus, helix,
+  noise, tree, conifer) bounded by a drag-out gizmo, and neighborhood mutators
+  (foliage). Drag-paint streams cells into one undoable stroke. Marquee / box /
+  flood selection with cut / copy / paste / delete.
 - Renders interactively via a GPU ray-cast shader with hierarchical empty-space
   skipping. Edits upload incrementally per dirty chunk, so big scenes stay
   responsive while you paint.
 - Switches into a path-traced render mode for final-quality output:
   progressive accumulation, multi-bounce GI with Russian roulette, stochastic
-  AA, virtual ground plane. Materials supported:
+  AA, virtual ground plane, and optional Open Image Denoise (Intel OIDN, Metal
+  backend) guided by first-hit albedo/normal buffers. Materials supported:
   - **Diffuse** — cosine-weighted hemisphere bounce.
   - **Metal** — GGX VNDF microfacet sampling, `metallic` toggles between
     specular and diffuse paths, `roughness` widens the lobe.
@@ -72,10 +76,14 @@ The `-G Ninja` flag is optional but produces faster, cleaner builds.
 
 ## A few implementation notes
 
-- **Sparse chunked grid.** Voxels live in 16³ chunks keyed by chunk-coord in a
-  hash map. Cells default to 0 (empty); world coords are signed so MagicaVoxel
-  scene-graph translations work directly. The grid tracks dirty chunks so the
-  GPU only re-uploads what changed.
+- **GPU-authoritative editing.** During a stroke the live voxel state is a
+  dense 256³ `texture3d` on the GPU that the renderers sample directly; tools
+  write into a preview texture composited on top, promoted into the main
+  texture by a commit kernel at mouse-up. Two CPU mirrors are reconciled at
+  each commit: a dense shadow that backs undo diffs, and a sparse 16³-chunk
+  hash map (cells default to 0/empty) that is the on-disk `.vox` format and the
+  path tracer's source. World coords are signed so MagicaVoxel scene-graph
+  translations work directly.
 - **Two-pass overlay composition.** The interactive ray-cast renderer + a
   tiny native Metal overlay pipeline (`SceneOverlayRenderer` + `Overlay.metal`)
   share one render encoder: scene fragments, then 2D screen-space gizmos /
@@ -83,9 +91,12 @@ The `-G Ninja` flag is optional but produces faster, cleaner builds.
   premultiplied-alpha blend. The path-traced mode renders the scene to its own
   accumulation buffer first, then runs the overlay pass on top of the drawable
   in a follow-up encoder.
-- **No greedy mesher.** An earlier phase had one; it was retired when the GPU
-  ray-cast renderer outpaced it. The grid is uploaded directly to a
-  coarse-grid-of-chunk-indices + chunk pool layout that the shader DDAs through.
+- **No greedy mesher; two traversals.** An earlier phase had a mesher; it was
+  retired when the GPU ray-cast renderer outpaced it. The interactive renderer
+  DDAs straight through the 256³ voxel texture, skipping empty space via a 16³
+  occupancy oracle. The path tracer keeps its own coarse-grid-of-chunk-indices
+  + chunk-pool structure, built from the sparse grid, that its shader DDAs
+  through.
 - **Color space.** Palette is sRGB on disk, converted to linear on GPU upload;
   the path tracer works in linear and the display fragment re-encodes to sRGB.
 - **UI.** SwiftUI panels backed by an Obj-C++ `EditorContextBridge` around the
