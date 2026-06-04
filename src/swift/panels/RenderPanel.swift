@@ -5,108 +5,107 @@ struct RenderPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if state.renderMode != .edit {
-                Toggle("Stochastic Sampling GI",
-                       isOn: $state.stochasticGI)
-                    .help("MagicaVoxel's OPT_AREA toggle. On = explicit area-light NEE with MIS at every bounce. Off = emissives discovered only by BSDF random walk (splotchy 'SS-GI off' look).")
+            sectionHeader("Render")
+            Toggle("Stochastic Sampling GI",
+                   isOn: $state.stochasticGI)
+                .help("MagicaVoxel's OPT_AREA toggle. On = explicit area-light NEE with MIS at every bounce. Off = emissives discovered only by BSDF random walk (splotchy 'SS-GI off' look).")
 
-                HStack(spacing: 8) {
-                    Text("Glass")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 64, alignment: .leading)
-                    Picker("Glass", selection: $state.glassMode) {
-                        Text("Probabilistic").tag(BridgeGlassMode.probabilistic)
-                        Text("Absorption").tag(BridgeGlassMode.absorption)
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
+            HStack(spacing: 8) {
+                Text("Glass")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 64, alignment: .leading)
+                Picker("Glass", selection: $state.glassMode) {
+                    Text("Probabilistic").tag(BridgeGlassMode.probabilistic)
+                    Text("Absorption").tag(BridgeGlassMode.absorption)
                 }
-                .help("Probabilistic: transparency picks refract vs diffuse, tint = surface color regardless.\nAbsorption: always refracts; transparency interpolates tint from full color (0) to clear (1).")
-
-                Toggle("Match window resolution",
-                       isOn: $state.resolutionMatchWindow)
-
-                HStack(spacing: 8) {
-                    Text("Resolution")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 64, alignment: .leading)
-                    intField(value: $state.renderWidth, range: 16...16384)
-                    Text("×").foregroundStyle(.secondary)
-                    intField(value: $state.renderHeight, range: 16...16384)
-                }
-                .disabled(state.resolutionMatchWindow)
-
-                HStack(spacing: 6) {
-                    Text("Samples")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 64, alignment: .leading)
-                    Slider(value: Binding(
-                        get: { Double(state.maxSamples) },
-                        set: { state.maxSamples = Int($0.rounded()) }
-                    ), in: 16...8192)
-                    Text("\(state.maxSamples)")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 44, alignment: .trailing)
-                }
-
-                sectionHeader("Camera")
-                Toggle("ACES tonemap", isOn: $state.acesTonemap)
-                Toggle("Denoise (OIDN)", isOn: $state.denoise)
-
-                HStack(spacing: 6) {
-                    Text("Aperture")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 64, alignment: .leading)
-                    Slider(value: Binding(
-                        get: { Double(state.aperture) },
-                        set: { state.aperture = Float($0) }
-                    ), in: 0.0...3.0)
-                    Text(String(format: "%.2f", state.aperture))
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 44, alignment: .trailing)
-                }
-                .help("Thin-lens lens radius in voxel units. 0 = pinhole (no DOF); larger = stronger blur away from the focal plane.")
-
-                HStack(spacing: 6) {
-                    Text("Focus")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 64, alignment: .leading)
-                    Slider(value: Binding(
-                        get: { Double(state.focusDistance) },
-                        set: { state.focusDistance = Float($0) }
-                    ), in: 1.0...500.0)
-                    Text(String(format: "%.0f", state.focusDistance))
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 44, alignment: .trailing)
-                }
-                .help("Perpendicular distance along camera-forward (voxels) where the scene stays sharp.")
-                .disabled(state.aperture == 0)
-
-                ProgressView(value: progressFraction) {
-                    EmptyView()
-                } currentValueLabel: {
-                    Text("\(state.sampleCount) / \(state.maxSamples)")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
-
-                if state.sampleCount >= state.maxSamples {
-                    Text("converged — adjust target or move camera to keep sampling")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                }
-
-                Button("Save render\u{2026}") { state.saveRenderDialog() }
-                    .disabled(state.sampleCount == 0)
+                .labelsHidden()
+                .pickerStyle(.menu)
             }
+            .help("Probabilistic: transparency picks refract vs diffuse, tint = surface color regardless.\nAbsorption: always refracts; transparency interpolates tint from full color (0) to clear (1).")
+
+            Toggle("Match window resolution",
+                   isOn: $state.resolutionMatchWindow)
+
+            HStack(spacing: 8) {
+                Text("Resolution")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 64, alignment: .leading)
+                intField(value: $state.renderWidth, range: 16...16384)
+                Text("×").foregroundStyle(.secondary)
+                intField(value: $state.renderHeight, range: 16...16384)
+            }
+            .disabled(state.resolutionMatchWindow)
+
+            HStack(spacing: 6) {
+                Text("Samples")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 64, alignment: .leading)
+                Slider(value: Binding(
+                    get: { Double(state.maxSamples) },
+                    set: { state.maxSamples = Int($0.rounded()) }
+                ), in: 16...8192)
+                Text("\(state.maxSamples)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+
+            sectionHeader("Camera")
+            Toggle("ACES tonemap", isOn: $state.acesTonemap)
+            Toggle("Denoise (OIDN)", isOn: $state.denoise)
+
+            HStack(spacing: 6) {
+                Text("Aperture")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 64, alignment: .leading)
+                Slider(value: Binding(
+                    get: { Double(state.aperture) },
+                    set: { state.aperture = Float($0) }
+                ), in: 0.0...3.0)
+                Text(String(format: "%.2f", state.aperture))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+            .help("Thin-lens lens radius in voxel units. 0 = pinhole (no DOF); larger = stronger blur away from the focal plane.")
+
+            HStack(spacing: 6) {
+                Text("Focus")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 64, alignment: .leading)
+                Slider(value: Binding(
+                    get: { Double(state.focusDistance) },
+                    set: { state.focusDistance = Float($0) }
+                ), in: 1.0...500.0)
+                Text(String(format: "%.0f", state.focusDistance))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+            .help("Perpendicular distance along camera-forward (voxels) where the scene stays sharp.")
+            .disabled(state.aperture == 0)
+
+            ProgressView(value: progressFraction) {
+                EmptyView()
+            } currentValueLabel: {
+                Text("\(state.sampleCount) / \(state.maxSamples)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            if state.sampleCount >= state.maxSamples {
+                Text("converged — adjust target or move camera to keep sampling")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+
+            Button("Save render\u{2026}") { state.saveRenderDialog() }
+                .disabled(state.sampleCount == 0)
 
             Divider().padding(.vertical, 4)
             MaterialEditor(state: state)
