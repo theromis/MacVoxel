@@ -13,7 +13,11 @@
 namespace {
 
 struct Uniforms {
-    simd::float4x4 inv_vp;
+    // Camera basis for per-pixel ray reconstruction (world space). Built
+    // from unit vectors instead of inverting P*V — see encodeWithEncoder.
+    simd::float3 cam_right;  float cam_tan_half;  // tan(fov_y / 2)
+    simd::float3 cam_up;     float cam_aspect;
+    simd::float3 cam_fwd;    float _padfwd;
     simd::float3 camera_pos;
     float _pad0;
     simd::float3 light_dir;
@@ -47,7 +51,9 @@ struct VertOut {
 };
 
 struct Uniforms {
-    float4x4 inv_vp;
+    float3   cam_right;  float cam_tan_half;
+    float3   cam_up;     float cam_aspect;
+    float3   cam_fwd;    float _padfwd;
     float3   camera_pos;
     float    _pad0;
     float3   light_dir;
@@ -156,14 +162,13 @@ fragment float4 raycast_fragment(
     texture3d<uint, access::read> tex_lift [[texture(6)]],
     texture3d<uint, access::read> lift_oracle [[texture(7)]])
 {
-    // Reconstruct world-space ray from NDC.
-    float4 near_clip = float4(in.ndc, 0.0, 1.0);
-    float4 far_clip  = float4(in.ndc, 1.0, 1.0);
-    float4 near_h = u.inv_vp * near_clip;
-    float4 far_h  = u.inv_vp * far_clip;
-    float3 near_world = near_h.xyz / near_h.w;
-    float3 far_world  = far_h.xyz / far_h.w;
-    float3 ray_dir_world = normalize(far_world - near_world);
+    // Reconstruct world-space ray from the camera basis (no matrix
+    // inverse): unit-scale vectors keep the direction precise even with a
+    // far camera and our wide near/far range, which inv(P*V) did not.
+    float3 ray_dir_world = normalize(
+        u.cam_fwd +
+        in.ndc.x * u.cam_aspect * u.cam_tan_half * u.cam_right +
+        in.ndc.y * u.cam_tan_half * u.cam_up);
     float3 ray_origin_world = u.camera_pos;
 
     // World -> grid: invert the rotation R = (gx, gz, -gy).
@@ -479,7 +484,15 @@ fragment float4 raycast_fragment(
     _cacheValid = YES;
 
     Uniforms u;
-    u.inv_vp = simd_inverse(projection * view);
+    // Extract the camera basis from the view matrix rows (R = [r; u; -f])
+    // and the FOV/aspect from the projection, so per-pixel rays are built
+    // from unit vectors rather than an ill-conditioned inverse of P*V.
+    u.cam_right = simd::float3{view.columns[0].x, view.columns[1].x, view.columns[2].x};
+    u.cam_up    = simd::float3{view.columns[0].y, view.columns[1].y, view.columns[2].y};
+    u.cam_fwd   = simd::float3{-view.columns[0].z, -view.columns[1].z, -view.columns[2].z};
+    u.cam_tan_half = 1.0f / projection.columns[1].y;
+    u.cam_aspect   = projection.columns[1].y / projection.columns[0].x;
+    u._padfwd = 0.0f;
     u.camera_pos = cameraWorld;
     u._pad0 = 0.0f;
     u.light_dir = simd::normalize(simd::float3{0.4f, 0.7f, 0.5f});
