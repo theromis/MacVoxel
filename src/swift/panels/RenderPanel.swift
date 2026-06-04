@@ -5,14 +5,6 @@ struct RenderPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("Mode")
-            Picker("Mode", selection: $state.renderMode) {
-                Text("Edit").tag(BridgeRenderMode.edit)
-                Text("Render").tag(BridgeRenderMode.render)
-            }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-
             if state.renderMode != .edit {
                 Toggle("Stochastic Sampling GI",
                        isOn: $state.stochasticGI)

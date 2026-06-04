@@ -4,7 +4,8 @@ struct ContentView: View {
     @Environment(EditorState.self) private var state
 
     var body: some View {
-        HSplitView {
+        @Bindable var state = state
+        return HSplitView {
             ScrollView {
                 VStack(spacing: 0) {
                     ToolPanel(state: state)
@@ -15,6 +16,19 @@ struct ContentView: View {
             .frame(minWidth: 170, idealWidth: 200, maxWidth: 280)
 
             MetalSceneView(state: state)
+                .overlay {
+                    SceneOverlay()
+                        .corner(.topTrailing) {
+                            Picker("Mode", selection: $state.renderMode) {
+                                Text("Edit").tag(BridgeRenderMode.edit)
+                                Text("Render").tag(BridgeRenderMode.render)
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .frame(width: 150)
+                            .hudPanel()
+                        }
+                }
                 .frame(minWidth: 500, idealWidth: 900)
                 .layoutPriority(1)
 

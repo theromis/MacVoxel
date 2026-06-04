@@ -84,6 +84,7 @@ set(APP_SWIFT_SOURCES
     src/swift/MacVoxelCommands.swift
     src/swift/ContentView.swift
     src/swift/MetalSceneView.swift
+    src/swift/SceneOverlay.swift
     src/swift/EditorState.swift
     src/swift/panels/GeneratorControls.swift
     src/swift/panels/LightPanel.swift
