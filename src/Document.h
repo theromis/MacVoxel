@@ -93,6 +93,41 @@ struct Document {
     void ReseedVolumeShadow() {
         volume_shadow.RebuildFromGrid(grid);
     }
+
+    // Translate `grid` so the model fits inside `volume`: centered in
+    // X/Y, resting on the floor (volume.z0) in Z — the editor's
+    // ground-plane convention. Loaded .vox coords are authored
+    // arbitrarily (corner-at-origin, or origin-centered scene-graph
+    // transforms), so without this a model can land partly outside the
+    // fixed edit volume: the path tracer (reads `grid`) shows it whole
+    // while the dense shadow / tex_a (which drop out-of-volume cells)
+    // show only a truncated corner. Uniform translation preserves
+    // relative placement in multi-object scenes; idempotent once fitted;
+    // no-op when empty. Call before ReseedVolumeShadow on load.
+    void FitGridToVolume() {
+        const Bounds3 b = grid.Bounds();
+        if (b.empty()) return;
+        const int32_t ox =
+            volume.x0 + (volume.size_x() - b.size_x()) / 2 - b.min_x;
+        const int32_t oy =
+            volume.y0 + (volume.size_y() - b.size_y()) / 2 - b.min_y;
+        const int32_t oz = volume.z0 - b.min_z;
+        if (ox == 0 && oy == 0 && oz == 0) return;
+        constexpr int32_t cs = static_cast<int32_t>(VoxelGrid::kChunkSize);
+        VoxelGrid moved;
+        for (const auto& [coord, chunk] : grid.chunks()) {
+            for (int32_t lz = 0; lz < cs; ++lz)
+            for (int32_t ly = 0; ly < cs; ++ly)
+            for (int32_t lx = 0; lx < cs; ++lx) {
+                const uint8_t v = chunk->cells[VoxelGrid::LocalIndex(lx, ly, lz)];
+                if (v == 0) continue;
+                moved.Set(coord.x * cs + lx + ox,
+                          coord.y * cs + ly + oy,
+                          coord.z * cs + lz + oz, v);
+            }
+        }
+        grid = std::move(moved);
+    }
     // Whole-document replacement (load / new / open). Bumps every
     // typed counter so renderers invalidate all categories at once.
     void BumpAll() {

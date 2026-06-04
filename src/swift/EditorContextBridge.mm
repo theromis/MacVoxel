@@ -64,6 +64,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
         const std::string p = [path UTF8String];
         std::string err;
         if (macvoxel::LoadVox(p, &doc.grid, &doc.palette, &err)) {
+            doc.FitGridToVolume();
             doc.ReseedVolumeShadow();
             return;
         }
@@ -139,6 +140,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     }
     fresh.path = path;
     _ctx->document = std::move(fresh);
+    _ctx->document.FitGridToVolume();
     _ctx->document.ReseedVolumeShadow();
     _ctx->document.BumpAll();
     _ctx->history.Clear();
