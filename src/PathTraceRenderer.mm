@@ -15,13 +15,28 @@
 
 #include "Camera.h"
 #include "Document.h"
+#include "EditEngine.h"
 #include "Material.h"
 #include "EditorContext.h"
 #include "RenderState.h"
 
+#include <unordered_map>
+#include <utility>
+
 #include <cmath>
 
 namespace {
+
+// Floating-selection overlay baked into the PT grid rebuild. The lift's
+// authoritative content lives in tex_lift (GPU); we read it back at its
+// already-transformed bounds and merge it into the coarse+pool buffers so
+// the path tracer matches what the rasterizer composites. `bounds` is the
+// volume-clipped world bbox the `bytes` cover, x-fastest.
+struct LiftOverlay {
+    macvoxel::Bounds3 bounds;
+    std::vector<uint8_t> bytes;
+    bool valid() const { return !bounds.empty() && !bytes.empty(); }
+};
 
 struct PathUniforms {
     simd::float4x4 inv_vp;
@@ -469,11 +484,39 @@ struct AovResolveUniforms {
 // "render mode" use, not interactive editing).
 // ---------------------------------------------------------------------------
 
-- (void)rebuildVoxelBuffersFromDocument:(macvoxel::Document*)doc {
+- (void)rebuildVoxelBuffersFromDocument:(macvoxel::Document*)doc
+                            liftOverlay:(const LiftOverlay*)overlay {
     using VG = macvoxel::VoxelGrid;
+    using CC = VG::ChunkCoord;
     const auto& chunks = doc->grid.chunks();
 
-    if (chunks.empty()) {
+    // Bin the floating-lift cells by chunk so each can be splatted onto the
+    // pool region for its chunk (existing or freshly allocated below).
+    std::unordered_map<CC, std::vector<std::pair<uint32_t, uint8_t>>,
+                       VG::ChunkCoordHash> lift_cells;
+    if (overlay != nullptr && overlay->valid()) {
+        const macvoxel::Bounds3& b = overlay->bounds;
+        const size_t bw = static_cast<size_t>(b.size_x());
+        const size_t bh = static_cast<size_t>(b.size_y());
+        const size_t bd = static_cast<size_t>(b.size_z());
+        if (overlay->bytes.size() >= bw * bh * bd) {
+            for (size_t z = 0; z < bd; ++z)
+            for (size_t y = 0; y < bh; ++y) {
+                const size_t row = (z * bh + y) * bw;
+                for (size_t x = 0; x < bw; ++x) {
+                    const uint8_t v = overlay->bytes[row + x];
+                    if (v == 0) continue;
+                    const int32_t wx = b.min_x + static_cast<int32_t>(x);
+                    const int32_t wy = b.min_y + static_cast<int32_t>(y);
+                    const int32_t wz = b.min_z + static_cast<int32_t>(z);
+                    lift_cells[VG::ToChunkCoord(wx, wy, wz)].push_back(
+                        {static_cast<uint32_t>(VG::LocalIndex(wx, wy, wz)), v});
+                }
+            }
+        }
+    }
+
+    if (chunks.empty() && lift_cells.empty()) {
         _coarseMin = simd::int3{0, 0, 0};
         _coarseDim = simd::int3{0, 0, 0};
         _coarseBuffer = nil;
@@ -482,14 +525,13 @@ struct AovResolveUniforms {
     }
     int32_t min_cx = INT32_MAX, min_cy = INT32_MAX, min_cz = INT32_MAX;
     int32_t max_cx = INT32_MIN, max_cy = INT32_MIN, max_cz = INT32_MIN;
-    for (const auto& [coord, chunk] : chunks) {
-        min_cx = std::min(min_cx, coord.x);
-        min_cy = std::min(min_cy, coord.y);
-        min_cz = std::min(min_cz, coord.z);
-        max_cx = std::max(max_cx, coord.x);
-        max_cy = std::max(max_cy, coord.y);
-        max_cz = std::max(max_cz, coord.z);
-    }
+    const auto extend = [&](const CC& c) {
+        min_cx = std::min(min_cx, c.x); max_cx = std::max(max_cx, c.x);
+        min_cy = std::min(min_cy, c.y); max_cy = std::max(max_cy, c.y);
+        min_cz = std::min(min_cz, c.z); max_cz = std::max(max_cz, c.z);
+    };
+    for (const auto& [coord, chunk] : chunks) extend(coord);
+    for (const auto& [coord, cells] : lift_cells) extend(coord);
     _coarseMin = simd::int3{min_cx, min_cy, min_cz};
     _coarseDim = simd::int3{max_cx - min_cx + 1,
                             max_cy - min_cy + 1,
@@ -501,20 +543,41 @@ struct AovResolveUniforms {
         static_cast<size_t>(_coarseDim.z);
     std::vector<uint32_t> coarse(coarse_count, 0);
     std::vector<uint8_t> pool;
-    pool.reserve(chunks.size() * VG::kChunkVolume);
+    pool.reserve((chunks.size() + lift_cells.size()) * VG::kChunkVolume);
     uint32_t pool_idx = 1;
+    const auto coarse_index = [&](const CC& coord) {
+        return static_cast<size_t>(coord.x - min_cx) +
+               static_cast<size_t>(coord.y - min_cy) *
+                   static_cast<size_t>(_coarseDim.x) +
+               static_cast<size_t>(coord.z - min_cz) *
+                   static_cast<size_t>(_coarseDim.x) *
+                   static_cast<size_t>(_coarseDim.y);
+    };
+    // Lift cells override the grid where they overlap (the floating buffer
+    // composites on top), so apply them after the chunk memcpy.
+    const auto apply_lift = [&](const CC& coord, size_t pool_offset) {
+        auto it = lift_cells.find(coord);
+        if (it == lift_cells.end()) return;
+        for (const auto& [local, val] : it->second) {
+            pool[pool_offset + local] = val;
+        }
+        lift_cells.erase(it);
+    };
     for (const auto& [coord, chunk] : chunks) {
-        const size_t cgi =
-            static_cast<size_t>(coord.x - min_cx) +
-            static_cast<size_t>(coord.y - min_cy) *
-                static_cast<size_t>(_coarseDim.x) +
-            static_cast<size_t>(coord.z - min_cz) *
-                static_cast<size_t>(_coarseDim.x) *
-                static_cast<size_t>(_coarseDim.y);
-        coarse[cgi] = pool_idx++;
+        coarse[coarse_index(coord)] = pool_idx++;
         const size_t old = pool.size();
         pool.resize(old + VG::kChunkVolume);
         std::memcpy(pool.data() + old, chunk->cells, VG::kChunkVolume);
+        apply_lift(coord, old);
+    }
+    // Lift cells over otherwise-empty chunks: allocate a zeroed chunk each.
+    for (const auto& [coord, cells] : lift_cells) {
+        coarse[coarse_index(coord)] = pool_idx++;
+        const size_t old = pool.size();
+        pool.resize(old + VG::kChunkVolume, 0);
+        for (const auto& [local, val] : cells) {
+            pool[old + local] = val;
+        }
     }
     _coarseBuffer = [_device newBufferWithBytes:coarse.data()
                                          length:coarse.size() * sizeof(uint32_t)
@@ -712,11 +775,30 @@ struct AovResolveUniforms {
 // whose typed counter has advanced since last call. Returns YES if any
 // rebuild fired (caller uses that to decide whether to clear the
 // accumulator).
-- (BOOL)syncResourcesToDocument:(macvoxel::Document*)doc {
+- (BOOL)syncResourcesToContext:(macvoxel::EditorContext*)ctx {
+    macvoxel::Document* doc = &ctx->document;
     BOOL geom_dirty = NO, pal_dirty = NO, mat_dirty = NO;
     if (!_resourcesValid ||
         _cachedGeometryVersion != doc->geometry_version) {
-        [self rebuildVoxelBuffersFromDocument:doc];
+        // An active floating selection lives only in tex_lift; read it back
+        // and bake it into the grid rebuild so the PT matches the viewport.
+        LiftOverlay overlay;
+        if (ctx->selection.lift_active() && ctx->engine != nullptr) {
+            const macvoxel::Bounds3 lb = ctx->selection.bounds();
+            macvoxel::Bounds3 cb = lb;
+            cb.min_x = std::max(cb.min_x, doc->volume.x0);
+            cb.min_y = std::max(cb.min_y, doc->volume.y0);
+            cb.min_z = std::max(cb.min_z, doc->volume.z0);
+            cb.max_x = std::min(cb.max_x, doc->volume.x1);
+            cb.max_y = std::min(cb.max_y, doc->volume.y1);
+            cb.max_z = std::min(cb.max_z, doc->volume.z1);
+            if (!cb.empty()) {
+                ctx->engine->ReadbackLift(lb, &overlay.bytes);
+                overlay.bounds = cb;
+            }
+        }
+        [self rebuildVoxelBuffersFromDocument:doc
+                                  liftOverlay:overlay.valid() ? &overlay : nullptr];
         _cachedGeometryVersion = doc->geometry_version;
         geom_dirty = YES;
     }
@@ -835,7 +917,6 @@ struct AovResolveUniforms {
              context:(macvoxel::EditorContext*)ctx
               camera:(const macvoxel::Camera&)camera {
     if (ctx == nullptr) return;
-    macvoxel::Document* doc = &ctx->document;
     const CGSize drawable = view.drawableSize;
     if (drawable.width <= 0.0 || drawable.height <= 0.0) return;
 
@@ -847,7 +928,7 @@ struct AovResolveUniforms {
     }
 
     [self ensureAccumTextureForSize:size];
-    if ([self syncResourcesToDocument:doc]) {
+    if ([self syncResourcesToContext:ctx]) {
         _wantsClear = YES;
     }
     const uint64_t cam_hash = [self hashCameraState:camera];
@@ -1322,9 +1403,8 @@ struct AovResolveUniforms {
         return NO;
     }
 
-    macvoxel::Document* doc = &ctx->document;
     [self ensureAccumTextureForSize:size];
-    [self syncResourcesToDocument:doc];
+    [self syncResourcesToContext:ctx];
     _sampleCount = 0;
     _wantsClear = NO;
 
