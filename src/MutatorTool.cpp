@@ -191,7 +191,7 @@ void MutatorTool::SyncStrokeFromTexture(EditorContext& ctx,
 
     doc.grid.ApplyChanges(diff.data(), diff.size());
     ctx.history.RecordBatch(diff.data(), diff.size());
-    (void)doc.volume_shadow.TakeDirtyChunks();
+    engine.RefreshDocOracle(doc.volume_shadow);
     doc.BumpGeometry();
 }
 

@@ -295,6 +295,8 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     [enc setBytes:&u length:sizeof(u) atIndex:0];
     [enc setTexture:texture.previewTexture atIndex:0];
     [enc setTexture:texture.previewRemTexture atIndex:1];
+    [enc setTexture:texture.previewOracleTexture atIndex:2];
+    [enc setTexture:texture.previewRemOracleTexture atIndex:3];
 
     const NSUInteger tgX = std::min<NSUInteger>(8, (NSUInteger)u.dispatch_size[0]);
     const NSUInteger tgY = std::min<NSUInteger>(8, (NSUInteger)u.dispatch_size[1]);
@@ -370,6 +372,8 @@ void Dispatch(id<MTLComputeCommandEncoder> enc,
     [enc setTexture:texture.previewTexture atIndex:1];
     [enc setTexture:texture.oracleTexture atIndex:2];
     [enc setTexture:texture.previewRemTexture atIndex:3];
+    [enc setTexture:texture.previewOracleTexture atIndex:4];
+    [enc setTexture:texture.previewRemOracleTexture atIndex:5];
 
     const NSUInteger tgX = 4, tgY = 4, tgZ = 4;
     const MTLSize threadsPerThreadgroup = MTLSizeMake(tgX, tgY, tgZ);

@@ -171,6 +171,59 @@
     }
 }
 
+- (void)refreshOracleFromVolume:(macvoxel::VoxelVolume&)volume {
+    auto dirty = volume.TakeDirtyChunks();
+    if (dirty.empty()) return;
+
+    const int chunk_size = macvoxel::VoxelVolume::kChunkSize;
+    const uint8_t* base = volume.data();
+    const size_t bytes_per_row = (size_t)_strideX;
+    const size_t bytes_per_image = (size_t)_strideZ;
+
+    for (int cz_i = 0; cz_i < _chunksZ; ++cz_i) {
+        for (int cy_i = 0; cy_i < _chunksY; ++cy_i) {
+            for (int cx_i = 0; cx_i < _chunksX; ++cx_i) {
+                const size_t bit =
+                    (size_t)cx_i +
+                    (size_t)cy_i * (size_t)_chunksX +
+                    (size_t)cz_i * (size_t)_chunksX * (size_t)_chunksY;
+                if (((dirty[bit >> 6] >> (bit & 63)) & 1ULL) == 0) continue;
+
+                const int x0 = cx_i * chunk_size;
+                const int y0 = cy_i * chunk_size;
+                const int z0 = cz_i * chunk_size;
+                const int w = std::min(chunk_size, _sizeX - x0);
+                const int h = std::min(chunk_size, _sizeY - y0);
+                const int d = std::min(chunk_size, _sizeZ - z0);
+                if (w <= 0 || h <= 0 || d <= 0) continue;
+                const size_t off = (size_t)x0 +
+                                   (size_t)y0 * bytes_per_row +
+                                   (size_t)z0 * bytes_per_image;
+                uint8_t any = 0;
+                for (int z = 0; z < d && !any; ++z) {
+                    for (int y = 0; y < h && !any; ++y) {
+                        const uint8_t* row = base + off +
+                            (size_t)y * bytes_per_row +
+                            (size_t)z * bytes_per_image;
+                        for (int x = 0; x < w; ++x) {
+                            if (row[x]) { any = 1; break; }
+                        }
+                    }
+                }
+                MTLRegion oc = MTLRegionMake3D(
+                    (NSUInteger)cx_i, (NSUInteger)cy_i, (NSUInteger)cz_i,
+                    1, 1, 1);
+                [_oracleTexture replaceRegion:oc
+                                  mipmapLevel:0
+                                        slice:0
+                                    withBytes:&any
+                                  bytesPerRow:1
+                                bytesPerImage:1];
+            }
+        }
+    }
+}
+
 - (void)encodeLiftSnapshot:(id<MTLCommandBuffer>)cmd
                   worldBbox:(const macvoxel::Bounds3&)world_bbox {
     if (world_bbox.empty()) return;

@@ -339,7 +339,7 @@ void FaceTool::OnMouseUp(EditorContext& ctx, InteractionState& state,
                         const auto t_history = perf::Now();
                         ctx.history.RecordBatch(diff.data(), diff.size());
                         perf_history_us_ += perf::Micros(perf::Now() - t_history);
-                        (void)doc.volume_shadow.TakeDirtyChunks();
+                        engine.RefreshDocOracle(doc.volume_shadow);
                         doc.BumpGeometry();
                     }
                 }

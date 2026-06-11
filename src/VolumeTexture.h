@@ -25,6 +25,12 @@ struct Bounds3;
 // the texture. Idempotent: a call with no dirty chunks does nothing.
 - (void)syncFromVolume:(macvoxel::VoxelVolume&)volume;
 
+// Drains the dirty-chunk bitset and recomputes only the oracle bytes
+// for those chunks — no cell upload. For the commit path, where the
+// GPU already wrote tex_a but can't cheaply learn that an Erase left
+// a chunk empty (the oracle would otherwise only ever saturate to 1).
+- (void)refreshOracleFromVolume:(macvoxel::VoxelVolume&)volume;
+
 // Doc texture: rasterizer DDA samples this. R8Uint 256³.
 @property(nonatomic, readonly, nonnull) id<MTLTexture> texture;
 

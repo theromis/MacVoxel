@@ -111,6 +111,10 @@ public:
         [lift_ waitForPendingWork];
     }
 
+    void RefreshDocOracle(VoxelVolume& shadow) override {
+        [texture_ refreshOracleFromVolume:shadow];
+    }
+
     // ---------------- Lift pipeline ----------------
 
     void LiftBox(const Bounds3& bbox) override {

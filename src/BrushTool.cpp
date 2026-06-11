@@ -179,7 +179,7 @@ void BrushTool::SyncStrokeFromTexture(EditorContext& ctx,
     // DiffAndApplyRegion marked the shadow's chunks dirty. Drain —
     // the GPU texture has been authoritative the whole stroke, so
     // the next render-pass sync should upload nothing.
-    (void)doc.volume_shadow.TakeDirtyChunks();
+    engine.RefreshDocOracle(doc.volume_shadow);
     doc.BumpGeometry();
 }
 

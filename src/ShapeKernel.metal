@@ -414,6 +414,8 @@ kernel void shape_clear(
     constant ShapeUniforms& u                  [[buffer(0)]],
     texture3d<uint, access::write> preview     [[texture(0)]],
     texture3d<uint, access::write> preview_rem [[texture(1)]],
+    texture3d<uint, access::write> preview_oracle     [[texture(2)]],
+    texture3d<uint, access::write> preview_rem_oracle [[texture(3)]],
     uint3 gid                                  [[thread_position_in_grid]])
 {
     int3 d = int3(gid);
@@ -421,6 +423,15 @@ kernel void shape_clear(
     int3 cell_local = u.dispatch_lo + d;
     preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
     preview_rem.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+    // Drop the chunk-skip bits too — preview cells outside the tool's
+    // cleared bbox are empty by invariant (each tool clears everything
+    // it wrote), so chunk-level zeroing can't hide live cells. Without
+    // this the oracles only ever saturate and the rasterizer's
+    // empty-chunk skip decays over a session.
+    preview_oracle.write(uint4(0u, 0u, 0u, 0u),
+                         uint3(uint3(cell_local) >> uint3(4u)));
+    preview_rem_oracle.write(uint4(0u, 0u, 0u, 0u),
+                             uint3(uint3(cell_local) >> uint3(4u)));
 }
 
 // Generic commit kernel — the Magica `shader_0018.glsl` shape. Loops
@@ -454,6 +465,8 @@ kernel void commit_generic(
     texture3d<uint, access::read_write>   preview     [[texture(1)]],
     texture3d<uint, access::write>        doc_oracle  [[texture(2)]],
     texture3d<uint, access::read_write>   preview_rem [[texture(3)]],
+    texture3d<uint, access::write>        preview_oracle     [[texture(4)]],
+    texture3d<uint, access::write>        preview_rem_oracle [[texture(5)]],
     uint3                                  gid         [[thread_position_in_grid]])
 {
     int3 d = int3(gid);
@@ -493,10 +506,16 @@ kernel void commit_generic(
         }
     }
     // Clear whichever preview surface this commit consumed in this bbox
-    // so future strokes start clean.
+    // (cells + chunk-skip bits) so future strokes start clean. Chunk
+    // zeroing is safe by the same invariant as shape_clear: preview
+    // cells outside the committed bbox are already empty.
     if (u.brush == kCommitBrushPreview && u.bm == kCommitBmErase) {
         preview_rem.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+        preview_rem_oracle.write(uint4(0u, 0u, 0u, 0u),
+                                 uint3(uint3(cell_local) >> uint3(4u)));
     } else if (u.brush != kCommitBrushConstant) {
         preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+        preview_oracle.write(uint4(0u, 0u, 0u, 0u),
+                             uint3(uint3(cell_local) >> uint3(4u)));
     }
 }

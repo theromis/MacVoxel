@@ -183,7 +183,7 @@ void LiftSelection(EditorContext& ctx, const Bounds3& box) {
     ctx.engine->LiftBox(clipped);
     // Drain shadow dirty bits — the kernel already updated tex_a, so
     // syncFromVolume should not re-upload these chunks.
-    (void)doc.volume_shadow.TakeDirtyChunks();
+    ctx.engine->RefreshDocOracle(doc.volume_shadow);
 
     Bounds3 tight = TightBoundsOf(originals);
     sel.SetLift(tight, std::move(originals));
@@ -223,7 +223,7 @@ void LiftSelectionCells(EditorContext& ctx,
     }
 
     ctx.engine->LiftCells(kept_cells.data(), originals.size());
-    (void)doc.volume_shadow.TakeDirtyChunks();
+    ctx.engine->RefreshDocOracle(doc.volume_shadow);
 
     Bounds3 tight = TightBoundsOf(originals);
     sel.SetLift(tight, std::move(originals));
@@ -368,7 +368,7 @@ void CommitLift(EditorContext& ctx) {
             hist.Record(x, y, z, d.old_val, d.new_val);
         }
     }
-    (void)doc.volume_shadow.TakeDirtyChunks();
+    ctx.engine->RefreshDocOracle(doc.volume_shadow);
 
     sel.ClearLift();
     hist.CommitOp();

@@ -14,6 +14,7 @@ struct CellPalette;
 struct CommitGenericParams;
 struct Bbox3;
 struct EditVolume;
+class VoxelVolume;
 
 struct Bounds3;
 struct CellChange;
@@ -99,6 +100,14 @@ public:
     // Standalone barrier in case a tool needs the GPU drained without
     // an immediate readback (Cancel paths).
     virtual void WaitForPendingWork() = 0;
+
+    // Drain the shadow's dirty-chunk bitset and recompute the doc
+    // oracle bytes for those chunks (no cell upload — the GPU commit
+    // already wrote tex_a). Call instead of discarding
+    // TakeDirtyChunks() at end-of-stroke, or chunks emptied by an
+    // Erase keep their occupancy bit forever and the rasterizer's
+    // chunk skip decays.
+    virtual void RefreshDocOracle(VoxelVolume& shadow) = 0;
 
     // Selection-lift pipeline. The lift is a GPU-resident buffer
     // (`tex_lift`) holding selected cells removed from `tex_a` for the
