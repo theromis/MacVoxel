@@ -260,6 +260,7 @@ struct AovResolveUniforms {
     uint64_t _lastSunHash;
     float _lastAperture;
     float _lastFocusDistance;
+    int _lastMaxBounces;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -1003,6 +1004,10 @@ struct AovResolveUniforms {
     }
     if (rs.focus_distance != _lastFocusDistance) {
         _lastFocusDistance = rs.focus_distance;
+        _wantsClear = YES;
+    }
+    if ((int)rs.max_bounces != _lastMaxBounces) {
+        _lastMaxBounces = (int)rs.max_bounces;
         _wantsClear = YES;
     }
 
