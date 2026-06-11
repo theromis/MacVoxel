@@ -62,8 +62,13 @@ struct MacVoxelCommands: Commands {
             Button("Paste") { state.paste() }
                 .keyboardShortcut("v", modifiers: .command)
                 .disabled(!state.canPaste)
+            // Cmd+Delete, not bare Delete — a modifier-less menu key
+            // equivalent outranks text-field editing, so backspace in
+            // any TextField would delete the voxel selection instead.
+            // Bare backspace still works when the 3D view has focus
+            // (MetalScene keyDown).
             Button("Delete") { state.deleteSelection() }
-                .keyboardShortcut(.delete, modifiers: [])
+                .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(!state.canCutOrCopyOrDelete)
             Divider()
             Button("Deselect") { state.deselect() }

@@ -57,6 +57,8 @@ constexpr unsigned short kKeyCodeSpace       = 49;
 constexpr unsigned short kKeyCodeEscape      = 53;
 constexpr unsigned short kKeyCodeReturn      = 36;
 constexpr unsigned short kKeyCodeKeypadEnter = 76;
+constexpr unsigned short kKeyCodeDelete      = 51;   // backspace
+constexpr unsigned short kKeyCodeFwdDelete   = 117;
 }  // namespace
 
 @implementation MetalScene {
@@ -306,6 +308,15 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
             return;
         }
         // Nothing live to commit — fall through to super.
+    }
+    // Bare backspace deletes the lifted selection only while the 3D
+    // view is first responder; the menu equivalent is Cmd+Delete so
+    // text fields keep their backspace.
+    if (kc == kKeyCodeDelete || kc == kKeyCodeFwdDelete) {
+        if (_ctx->selection.lift_active()) {
+            macvoxel::lift::DeleteLift(*_ctx);
+            return;
+        }
     }
     const NSEventModifierFlags m = event.modifierFlags &
         (NSEventModifierFlagCommand |
