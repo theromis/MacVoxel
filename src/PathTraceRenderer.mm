@@ -1026,7 +1026,18 @@ struct AovResolveUniforms {
 
     if (_coarseBuffer == nil || _poolBuffer == nil ||
         _paletteBuffer == nil || _materialBuffer == nil) {
-        // Nothing to trace; let the display pass clear to background.
+        // Nothing to trace — but MetalScene presents the drawable
+        // unconditionally, so encode an empty pass (loadAction=Clear)
+        // or the user sees uninitialized/stale memory in Render mode
+        // with an empty grid.
+        MTLRenderPassDescriptor* rpd = view.currentRenderPassDescriptor;
+        if (rpd != nil) {
+            id<MTLRenderCommandEncoder> enc =
+                [cmd renderCommandEncoderWithDescriptor:rpd];
+            enc.label = @"PathTraceEmptyClear";
+            [enc endEncoding];
+        }
+        ctx->render_progress.sample_count = 0;
         return;
     }
 
