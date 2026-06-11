@@ -90,6 +90,7 @@ public:
 
     void Readback(const Bbox3& world_bbox,
                   std::vector<uint8_t>* out_bytes) override {
+        [generator_ waitForPendingWork];
         [shape_ waitForPendingWork];
         [brush_ waitForPendingWork];
         Bbox3 local{};
@@ -103,6 +104,7 @@ public:
     }
 
     void WaitForPendingWork() override {
+        [generator_ waitForPendingWork];
         [shape_ waitForPendingWork];
         [brush_ waitForPendingWork];
         [mutator_ waitForPendingWork];
@@ -216,6 +218,7 @@ private:
         [brush_ waitForPendingWork];
         [shape_ waitForPendingWork];
         [mutator_ waitForPendingWork];
+        [generator_ waitForPendingWork];
     }
 
     BrushEngine* brush_;

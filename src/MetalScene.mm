@@ -158,10 +158,6 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
         initWithDevice:device colorFormat:self.colorPixelFormat];
     if (_overlayRenderer == nil) return nil;
 
-    _generatorEngine = [[GeneratorEngine alloc]
-        initWithDevice:device commandQueue:_commandQueue];
-    if (_generatorEngine == nil) return nil;
-
     // Dedicated brush queue. Sharing with the rasterizer's
     // _commandQueue forces the brush's `waitUntilCompleted` to block
     // behind in-flight frame draws — the source of the 30–60 ms
@@ -171,6 +167,14 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     _brushEngine = [[BrushEngine alloc]
         initWithDevice:device commandQueue:brushQueue];
     if (_brushEngine == nil) return nil;
+
+    // Generator shares the brush queue so its (slow) generate
+    // dispatches are ordered before the commit_generic + readback that
+    // ShapeEngine encodes — on a separate queue a Tree/Conifer pass
+    // could still be writing tex_t while the commit reads it.
+    _generatorEngine = [[GeneratorEngine alloc]
+        initWithDevice:device commandQueue:brushQueue];
+    if (_generatorEngine == nil) return nil;
 
     // Shape kernels share a queue with the brush — they're mutually
     // exclusive at the gesture level, and the dedicated queue keeps
