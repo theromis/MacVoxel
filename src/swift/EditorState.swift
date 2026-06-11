@@ -497,8 +497,12 @@ final class EditorState {
     func beginPaletteEdit()  { bridge.beginPaletteEdit() }
     func applyPaletteColor(r: UInt8, g: UInt8, b: UInt8, a: UInt8) {
         bridge.applyPaletteColor(r: r, g: g, b: b, a: a)
+        tick &+= 1
     }
-    func commitPaletteEdit() { bridge.commitPaletteEdit() }
+    func commitPaletteEdit() {
+        bridge.commitPaletteEdit()
+        tick &+= 1
+    }
 
     // ---- Palette context menu ----
 
@@ -561,14 +565,14 @@ final class EditorState {
     var activeMaterialIor: Float          { _ = tick; return bridge.activeMaterialIor }
 
     func beginMaterialEdit()  { bridge.beginMaterialEdit() }
-    func applyMaterialType(_ t: BridgeMaterialType)        { bridge.applyMaterialType(t) }
-    func applyMaterialRoughness(_ v: Float)                { bridge.applyMaterialRoughness(v) }
-    func applyMaterialMetallic(_ v: Float)                 { bridge.applyMaterialMetallic(v) }
-    func applyMaterialEmission(_ v: Float)                 { bridge.applyMaterialEmission(v) }
-    func applyMaterialEmissionPower(_ v: Int)              { bridge.applyMaterialEmissionPower(v) }
-    func applyMaterialTransparency(_ v: Float)             { bridge.applyMaterialTransparency(v) }
-    func applyMaterialIor(_ v: Float)                      { bridge.applyMaterialIor(v) }
-    func commitMaterialEdit() { bridge.commitMaterialEdit() }
+    func applyMaterialType(_ t: BridgeMaterialType)        { bridge.applyMaterialType(t); tick &+= 1 }
+    func applyMaterialRoughness(_ v: Float)                { bridge.applyMaterialRoughness(v); tick &+= 1 }
+    func applyMaterialMetallic(_ v: Float)                 { bridge.applyMaterialMetallic(v); tick &+= 1 }
+    func applyMaterialEmission(_ v: Float)                 { bridge.applyMaterialEmission(v); tick &+= 1 }
+    func applyMaterialEmissionPower(_ v: Int)              { bridge.applyMaterialEmissionPower(v); tick &+= 1 }
+    func applyMaterialTransparency(_ v: Float)             { bridge.applyMaterialTransparency(v); tick &+= 1 }
+    func applyMaterialIor(_ v: Float)                      { bridge.applyMaterialIor(v); tick &+= 1 }
+    func commitMaterialEdit() { bridge.commitMaterialEdit(); tick &+= 1 }
 
     func saveRenderDialog() {
         let panel = NSSavePanel()
