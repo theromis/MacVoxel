@@ -354,6 +354,33 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
     [super keyUp:event];
 }
 
+// Space state is tracked purely via keyDown/keyUp, so a release that
+// happens while we're not receiving key events (Cmd-Tab away, focus
+// moved to a text field) would leave _spaceHeld stuck and left-click
+// panning until the next Space tap.
+- (BOOL)resignFirstResponder {
+    _spaceHeld = NO;
+    return [super resignFirstResponder];
+}
+
+- (void)viewWillMoveToWindow:(NSWindow *)newWindow {
+    [super viewWillMoveToWindow:newWindow];
+    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+    [nc removeObserver:self
+                  name:NSWindowDidResignKeyNotification
+                object:nil];
+    if (newWindow != nil) {
+        [nc addObserver:self
+               selector:@selector(macvoxelWindowDidResignKey:)
+                   name:NSWindowDidResignKeyNotification
+                 object:newWindow];
+    }
+}
+
+- (void)macvoxelWindowDidResignKey:(NSNotification *)__unused note {
+    _spaceHeld = NO;
+}
+
 // ---------------------------------------------------------------------------
 // Tracking area + hover bookkeeping
 // ---------------------------------------------------------------------------
