@@ -483,7 +483,7 @@ final class EditorState {
 
     func selectPaletteSlot(_ index: Int, extend: Bool) {
         bridge.selectPaletteSlot(index, extend: extend)
-        documentVersion &+= 1
+        tick &+= 1
     }
 
     func selectPaletteRange(fromCol c0: Int, row r0: Int,
