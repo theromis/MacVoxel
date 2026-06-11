@@ -37,8 +37,12 @@ constant uint kCommitBmReplace   = 3u;  // r = (a&&t) > 0 ? t : a
 constant uint kCommitBmIntersect = 4u;  // r = (a&&t) > 0 ? t : 0
 
 // commit_generic source selector for the per-cell "t" value.
-constant uint kCommitBrushPreview  = 0u;  // sample preview (tex_t)
+constant uint kCommitBrushPreview  = 0u;  // tex_t, except Erase reads preview_rem
 constant uint kCommitBrushConstant = 1u;  // use uniforms.fill_palette
+constant uint kCommitBrushTexT     = 2u;  // always tex_t — for tools whose
+                                          // Remove preview lives in tex_t
+                                          // (Generator), where Erase must
+                                          // consume tex_t, not preview_rem
 
 constant int kShapeLine   = 0;
 constant int kShapeCircle = 1;
@@ -462,14 +466,12 @@ kernel void commit_generic(
     // tex_t (the additive preview). Constant brush mode overrides
     // both with a uniform value.
     uint t;
-    if (u.brush == kCommitBrushPreview) {
-        if (u.bm == kCommitBmErase) {
-            t = preview_rem.read(uint3(cell_local)).r;
-        } else {
-            t = preview.read(uint3(cell_local)).r;
-        }
-    } else {
+    if (u.brush == kCommitBrushConstant) {
         t = u.fill_palette;
+    } else if (u.bm == kCommitBmErase && u.brush == kCommitBrushPreview) {
+        t = preview_rem.read(uint3(cell_local)).r;
+    } else {
+        t = preview.read(uint3(cell_local)).r;
     }
 
     uint r = a;
@@ -492,11 +494,9 @@ kernel void commit_generic(
     }
     // Clear whichever preview surface this commit consumed in this bbox
     // so future strokes start clean.
-    if (u.brush == kCommitBrushPreview) {
-        if (u.bm == kCommitBmErase) {
-            preview_rem.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
-        } else {
-            preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
-        }
+    if (u.brush == kCommitBrushPreview && u.bm == kCommitBmErase) {
+        preview_rem.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
+    } else if (u.brush != kCommitBrushConstant) {
+        preview.write(uint4(0u, 0u, 0u, 0u), uint3(cell_local));
     }
 }

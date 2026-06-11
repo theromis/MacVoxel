@@ -48,8 +48,9 @@ struct CellPalette {
 //        2 = Erase (zero doc where preview is set)
 //        3 = Replace (write preview where both doc and preview are set)
 //        4 = Intersect (clear doc where preview is empty)
-// brush: 0 = sample preview texture (tex_t)
+// brush: 0 = sample preview texture (tex_t; Erase reads preview_rem)
 //        1 = use the `fill_palette` constant per cell
+//        2 = always tex_t, even for Erase (Generator's Remove mode)
 struct CommitGenericParams {
     // Dispatch bbox in texture-local cells (world cell minus
     // EditVolume's lo).

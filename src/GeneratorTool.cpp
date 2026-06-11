@@ -281,7 +281,10 @@ void GeneratorTool::Commit(EditorContext& ctx, InteractionState& state,
             cp.dispatch_size_y = bb.y1 - bb.y0 + 1;
             cp.dispatch_size_z = bb.z1 - bb.z0 + 1;
             cp.bm = static_cast<uint32_t>(state.anchor.mode) + 1u;
-            cp.brush = 0u;  // source = tex_t (preview)
+            // Generators write only tex_t, so Erase must source from it
+            // (brush=2) — brush=0's Erase reads preview_rem, which would
+            // make Remove a no-op and leak the shape in tex_t.
+            cp.brush = (cp.bm == 2u) ? 2u : 0u;
             cp.fill_palette = ctx.tool.palette_idx;
             engine.CommitGeneric(cp);
 
