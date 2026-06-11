@@ -438,19 +438,34 @@ constexpr unsigned short kKeyCodeKeypadEnter = 76;
     id<CAMetalDrawable> drawable = view.currentDrawable;
     if (pass == nil || drawable == nil) return;
 
-    // Cancel a pending shape anchor on Escape or when the user
-    // switches tools mid-stroke. Same intent as the old VoxelView
-    // version; Escape comes from _escapePending now instead of ImGui.
+    // Abort an in-flight drag on Escape or when the tool switched out
+    // from under it. Tool::Cancel clears the tool's preview-texture
+    // cells and closes its history op — without it the stale
+    // tex_t/preview_rem cells get promoted into the doc by the next
+    // overlapping commit. Generator self-cancels in its Tick.
     const BOOL escape_now = _escapePending;
     _escapePending = NO;
+    if (_activeTool != nullptr &&
+        _activeTool != _toolRegistry->generator() &&
+        (escape_now ||
+         _toolRegistry->ToolFor(_ctx->tool.tool) != _activeTool)) {
+        _activeTool->Cancel(*_ctx, _interaction, *_editEngine);
+        _activeTool = nullptr;
+        _interaction.drag_mode = DragMode::None;
+    }
+    // Cancel a pending two-click anchor the same way — the anchoring
+    // tool's Cancel clears its preview bbox and the anchor flag.
     if (_interaction.anchor.has_anchor) {
         if (_ctx->tool.tool != _interaction.anchor.tool || escape_now) {
-            if (_interaction.drag_mode == DragMode::Shape) {
-                _ctx->preview_active = false;
-                _interaction.drag_mode = DragMode::None;
+            macvoxel::Tool *anchored =
+                _toolRegistry->ToolFor(_interaction.anchor.tool);
+            if (anchored != nullptr && anchored != _toolRegistry->generator()) {
+                anchored->Cancel(*_ctx, _interaction, *_editEngine);
             }
             _interaction.anchor.has_anchor = NO;
-            _toolRegistry->face()->Reset();
+            if (_interaction.drag_mode == DragMode::Shape) {
+                _interaction.drag_mode = DragMode::None;
+            }
         }
     }
 
