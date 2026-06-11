@@ -174,16 +174,21 @@ bool ViewContext::RayAt(float local_x, float local_y,
     const float aspect = viewport_w / viewport_h;
     const simd::float4x4 vmat = camera.ViewMatrix();
     const simd::float4x4 pmat = camera.ProjectionMatrix(aspect);
-    const simd::float4x4 inv_vp = simd_inverse(pmat * vmat);
 
-    auto unproject = [&](float z) -> simd::float3 {
-        simd::float4 clip{ndc_x, ndc_y, z, 1.0f};
-        simd::float4 wh = simd_mul(inv_vp, clip);
-        return simd::float3{wh.x / wh.w, wh.y / wh.w, wh.z / wh.w};
-    };
-    const simd::float3 near_world = unproject(0.0f);
-    const simd::float3 far_world  = unproject(1.0f);
-    const simd::float3 dir_world  = simd::normalize(far_world - near_world);
+    // Camera-basis ray reconstruction — the same conditioning fix the
+    // rasterizer got (inv(P*V) wobbles with a far camera and our wide
+    // near/far range), so picks land on the voxel the user sees.
+    const simd::float3 right{vmat.columns[0].x, vmat.columns[1].x,
+                             vmat.columns[2].x};
+    const simd::float3 up{vmat.columns[0].y, vmat.columns[1].y,
+                          vmat.columns[2].y};
+    const simd::float3 fwd{-vmat.columns[0].z, -vmat.columns[1].z,
+                           -vmat.columns[2].z};
+    const float tan_half = 1.0f / pmat.columns[1].y;
+    const float proj_aspect = pmat.columns[1].y / pmat.columns[0].x;
+    const simd::float3 dir_world = simd::normalize(
+        fwd + ndc_x * proj_aspect * tan_half * right +
+        ndc_y * tan_half * up);
     const simd::float3 origin_world = camera.Position();
 
     // World → grid: invert the renderer's R = (gx, gz, -gy).

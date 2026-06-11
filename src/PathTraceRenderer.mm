@@ -39,7 +39,12 @@ struct LiftOverlay {
 };
 
 struct PathUniforms {
-    simd::float4x4 inv_vp;
+    // Camera basis for primary-ray reconstruction (world space). Unit
+    // vectors instead of inv(P*V) — same conditioning fix as the
+    // rasterizer (see RaycastRenderer encodeWithEncoder).
+    simd::float3 cam_right;  float cam_tan_half;  // tan(fov_y / 2)
+    simd::float3 cam_up;     float cam_aspect;
+    simd::float3 cam_fwd;    float _padfwd;
     simd::float3 camera_pos;
     float _pad0;
     simd::int3 coarse_min;
@@ -78,7 +83,7 @@ struct PathUniforms {
 // are 16-byte slots on both sides (3-of-4 used) so the explicit `_padN`
 // scalars get an additional 12-byte auto-pad in front of every
 // 16-aligned successor.
-static_assert(sizeof(PathUniforms) == 496, "PathUniforms size mismatch");
+static_assert(sizeof(PathUniforms) == 528, "PathUniforms size mismatch");
 
 // Per-exposed-emissive-face entry in the next-event-estimation light
 // buffer. An "exposed face" is the boundary between an emissive voxel
@@ -1242,10 +1247,20 @@ struct AovResolveUniforms {
     const float aspect = static_cast<float>(size.width / size.height);
     const simd::float4x4 vmat = camera.ViewMatrix();
     const simd::float4x4 pmat = camera.ProjectionMatrix(aspect);
-    const simd::float4x4 inv_vp = simd_inverse(pmat * vmat);
 
     PathUniforms u;
-    u.inv_vp = inv_vp;
+    // Camera basis from the view-matrix rows (R = [r; u; -f]) and
+    // FOV/aspect from the projection — see RaycastRenderer for why
+    // this replaces inv(P*V).
+    u.cam_right = simd::float3{vmat.columns[0].x, vmat.columns[1].x,
+                               vmat.columns[2].x};
+    u.cam_up    = simd::float3{vmat.columns[0].y, vmat.columns[1].y,
+                               vmat.columns[2].y};
+    u.cam_fwd   = simd::float3{-vmat.columns[0].z, -vmat.columns[1].z,
+                               -vmat.columns[2].z};
+    u.cam_tan_half = 1.0f / pmat.columns[1].y;
+    u.cam_aspect   = pmat.columns[1].y / pmat.columns[0].x;
+    u._padfwd = 0.0f;
     u.camera_pos = camera.Position();
     u._pad0 = 0.0f;
     u.coarse_min = _coarseMin;

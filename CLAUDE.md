@@ -431,7 +431,7 @@ Then `Read /tmp/check.png` to see the result.
 
 - `--samples` is per-pixel; 64–256 reads shape/shading, 1024+ for noise.
 - `--seed` makes output byte-deterministic. **Sanity digest:** teapot.vox
-  @ 256×256, 32 spp, seed=1 → `9b695a3917fb04dfa65e0d3903372b37`. Exercise
+  @ 256×256, 32 spp, seed=1 → `efd30ac59a3c501d55efac0907076f8d`. Exercise
   it after any renderer change.
 - `--no-aces` swaps the ACES tonemap for plain gamma-2.2.
 

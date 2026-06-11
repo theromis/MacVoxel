@@ -2,7 +2,11 @@
 using namespace metal;
 
 struct PathUniforms {
-    float4x4 inv_vp;
+    // Camera basis for primary-ray reconstruction (world space) —
+    // mirrors the rasterizer's conditioning fix; see pt_fragment.
+    float3   cam_right;  float cam_tan_half;  // tan(fov_y / 2)
+    float3   cam_up;     float cam_aspect;
+    float3   cam_fwd;    float _padfwd;
     float3   camera_pos;
     float    _pad0;
     int3     coarse_min;
@@ -1128,13 +1132,13 @@ fragment PTFragOut pt_fragment(
     float2 jitter = (float2(rand1(rng), rand1(rng)) - 0.5) * pixel_ndc;
     float2 ndc = in.ndc + jitter;
 
-    float4 near_clip = float4(ndc, 0.0, 1.0);
-    float4 far_clip  = float4(ndc, 1.0, 1.0);
-    float4 nh = u.inv_vp * near_clip;
-    float4 fh = u.inv_vp * far_clip;
-    float3 nw = nh.xyz / nh.w;
-    float3 fw = fh.xyz / fh.w;
-    float3 ray_dir_world = normalize(fw - nw);
+    // Camera-basis ray reconstruction (no matrix inverse) — keeps the
+    // direction precise with a far camera + wide near/far range, and
+    // matches the rasterizer's ray gen so picks line up with renders.
+    float3 ray_dir_world = normalize(
+        u.cam_fwd +
+        ndc.x * u.cam_aspect * u.cam_tan_half * u.cam_right +
+        ndc.y * u.cam_tan_half * u.cam_up);
     float3 ray_origin_world = u.camera_pos;
 
     // World -> grid (same rotation the raster path uses).
