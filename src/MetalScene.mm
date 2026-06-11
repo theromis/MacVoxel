@@ -157,7 +157,9 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
     if (_pathTraceRenderer == nil) return nil;
 
     _overlayRenderer = [[SceneOverlayRenderer alloc]
-        initWithDevice:device colorFormat:self.colorPixelFormat];
+        initWithDevice:device
+           colorFormat:self.colorPixelFormat
+           depthFormat:self.depthStencilPixelFormat];
     if (_overlayRenderer == nil) return nil;
 
     // Dedicated brush queue. Sharing with the rasterizer's
@@ -557,7 +559,8 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
             enc.label = @"Overlay (over PT)";
             [_overlayRenderer encodeWithEncoder:enc
                                         overlay:_od
-                                   viewportSize:viewport_pixels];
+                                   viewportSize:viewport_pixels
+                                       hasDepth:NO];
             [enc endEncoding];
         }
     } else {
@@ -592,7 +595,8 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
         if (!_od.empty()) {
             [_overlayRenderer encodeWithEncoder:enc
                                         overlay:_od
-                                   viewportSize:viewport_pixels];
+                                   viewportSize:viewport_pixels
+                                       hasDepth:YES];
         }
         [enc endEncoding];
     }

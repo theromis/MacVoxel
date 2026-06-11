@@ -9,13 +9,15 @@
 
 @implementation SceneOverlayRenderer {
     id<MTLDevice> _device;
-    id<MTLRenderPipelineState> _pipeline;
+    id<MTLRenderPipelineState> _pipeline;       // color-only pass (PT)
+    id<MTLRenderPipelineState> _pipelineDepth;  // depth-attached pass (edit)
     id<MTLBuffer> _vertexBuffer;
     NSUInteger _vertexBufferBytes;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
-                   colorFormat:(MTLPixelFormat)colorFormat {
+                   colorFormat:(MTLPixelFormat)colorFormat
+                   depthFormat:(MTLPixelFormat)depthFormat {
     self = [super init];
     if (self == nil) return nil;
     _device = device;
@@ -75,6 +77,15 @@
         return nil;
     }
 
+    desc.depthAttachmentPixelFormat = depthFormat;
+    _pipelineDepth = [device newRenderPipelineStateWithDescriptor:desc
+                                                            error:&err];
+    if (_pipelineDepth == nil) {
+        std::fprintf(stderr, "SceneOverlayRenderer: depth pipeline: %s\n",
+                     err.localizedDescription.UTF8String);
+        return nil;
+    }
+
     // Initial size large enough for the busiest frame seen in practice
     // (gen gizmo + xform handles + selection wireframe + marquee = a
     // few hundred verts). Grows 2× when exceeded.
@@ -90,7 +101,8 @@
 
 - (void)encodeWithEncoder:(id<MTLRenderCommandEncoder>)encoder
                   overlay:(const macvoxel::OverlayDraw &)overlay
-             viewportSize:(simd::float2)viewportSize {
+             viewportSize:(simd::float2)viewportSize
+                 hasDepth:(BOOL)hasDepth {
     const auto &verts = overlay.vertices();
     if (verts.empty()) return;
 
@@ -106,7 +118,7 @@
     std::memcpy(_vertexBuffer.contents, verts.data(), needed);
 
     [encoder pushDebugGroup:@"Overlay"];
-    [encoder setRenderPipelineState:_pipeline];
+    [encoder setRenderPipelineState:(hasDepth ? _pipelineDepth : _pipeline)];
     [encoder setVertexBuffer:_vertexBuffer offset:0 atIndex:0];
     [encoder setVertexBytes:&viewportSize
                      length:sizeof(simd::float2)
