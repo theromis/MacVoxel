@@ -223,6 +223,15 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
     return self;
 }
 
+- (void)dealloc {
+    // EditorContext (owned by the bridge) outlives this view; every
+    // ctx->engine consumer nil-checks, but only if the pointer is
+    // actually nulled when the engine it aims at dies with us.
+    if (_ctx != nullptr && _ctx->engine == _editEngine.get()) {
+        _ctx->engine = nullptr;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public helpers (called from the SwiftUI shell)
 // ---------------------------------------------------------------------------
