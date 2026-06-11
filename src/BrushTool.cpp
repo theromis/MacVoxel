@@ -296,6 +296,10 @@ void BrushTool::Tick(EditorContext& ctx, InteractionState& state,
     h = mix(h, static_cast<uint32_t>(ctx.tool.brush_shape));
     h = mix(h, ctx.tool.brush_3d ? 1u : 0u);
     h = mix(h, ctx.tool.palette_idx);
+    // The kernel gates on tex_a occupancy, so undo/redo under a
+    // stationary cursor must re-dispatch or the ghost shows the
+    // pre-undo doc.
+    h = mix(h, ctx.document.geometry_version);
     h |= 1ULL;
     if (h == hover_last_hash_) {
         // Keep preview_active/alpha pinned so other tools' Ticks

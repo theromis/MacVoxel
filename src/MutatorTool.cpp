@@ -512,6 +512,9 @@ void MutatorTool::Tick(EditorContext& ctx, InteractionState& state,
     h = mix(h, static_cast<uint32_t>(ctx.tool.brush_shape));
     h = mix(h, ctx.tool.brush_3d ? 1u : 0u);
     h = mix(h, hover_stroke_id_);
+    // Mutators read the live-composited neighborhood, so undo/redo
+    // under a stationary cursor must re-dispatch the ghost.
+    h = mix(h, ctx.document.geometry_version);
     h |= 1ULL;
     if (h == hover_last_hash_) {
         ctx.preview_active = true;
