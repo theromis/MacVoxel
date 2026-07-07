@@ -15,10 +15,12 @@ The SwiftUI port is settled (all seven panels native; the old AppKit
 shell and ImGui are gone). Editing is **GPU-authoritative**, modeled
 on MagicaVoxel:
 
-- Voxels live in a `texture3d<R8Uint, 256³>` (`tex_a`), mirrored by a
-  dense CPU shadow (`VoxelVolume`) and the sparse `VoxelGrid` (disk +
-  path-tracer source). The rasterizer samples `tex_a` directly via a
-  16³ chunk-occupancy oracle.
+- Voxels live in a `texture3d<R8Uint>` (`tex_a`) sized to the edit
+  volume (≤ 256³ — see "Scene graph & object mode": the volume is the
+  active object's AABB cover), mirrored by a dense CPU shadow
+  (`VoxelVolume`) and the sparse `VoxelGrid` (disk + path-tracer
+  source). The rasterizer samples `tex_a` directly via a 16³
+  chunk-occupancy oracle.
 - Every volume-writing tool is a `Tool` subclass that writes a preview
   texture — `tex_t` (Add/Paint) or `preview_rem` (Remove mask) — which
   the rasterizer composites over `tex_a` live. At mouseUp the unified
@@ -32,8 +34,10 @@ on MagicaVoxel:
 - The .vox **scene graph is resident** and there are two top-level
   editor modes: **Model** (voxel editing inside the active object —
   everything above) and **Scene** ("object mode": pick/move/rotate/
-  flip/duplicate/delete whole objects). Tab toggles. See "Scene graph
-  & object mode".
+  flip/duplicate/delete whole objects, multi-select via shift-click +
+  rubber band, a 3-arrow translate gizmo on the selection's union
+  AABB, rigid group rotate/flip about the union center). Tab toggles.
+  See "Scene graph & object mode".
 
 The full design lives in the plans at `/Users/pstarr/.claude/plans/
 okay-despite-some-reasonable-sequential-torvalds.md` (tools) and
@@ -42,9 +46,10 @@ mode).
 
 Deferred polish, not yet implemented:
 
-- Object-mode UX pass (Paul: "works, needs polish"). Also deferred:
-  group create/ungroup ops, instancing creation, layers UI, _hidden
-  toggle, animation-frame awareness (all preserved on round-trip).
+- Object-mode leftovers: group create/ungroup ops, instancing
+  creation, layers UI, _hidden toggle, animation-frame awareness (all
+  preserved on round-trip). The 2026-07 UX pass delivered the gizmo,
+  size fields, AABB-sized edit volume, New Object, and multi-select.
 
 - Brush-size quick-keys (`[` / `]`). Tool/mode letter keys
   (V / L / B / F / U / M / T / R / G) are wired in `MetalScene` keyDown
@@ -88,9 +93,10 @@ src/
 │                          Pre-stroke occupancy oracle. Reads outside
 │                          the EditVolume return 0; writes are dropped.
 │                          Rebase() re-anchors to a moved EditVolume.
-├── EditVolume.h           256³ canonical edit region — movable
-│                          (CenteredOn snaps to the 16 lattice) inside
-│                          the 2048³ world (kWorldHalf).
+├── EditVolume.h           Canonical edit region (≤256³) — sized/moved
+│                          as the active object's AABB cover
+│                          (AlignedCover snaps the origin to the 16
+│                          lattice) inside the 2048³ world (kWorldHalf).
 ├── ChunkPool.{h,cpp}      Shared coarse+pool packer (PT + world buffer).
 ├── Palette.{h,cpp}        256-entry color + Material array.
 ├── Raycast.{h,cpp}        CPU DDA for picking (on VoxelGrid; kept
@@ -266,12 +272,31 @@ transpose): `world = R·(l − h) + T`. Object-mode rotate/flip composes
 Key invariants:
 
 - **grid = active object only.** `RebakeActiveObject` bakes model →
-  grid (moving the 256³ EditVolume when the object lives elsewhere in
-  the ±1024 world; origin always snaps to the 16 lattice so doc and
-  world-buffer chunks share one lattice). `SyncActiveModel` is the
-  lossless inverse map (grid → model, SIZE renormalized on growth),
+  grid and fits the edit region to the object: `Document::edit_bounds`
+  = the exact dims-box world AABB (LOGICAL region — picking, walls,
+  and every EditEngine write dispatch clamp to it), `Document::volume`
+  = its 16-aligned cover (`EditVolume::AlignedCover`, min-side pad
+  only; the origin stays on the 16 lattice so doc and world-buffer
+  chunks share one lattice, and the pad is never paintable or drawn).
+  `SyncActiveModel` is the lossless inverse map (grid → model),
   guarded by `synced_geometry_version` so a second call after a
   transform edit can't corrupt the model — never bypass the guard.
+- **Dims are user-controlled and sticky.** `SceneModel::dims` changes
+  only via the Objects-palette size fields (`scene_ops::
+  ResizeSelectedObject`, target = selection else active object,
+  recorded as a `ModelResize` SceneChange carrying shrink-clipped
+  cells model-locally); `SyncModelFromWorldGrid`'s renormalization is
+  grow-only and unreachable for in-app edits since writes clamp to
+  the AABB. Resize keeps local coords fixed (world growth toward
+  +axes) and re-solves the leaf translation across the pivot shift.
+- **Scene-mode selection is a set.** `ctx.selected_objects` + primary
+  `ctx.selected_object` (always a member; mutate ONLY through the
+  EditorContext helpers). Shift-click toggles, empty-click drags a
+  rubber band (AABB-intersection select), Delete unlinks the whole
+  set as one op. The translate gizmo + body drags move every movable
+  member rigidly (one op, N Transform records; snapshots deduped by
+  leaf id for instanced leaves); rotate/flip on a multi-selection
+  acts about the union-AABB integer center.
 - **Mode-conditional truth.** Model mode: grid is truth for the active
   object; the rasterizer samples tex_a + the world buffer (inactive
   objects). Scene mode: models + transforms are truth; the rasterizer
