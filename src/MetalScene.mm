@@ -375,8 +375,13 @@ constexpr unsigned short kKeyCodeTab         = 48;
         return;
     }
     // Scene-mode transform keys: x/y/z rotate the selected object 90°
-    // about that world axis; Shift+x/y/z mirrors across it.
+    // about that world axis; Shift+x/y/z mirrors across it. Backspace
+    // deletes the selected object.
     if (_ctx->editor_mode == macvoxel::EditorMode::Scene) {
+        if (kc == kKeyCodeDelete || kc == kKeyCodeFwdDelete) {
+            macvoxel::scene_ops::DeleteObject(*_ctx);
+            return;
+        }
         const NSEventModifierFlags mm = event.modifierFlags &
             (NSEventModifierFlagCommand | NSEventModifierFlagOption |
              NSEventModifierFlagControl);

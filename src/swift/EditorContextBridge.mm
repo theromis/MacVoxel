@@ -19,6 +19,7 @@
 #include "EditHistory.h"
 #include "EditorContext.h"
 #include "EditEngine.h"
+#include "SceneOps.h"
 #include "SelectionLift.h"
 #include "GeneratorState.h"
 #include "Generators.h"
@@ -119,6 +120,10 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     doc.path.clear();
     doc.BumpAll();
     _ctx->history.Clear();
+    // Object clipboard models would dangle across documents.
+    _ctx->object_clipboard = macvoxel::ObjectClipboard{};
+    _ctx->selected_object = -1;
+    _ctx->editor_mode = macvoxel::EditorMode::Model;
 }
 
 - (BOOL)openDocumentAtURL:(NSURL *)url error:(NSError **)error {
@@ -149,6 +154,9 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     _ctx->document.RebakeActiveObject();
     _ctx->document.BumpAll();
     _ctx->history.Clear();
+    _ctx->object_clipboard = macvoxel::ObjectClipboard{};
+    _ctx->selected_object = -1;
+    _ctx->editor_mode = macvoxel::EditorMode::Model;
     [[NSDocumentController sharedDocumentController]
         noteNewRecentDocumentURL:url];
     return YES;
@@ -247,19 +255,50 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 // Selection-aware Edit menu
 // ---------------------------------------------------------------------------
 
+- (BOOL)inSceneMode {
+    return _ctx->editor_mode == macvoxel::EditorMode::Scene;
+}
+
+- (BOOL)hasSelectedObject {
+    return _ctx->selected_object >= 0 &&
+           static_cast<size_t>(_ctx->selected_object) <
+               _ctx->document.scene.objects.size();
+}
+
 - (BOOL)canCutOrCopyOrDelete {
+    if ([self inSceneMode]) return [self hasSelectedObject];
     return _ctx->selection.lift_active();
 }
 
 - (BOOL)canPaste {
+    if ([self inSceneMode]) return _ctx->object_clipboard.valid;
     return !_ctx->clipboard.empty();
 }
 
 - (BOOL)canDeselect {
+    if ([self inSceneMode]) return [self hasSelectedObject];
     return _ctx->selection.active();
 }
 
+- (BOOL)canDuplicateObject {
+    return [self inSceneMode] && [self hasSelectedObject];
+}
+
+- (BOOL)canTransformSelection {
+    return _ctx->selection.lift_active();
+}
+
+- (void)duplicateObject {
+    if ([self inSceneMode]) {
+        macvoxel::scene_ops::DuplicateObject(*_ctx);
+    }
+}
+
 - (void)copy {
+    if ([self inSceneMode]) {
+        macvoxel::scene_ops::CopyObject(*_ctx);
+        return;
+    }
     if (!_ctx->selection.lift_active() || _ctx->engine == nullptr) return;
     const macvoxel::Bounds3 sb = _ctx->selection.bounds();
     if (sb.empty()) return;
@@ -297,6 +336,12 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 }
 
 - (void)cut {
+    if ([self inSceneMode]) {
+        if (macvoxel::scene_ops::CopyObject(*_ctx)) {
+            macvoxel::scene_ops::DeleteObject(*_ctx);
+        }
+        return;
+    }
     if (!_ctx->selection.lift_active()) return;
     // Snapshot to clipboard first, then drop the lift contents.
     [self copy];
@@ -304,6 +349,10 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 }
 
 - (void)deleteSelection {
+    if ([self inSceneMode]) {
+        macvoxel::scene_ops::DeleteObject(*_ctx);
+        return;
+    }
     if (_ctx->selection.lift_active()) {
         // Drop the lift contents; pre_lift_originals stays on history
         // so undo restores the original state.
@@ -313,6 +362,10 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 }
 
 - (void)paste {
+    if ([self inSceneMode]) {
+        macvoxel::scene_ops::PasteObject(*_ctx);
+        return;
+    }
     const macvoxel::Clipboard &cb = _ctx->clipboard;
     if (cb.empty()) return;
     if (_ctx->selection.lift_active()) {
@@ -353,6 +406,10 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 }
 
 - (void)deselect {
+    if ([self inSceneMode]) {
+        _ctx->selected_object = -1;
+        return;
+    }
     if (_ctx->selection.lift_active()) {
         macvoxel::lift::CommitLift(*_ctx);
     }

@@ -25,6 +25,21 @@ class EditEngine;
 // SwiftUI port path: this is the natural shape for an @Observable
 // class injected via `.environment(...)` — every panel/view binds to
 // the field it cares about, no free-function calls to bridge.
+// Whole-object clipboard (Scene mode). Holds a deep model copy plus
+// enough leaf metadata to reconstruct the object anywhere; the world
+// transform re-solves through the paste target's ancestors. Cleared on
+// New / Open (models would dangle across documents otherwise).
+struct ObjectClipboard {
+    bool valid = false;
+    SceneModel model;
+    AttrDict trn_attrs;
+    std::vector<AttrDict> frames;
+    int32_t layer_id = -1;
+    AttrDict shp_attrs;
+    RotMat world_r{};
+    Vec3i32 world_t{};
+};
+
 struct EditorContext {
     Document document;
     ToolSettings tool;
@@ -47,6 +62,7 @@ struct EditorContext {
     float preview_alpha = 1.0f;
     EditHistory history;
     Clipboard clipboard;
+    ObjectClipboard object_clipboard;
     PanelState panel;
     // Model (voxel editing) vs Scene ("object mode"). See EditorMode.h.
     EditorMode editor_mode = EditorMode::Model;

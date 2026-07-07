@@ -156,11 +156,17 @@ final class EditorState {
         return bridge.canDeselect
     }
 
+    var canDuplicateObject: Bool {
+        _ = tick
+        return bridge.canDuplicateObject
+    }
+
     func cut()             { bridge.cut();             afterMutation(reframeCamera: false) }
     func copy()            { bridge.copy();            afterMutation(reframeCamera: false) }
     func paste()           { bridge.paste();           afterMutation(reframeCamera: false) }
     func deleteSelection() { bridge.deleteSelection(); afterMutation(reframeCamera: false) }
     func deselect()        { bridge.deselect();        afterMutation(reframeCamera: false) }
+    func duplicateObject() { bridge.duplicateObject(); afterMutation(reframeCamera: false) }
 
     // ---- Document stats (panel-facing) ----
     //
@@ -191,7 +197,7 @@ final class EditorState {
 
     var canTransformSelection: Bool {
         _ = tick
-        return bridge.canCutOrCopyOrDelete  // same predicate
+        return bridge.canTransformSelection
     }
 
     func rotateSelection(axis: BridgeAxis, clockwise: Bool) {

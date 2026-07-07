@@ -147,12 +147,18 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, readonly) BOOL canCutOrCopyOrDelete;
 @property (nonatomic, readonly) BOOL canPaste;
 @property (nonatomic, readonly) BOOL canDeselect;
+// Lift-only predicate for the SelectionPanel transform buttons (the
+// cut/copy predicate went mode-aware).
+@property (nonatomic, readonly) BOOL canTransformSelection;
+// Scene mode only: whole-object duplicate.
+@property (nonatomic, readonly) BOOL canDuplicateObject;
 
 - (void)cut;
 - (void)copy;
 - (void)paste;
 - (void)deleteSelection;
 - (void)deselect;
+- (void)duplicateObject;
 
 // ---------------------------------------------------------------------------
 // Document read-only stats. Read each frame (or each tick) by panels;
