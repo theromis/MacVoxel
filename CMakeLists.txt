@@ -42,6 +42,7 @@ set(APP_SOURCES
     src/VolumeTexture.mm
     src/BrushEngine.mm
     src/ShapeEngine.mm
+    src/ChunkPool.cpp
     src/Palette.cpp
     src/VoxFile.cpp
     src/VoxRoundTrip.cpp

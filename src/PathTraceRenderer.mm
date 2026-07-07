@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "Camera.h"
+#include "ChunkPool.h"
 #include "Document.h"
 #include "EditEngine.h"
 #include "Material.h"
@@ -494,7 +495,6 @@ struct AovResolveUniforms {
                             liftOverlay:(const LiftOverlay*)overlay {
     using VG = macvoxel::VoxelGrid;
     using CC = VG::ChunkCoord;
-    const auto& chunks = doc->grid.chunks();
 
     // Bin the floating-lift cells by chunk so each can be splatted onto the
     // pool region for its chunk (existing or freshly allocated below).
@@ -522,75 +522,24 @@ struct AovResolveUniforms {
         }
     }
 
-    if (chunks.empty() && lift_cells.empty()) {
+    macvoxel::PackedChunks packed =
+        macvoxel::PackGridChunks(doc->grid, std::move(lift_cells));
+    if (packed.empty()) {
         _coarseMin = simd::int3{0, 0, 0};
         _coarseDim = simd::int3{0, 0, 0};
         _coarseBuffer = nil;
         _poolBuffer = nil;
         return;
     }
-    int32_t min_cx = INT32_MAX, min_cy = INT32_MAX, min_cz = INT32_MAX;
-    int32_t max_cx = INT32_MIN, max_cy = INT32_MIN, max_cz = INT32_MIN;
-    const auto extend = [&](const CC& c) {
-        min_cx = std::min(min_cx, c.x); max_cx = std::max(max_cx, c.x);
-        min_cy = std::min(min_cy, c.y); max_cy = std::max(max_cy, c.y);
-        min_cz = std::min(min_cz, c.z); max_cz = std::max(max_cz, c.z);
-    };
-    for (const auto& [coord, chunk] : chunks) extend(coord);
-    for (const auto& [coord, cells] : lift_cells) extend(coord);
-    _coarseMin = simd::int3{min_cx, min_cy, min_cz};
-    _coarseDim = simd::int3{max_cx - min_cx + 1,
-                            max_cy - min_cy + 1,
-                            max_cz - min_cz + 1};
-
-    const size_t coarse_count =
-        static_cast<size_t>(_coarseDim.x) *
-        static_cast<size_t>(_coarseDim.y) *
-        static_cast<size_t>(_coarseDim.z);
-    std::vector<uint32_t> coarse(coarse_count, 0);
-    std::vector<uint8_t> pool;
-    pool.reserve((chunks.size() + lift_cells.size()) * VG::kChunkVolume);
-    uint32_t pool_idx = 1;
-    const auto coarse_index = [&](const CC& coord) {
-        return static_cast<size_t>(coord.x - min_cx) +
-               static_cast<size_t>(coord.y - min_cy) *
-                   static_cast<size_t>(_coarseDim.x) +
-               static_cast<size_t>(coord.z - min_cz) *
-                   static_cast<size_t>(_coarseDim.x) *
-                   static_cast<size_t>(_coarseDim.y);
-    };
-    // Lift cells override the grid where they overlap (the floating buffer
-    // composites on top), so apply them after the chunk memcpy.
-    const auto apply_lift = [&](const CC& coord, size_t pool_offset) {
-        auto it = lift_cells.find(coord);
-        if (it == lift_cells.end()) return;
-        for (const auto& [local, val] : it->second) {
-            pool[pool_offset + local] = val;
-        }
-        lift_cells.erase(it);
-    };
-    for (const auto& [coord, chunk] : chunks) {
-        coarse[coarse_index(coord)] = pool_idx++;
-        const size_t old = pool.size();
-        pool.resize(old + VG::kChunkVolume);
-        std::memcpy(pool.data() + old, chunk->cells, VG::kChunkVolume);
-        apply_lift(coord, old);
-    }
-    // Lift cells over otherwise-empty chunks: allocate a zeroed chunk each.
-    for (const auto& [coord, cells] : lift_cells) {
-        coarse[coarse_index(coord)] = pool_idx++;
-        const size_t old = pool.size();
-        pool.resize(old + VG::kChunkVolume, 0);
-        for (const auto& [local, val] : cells) {
-            pool[old + local] = val;
-        }
-    }
-    _coarseBuffer = [_device newBufferWithBytes:coarse.data()
-                                         length:coarse.size() * sizeof(uint32_t)
-                                        options:MTLResourceStorageModeShared];
+    _coarseMin = simd::int3{packed.min[0], packed.min[1], packed.min[2]};
+    _coarseDim = simd::int3{packed.dim[0], packed.dim[1], packed.dim[2]};
+    _coarseBuffer =
+        [_device newBufferWithBytes:packed.coarse.data()
+                             length:packed.coarse.size() * sizeof(uint32_t)
+                            options:MTLResourceStorageModeShared];
     _coarseBuffer.label = @"PTCoarse";
-    _poolBuffer = [_device newBufferWithBytes:pool.data()
-                                       length:pool.size()
+    _poolBuffer = [_device newBufferWithBytes:packed.pool.data()
+                                       length:packed.pool.size()
                                       options:MTLResourceStorageModeShared];
     _poolBuffer.label = @"PTChunkPool";
 }
