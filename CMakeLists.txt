@@ -44,6 +44,7 @@ set(APP_SOURCES
     src/ShapeEngine.mm
     src/Palette.cpp
     src/VoxFile.cpp
+    src/VoxRoundTrip.cpp
     src/VoxScene.cpp
     src/Raycast.cpp
     src/Shapes.cpp

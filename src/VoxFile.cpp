@@ -590,7 +590,10 @@ void AppendMatlChunks(std::vector<uint8_t>* children, const Palette& palette) {
         kv.emplace_back("_rough", FormatFloat(m.roughness));
         kv.emplace_back("_metal", FormatFloat(m.metallic));
         kv.emplace_back("_ior", FormatFloat(m.ior - 1.0f));
-        if (m.type == MaterialType::Glass) {
+        // Not just Glass: the loader keeps _alpha/_trans for types that
+        // fall back to Diffuse (e.g. Magica's _blend), so serialize any
+        // non-zero transparency or it's lost on the next load.
+        if (m.transparency != 0.0f) {
             kv.emplace_back("_alpha", FormatFloat(m.transparency));
         }
         if (m.type == MaterialType::Emissive) {
@@ -810,25 +813,37 @@ bool SaveVoxScene(const std::string& path,
 
         std::vector<uint8_t> xyzi;
         AppendU32(&xyzi, static_cast<uint32_t>(m.grid.FilledCount()));
-        constexpr int32_t cs = static_cast<int32_t>(VoxelGrid::kChunkSize);
+        // Canonical chunk order (the hash map's iteration order depends on
+        // insertion history) so identical scenes save byte-identically.
+        std::vector<const VoxelGrid::Chunk*> sorted;
+        sorted.reserve(m.grid.chunks().size());
         for (const auto& [coord, chunk] : m.grid.chunks()) {
-            if (chunk->filled_count == 0) continue;
+            if (chunk->filled_count > 0) sorted.push_back(chunk.get());
+        }
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const VoxelGrid::Chunk* a, const VoxelGrid::Chunk* b) {
+                      return std::tie(a->coord.z, a->coord.y, a->coord.x) <
+                             std::tie(b->coord.z, b->coord.y, b->coord.x);
+                  });
+        constexpr int32_t cs = static_cast<int32_t>(VoxelGrid::kChunkSize);
+        for (const VoxelGrid::Chunk* chunk : sorted) {
             for (int32_t lz = 0; lz < cs; ++lz)
             for (int32_t ly = 0; ly < cs; ++ly)
             for (int32_t lx = 0; lx < cs; ++lx) {
                 const uint8_t v =
                     chunk->cells[VoxelGrid::LocalIndex(lx, ly, lz)];
                 if (v == 0) continue;
-                xyzi.push_back(static_cast<uint8_t>(coord.x * cs + lx));
-                xyzi.push_back(static_cast<uint8_t>(coord.y * cs + ly));
-                xyzi.push_back(static_cast<uint8_t>(coord.z * cs + lz));
+                xyzi.push_back(
+                    static_cast<uint8_t>(chunk->coord.x * cs + lx));
+                xyzi.push_back(
+                    static_cast<uint8_t>(chunk->coord.y * cs + ly));
+                xyzi.push_back(
+                    static_cast<uint8_t>(chunk->coord.z * cs + lz));
                 xyzi.push_back(v);
             }
         }
         AppendChunk(&children, "XYZI", xyzi);
     }
-
-    AppendRgbaChunk(&children, palette);
 
     if (wrap_root) {
         std::vector<uint8_t> body;
@@ -922,6 +937,8 @@ bool SaveVoxScene(const std::string& path,
         AppendChunk(&children, "LAYR", body);
     }
 
+    // Magica emits color/material chunks after the node graph; match it.
+    AppendRgbaChunk(&children, palette);
     AppendMatlChunks(&children, palette);
     return WriteVoxFile(path, children, out_error);
 }

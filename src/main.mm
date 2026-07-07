@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 
 #include "CliRender.h"
+#include "VoxRoundTrip.h"
 
 #include <cstring>
 
@@ -13,6 +14,9 @@ int main(int argc, const char* argv[]) {
     // running from CI / scripts doesn't spawn a GUI process.
     if (argc >= 2 && std::strcmp(argv[1], "render") == 0) {
         return macvoxel::RunCliRender(argc - 1, argv + 1);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "voxrt") == 0) {
+        return macvoxel::RunVoxRoundTrip(argc - 1, argv + 1);
     }
 
     MacVoxelRunApp();
