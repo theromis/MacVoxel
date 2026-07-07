@@ -2,6 +2,7 @@
 
 #include "Material.h"
 #include "Palette.h"
+#include "VoxScene.h"
 #include "VoxelGrid.h"
 
 #include <algorithm>
@@ -92,56 +93,7 @@ void SetError(std::string* out_error, const std::string& msg) {
     if (out_error) *out_error = msg;
 }
 
-// ---------------------------------------------------------------------------
-// Rotation byte decoding
-// ---------------------------------------------------------------------------
-
-struct Mat3i {
-    int m[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
-};
-
-constexpr Mat3i kIdentity{};
-
-Mat3i DecodeRotation(uint8_t rot) {
-    const int c0 = rot & 0x3;
-    const int c1 = (rot >> 2) & 0x3;
-    const int c2 = 3 - c0 - c1;
-    if (c0 == c1 || c2 < 0 || c2 > 2) return kIdentity;
-    const int s0 = (rot & (1 << 4)) ? -1 : 1;
-    const int s1 = (rot & (1 << 5)) ? -1 : 1;
-    const int s2 = (rot & (1 << 6)) ? -1 : 1;
-    Mat3i out{};
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) out.m[i][j] = 0;
-    out.m[0][c0] = s0;
-    out.m[1][c1] = s1;
-    out.m[2][c2] = s2;
-    return out;
-}
-
-Mat3i Mul(const Mat3i& a, const Mat3i& b) {
-    Mat3i out{};
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            int v = 0;
-            for (int k = 0; k < 3; ++k) v += a.m[i][k] * b.m[k][j];
-            out.m[i][j] = v;
-        }
-    }
-    return out;
-}
-
-struct Vec3i { int x = 0, y = 0, z = 0; };
-
-Vec3i Apply(const Mat3i& m, Vec3i v) {
-    return Vec3i{
-        m.m[0][0] * v.x + m.m[0][1] * v.y + m.m[0][2] * v.z,
-        m.m[1][0] * v.x + m.m[1][1] * v.y + m.m[1][2] * v.z,
-        m.m[2][0] * v.x + m.m[2][1] * v.y + m.m[2][2] * v.z,
-    };
-}
-
-bool ParseTranslation(const std::string& s, Vec3i* out) {
+bool ParseTranslation(const std::string& s, Vec3i32* out) {
     return std::sscanf(s.c_str(), "%d %d %d", &out->x, &out->y, &out->z) == 3;
 }
 
@@ -162,7 +114,7 @@ struct ParsedNode {
     NodeKind kind = NodeKind::Transform;
     int32_t id = -1;
     int32_t child = -1;
-    Vec3i translation{};
+    Vec3i32 translation{};
     uint8_t rotation = 4;
     std::vector<int32_t> children;
     std::vector<int32_t> model_ids;
@@ -170,8 +122,8 @@ struct ParsedNode {
 
 struct PlacedShape {
     int32_t model_id = 0;
-    Vec3i translation{};
-    Mat3i rotation = kIdentity;
+    Vec3i32 translation{};
+    RotMat rotation{};
 };
 
 // Parse a MagicaVoxel MATL property dict into our Material struct.
@@ -277,20 +229,16 @@ bool ParseShapeNode(Reader& r, ParsedNode* node) {
 
 void WalkNode(const std::map<int32_t, ParsedNode>& nodes,
               int32_t node_id,
-              const Vec3i& accum_t,
-              const Mat3i& accum_r,
+              const Vec3i32& accum_t,
+              const RotMat& accum_r,
               std::vector<PlacedShape>* out) {
     auto it = nodes.find(node_id);
     if (it == nodes.end()) return;
     const ParsedNode& n = it->second;
     switch (n.kind) {
         case NodeKind::Transform: {
-            const Vec3i rt = Apply(accum_r, n.translation);
-            Vec3i t = accum_t;
-            t.x += rt.x;
-            t.y += rt.y;
-            t.z += rt.z;
-            const Mat3i r = Mul(accum_r, DecodeRotation(n.rotation));
+            const Vec3i32 t = accum_t + accum_r * n.translation;
+            const RotMat r = accum_r * RotMat::FromByte(n.rotation);
             WalkNode(nodes, n.child, t, r, out);
             break;
         }
@@ -471,7 +419,7 @@ bool LoadVox(const std::string& path,
     std::vector<PlacedShape> placements;
     if (!nodes.empty()) {
         int32_t root = nodes.count(0) ? 0 : nodes.begin()->first;
-        WalkNode(nodes, root, Vec3i{}, kIdentity, &placements);
+        WalkNode(nodes, root, Vec3i32{}, RotMat{}, &placements);
     }
     if (placements.empty()) {
         // No scene graph: place model 0 corner-at-origin, which we get by
@@ -479,9 +427,9 @@ bool LoadVox(const std::string& path,
         PlacedShape ps;
         ps.model_id = 0;
         const ModelDims d0 = models[0].dims;
-        ps.translation = Vec3i{static_cast<int>(d0.x / 2),
-                               static_cast<int>(d0.y / 2),
-                               static_cast<int>(d0.z / 2)};
+        ps.translation = Vec3i32{static_cast<int32_t>(d0.x / 2),
+                                 static_cast<int32_t>(d0.y / 2),
+                                 static_cast<int32_t>(d0.z / 2)};
         placements.push_back(ps);
     }
 
@@ -501,7 +449,7 @@ bool LoadVox(const std::string& path,
             const int ly = static_cast<int>(m.voxels[i * 4 + 1]) - hy;
             const int lz = static_cast<int>(m.voxels[i * 4 + 2]) - hz;
             const uint8_t ci = m.voxels[i * 4 + 3];
-            const Vec3i rotated = Apply(ps.rotation, Vec3i{lx, ly, lz});
+            const Vec3i32 rotated = ps.rotation * Vec3i32{lx, ly, lz};
             const int wx = rotated.x + ps.translation.x;
             const int wy = rotated.y + ps.translation.y;
             const int wz = rotated.z + ps.translation.z;
