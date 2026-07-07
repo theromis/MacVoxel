@@ -2,6 +2,9 @@
 
 #include "Clipboard.h"
 #include "Document.h"
+
+#include <algorithm>
+#include <vector>
 #include "EditHistory.h"
 #include "EditorMode.h"
 #include "GeneratorState.h"
@@ -66,9 +69,56 @@ struct EditorContext {
     PanelState panel;
     // Model (voxel editing) vs Scene ("object mode"). See EditorMode.h.
     EditorMode editor_mode = EditorMode::Model;
-    // Scene-mode selection: index into document.scene.objects, -1 = none.
-    // v1 is single-select; widen to a set later.
+    // Scene-mode selection. `selected_object` is the PRIMARY (last
+    // touched; always a member of the set; -1 ⇔ empty set) — kept as
+    // the single-object field every pre-multi-select consumer reads.
+    // `selected_objects` is the full set, unordered.
     int32_t selected_object = -1;
+    std::vector<int32_t> selected_objects;
+
+    bool IsObjectSelected(int32_t i) const {
+        return std::find(selected_objects.begin(), selected_objects.end(),
+                         i) != selected_objects.end();
+    }
+    void SelectObjectOnly(int32_t i) {
+        selected_objects.clear();
+        selected_object = i >= 0 ? i : -1;
+        if (i >= 0) selected_objects.push_back(i);
+    }
+    void ToggleObjectSelected(int32_t i) {
+        if (i < 0) return;
+        auto it = std::find(selected_objects.begin(),
+                            selected_objects.end(), i);
+        if (it != selected_objects.end()) {
+            selected_objects.erase(it);
+            if (selected_object == i) {
+                selected_object =
+                    selected_objects.empty() ? -1 : selected_objects.back();
+            }
+        } else {
+            selected_objects.push_back(i);
+            selected_object = i;
+        }
+    }
+    void ClearObjectSelection() {
+        selected_objects.clear();
+        selected_object = -1;
+    }
+    // Drop out-of-range members (structural undo/redo shifts indices)
+    // and restore the primary-is-a-member invariant.
+    void PruneObjectSelection() {
+        const auto count =
+            static_cast<int32_t>(document.scene.objects.size());
+        std::erase_if(selected_objects,
+                      [&](int32_t i) { return i < 0 || i >= count; });
+        if (selected_object >= count) selected_object = -1;
+        if (selected_object < 0 && !selected_objects.empty()) {
+            selected_object = selected_objects.back();
+        }
+        if (selected_object >= 0 && !IsObjectSelected(selected_object)) {
+            selected_objects.push_back(selected_object);
+        }
+    }
     // Bridge-initiated activation, serviced by MetalScene's per-frame
     // loop (which owns the lift/gizmo commit preconditions). -1 = none.
     int32_t requested_active_object = -1;

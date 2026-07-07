@@ -31,6 +31,9 @@ enum class DragMode {
     GenHandle,
     ObjectMove,
     ObjectGizmo,
+    // Scene-mode rubber band. Reuses `marquee`'s corner fields; the
+    // distinct mode keeps the model-mode marquee code paths inert.
+    ObjectMarquee,
 };
 
 // Owned, named home for everything that used to live as a private ivar

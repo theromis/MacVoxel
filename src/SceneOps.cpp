@@ -64,7 +64,7 @@ int InsertLeaf(EditorContext& ctx, SceneModel&& model, SceneNode&& trn,
 
     doc.BumpScene();
     const int new_index = FindObjectByTrn(scene, trn_id);
-    ctx.selected_object = new_index;
+    ctx.SelectObjectOnly(new_index);
     return new_index;
 }
 
@@ -189,55 +189,76 @@ int NewEmptyObject(EditorContext& ctx) {
 }
 
 bool DeleteObject(EditorContext& ctx) {
-    int i;
-    if (!ValidSelection(ctx, &i)) return false;
     Document& doc = ctx.document;
     Scene& scene = doc.scene;
-    if (scene.objects.size() <= 1) return false;  // never delete the last
-    const SceneObject obj = scene.objects[static_cast<size_t>(i)];
-    if (obj.trn_id < 0) return false;
-    int32_t parent = -1, pos = -1;
-    if (!ParentGroupOf(scene, obj.trn_id, &parent, &pos)) return false;
+
+    // Snapshot targets as leaf ids — indices shift as unlinks land —
+    // and dedupe (instanced leaves alias one trn).
+    std::vector<int32_t> trns;
+    auto add_target = [&](int32_t i) {
+        if (i < 0 || static_cast<size_t>(i) >= scene.objects.size()) return;
+        const int32_t t = scene.objects[static_cast<size_t>(i)].trn_id;
+        if (t >= 0 && std::find(trns.begin(), trns.end(), t) == trns.end()) {
+            trns.push_back(t);
+        }
+    };
+    for (int32_t i : ctx.selected_objects) add_target(i);
+    add_target(ctx.selected_object);
+    if (trns.empty()) return false;
 
     doc.SyncActiveModel();
     ctx.history.BeginOp();
+    bool any = false;
+    for (int32_t trn : trns) {
+        if (scene.objects.size() <= 1) break;  // never delete the last
+        const int i = FindObjectByTrn(scene, trn);
+        if (i < 0) continue;
+        int32_t parent = -1, pos = -1;
+        if (!ParentGroupOf(scene, trn, &parent, &pos)) continue;
 
-    if (i == doc.active_object) {
-        const int32_t survivor =
-            (static_cast<size_t>(i + 1) < scene.objects.size()) ? i + 1
-                                                                : i - 1;
-        doc.active_object = survivor;
-        doc.RebakeActiveObject();
-        ctx.selection.Clear();
-        EditOp::SceneChange sw;
-        sw.kind = EditOp::SceneChange::Kind::ActiveSwitch;
-        sw.old_active = i;
-        sw.new_active = survivor;
-        ctx.history.RecordSceneChange(sw);
+        if (i == doc.active_object) {
+            const int32_t survivor =
+                (static_cast<size_t>(i + 1) < scene.objects.size()) ? i + 1
+                                                                    : i - 1;
+            doc.active_object = survivor;
+            doc.RebakeActiveObject();
+            ctx.selection.Clear();
+            EditOp::SceneChange sw;
+            sw.kind = EditOp::SceneChange::Kind::ActiveSwitch;
+            sw.old_active = i;
+            sw.new_active = survivor;
+            ctx.history.RecordSceneChange(sw);
+        }
+
+        const int active = doc.active_object;
+        const int32_t active_trn =
+            (active >= 0 &&
+             static_cast<size_t>(active) < scene.objects.size())
+                ? scene.objects[static_cast<size_t>(active)].trn_id
+                : -1;
+        auto& kids = scene.nodes.at(parent).children;
+        kids.erase(kids.begin() + pos);
+        scene.RebuildObjects();
+        if (active_trn >= 0) {
+            const int relocated = FindObjectByTrn(scene, active_trn);
+            if (relocated >= 0) doc.active_object = relocated;
+        }
+
+        EditOp::SceneChange rm;
+        rm.kind = EditOp::SceneChange::Kind::RemoveObject;
+        rm.parent_group = parent;
+        rm.child_pos = pos;
+        rm.child_trn = trn;
+        ctx.history.RecordSceneChange(rm);
+        any = true;
     }
-
-    const int active = doc.active_object;
-    const int32_t active_trn =
-        (active >= 0 && static_cast<size_t>(active) < scene.objects.size())
-            ? scene.objects[static_cast<size_t>(active)].trn_id
-            : -1;
-    auto& kids = scene.nodes.at(parent).children;
-    kids.erase(kids.begin() + pos);
-    scene.RebuildObjects();
-    if (active_trn >= 0) {
-        const int relocated = FindObjectByTrn(scene, active_trn);
-        if (relocated >= 0) doc.active_object = relocated;
+    if (!any) {
+        ctx.history.AbandonOp();
+        return false;
     }
-
-    EditOp::SceneChange rm;
-    rm.kind = EditOp::SceneChange::Kind::RemoveObject;
-    rm.parent_group = parent;
-    rm.child_pos = pos;
-    rm.child_trn = obj.trn_id;
-    ctx.history.RecordSceneChange(rm);
     ctx.history.CommitOp();
 
-    ctx.selected_object = -1;
+    ctx.ClearObjectSelection();
     doc.BumpScene();
     return true;
 }

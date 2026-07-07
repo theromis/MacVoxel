@@ -29,10 +29,11 @@ int DuplicateObject(EditorContext& ctx);
 // exact translation), and select it. Returns the new index or -1.
 int NewEmptyObject(EditorContext& ctx);
 
-// Unlink the selected object (nodes stay resident for undo; the writer
-// GCs unreachable models at save). Deleting the active object switches
-// to a survivor first — both land in ONE op. False when it's the last
-// object or the selection is invalid.
+// Unlink every selected object (nodes stay resident for undo; the
+// writer GCs unreachable models at save) as ONE history op. Deleting
+// the active object switches to a survivor first (recorded in the same
+// op); at least one object always survives. False when the selection
+// is empty/invalid.
 bool DeleteObject(EditorContext& ctx);
 
 // The object the size fields address: the scene-mode selection when

@@ -291,7 +291,7 @@ constexpr unsigned short kKeyCodeTab         = 48;
         doc.SyncActiveModel();
         _ctx->selection.Clear();
         _ctx->editor_mode = EM::Scene;
-        _ctx->selected_object = doc.active_object;
+        _ctx->SelectObjectOnly(doc.active_object);
         doc.BumpScene();
     } else {
         if (_ctx->selected_object >= 0 &&
@@ -378,7 +378,7 @@ constexpr unsigned short kKeyCodeTab         = 48;
     }
     if (kc == kKeyCodeEscape) {
         if (_ctx->editor_mode == macvoxel::EditorMode::Scene) {
-            _ctx->selected_object = -1;
+            _ctx->ClearObjectSelection();
             return;
         }
         _escapePending = YES;
@@ -951,6 +951,10 @@ constexpr unsigned short kKeyCodeTab         = 48;
                 *_ctx, _interaction, [self viewContext],
                 [self mouseEventFromNSEvent:event]);
             break;
+        case DragMode::ObjectMarquee:
+            macvoxel::object_mode_controller::OnMarqueeDragged(
+                _interaction, [self mouseEventFromNSEvent:event]);
+            break;
         case DragMode::XformHandle:
             macvoxel::xform_handle_controller::OnMouseDragged(
                 *_ctx, _interaction, [self viewContext],
@@ -999,6 +1003,11 @@ constexpr unsigned short kKeyCodeTab         = 48;
             break;
         case DragMode::ObjectGizmo:
             macvoxel::object_mode_controller::OnGizmoUp(*_ctx, _interaction);
+            break;
+        case DragMode::ObjectMarquee:
+            macvoxel::object_mode_controller::OnMarqueeUp(
+                *_ctx, _interaction, [self viewContext],
+                [self mouseEventFromNSEvent:event]);
             break;
         case DragMode::XformHandle:
             macvoxel::xform_handle_controller::OnMouseUp(_interaction);

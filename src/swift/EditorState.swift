@@ -200,6 +200,16 @@ final class EditorState {
         return bridge.canDeleteSelectedObject
     }
 
+    func isObjectSelected(at index: Int) -> Bool {
+        _ = tick
+        return bridge.isObjectSelected(at: index)
+    }
+
+    func selectObject(at index: Int, extend: Bool) {
+        bridge.selectObject(at: index, extend: extend)
+        tick &+= 1
+    }
+
     func activateObject(at index: Int) {
         bridge.requestActivateObject(at: index)
         tick &+= 1

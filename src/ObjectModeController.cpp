@@ -127,8 +127,29 @@ bool OnMouseDown(EditorContext& ctx, InteractionState& state,
     simd::float3 ro, rd;
     if (!vc.RayAt(e.local.x, e.local.y, &ro, &rd)) return false;
     const int hit = PickObject(scene, ro, rd, 1.0e6f);
-    ctx.selected_object = hit;
-    if (hit < 0) return false;
+
+    // Shift-click toggles membership; no drag either way.
+    if (e.mods.shift) {
+        if (hit >= 0) ctx.ToggleObjectSelected(hit);
+        return false;
+    }
+
+    // Empty space starts the rubber band; the deselect (when the rect
+    // stays a click) happens on mouseUp.
+    if (hit < 0) {
+        state.marquee.anchor_local = e.local;
+        state.marquee.current_local = e.local;
+        state.drag_mode = DragMode::ObjectMarquee;
+        return true;
+    }
+
+    // Clicking a member keeps the set (just re-primaries); anything
+    // else replaces the selection.
+    if (ctx.IsObjectSelected(hit)) {
+        ctx.selected_object = hit;
+    } else {
+        ctx.SelectObjectOnly(hit);
+    }
 
     // Grab plane through the entry point of the object's world AABB,
     // perpendicular to the entry face (MoveSelect's trick).
@@ -274,6 +295,72 @@ void OnGizmoUp(EditorContext& ctx, InteractionState& state) {
     g.axis = -1;
 }
 
+void OnMarqueeDragged(InteractionState& state, const MouseEvent& e) {
+    state.marquee.current_local = e.local;
+}
+
+void OnMarqueeUp(EditorContext& ctx, InteractionState& state,
+                 const ViewContext& vc, const MouseEvent& e) {
+    auto& m = state.marquee;
+    m.current_local = e.local;
+    if (vc.viewport_w <= 0.0f || vc.viewport_h <= 0.0f) return;
+
+    const float rx_min = std::min(m.anchor_local.x, m.current_local.x);
+    const float rx_max = std::max(m.anchor_local.x, m.current_local.x);
+    const float ry_min = std::min(m.anchor_local.y, m.current_local.y);
+    const float ry_max = std::max(m.anchor_local.y, m.current_local.y);
+
+    // Sub-click rect keeps the old empty-click semantics.
+    if ((rx_max - rx_min) < 2.0f && (ry_max - ry_min) < 2.0f) {
+        if (!e.mods.shift) ctx.ClearObjectSelection();
+        return;
+    }
+
+    const float aspect = vc.viewport_w / vc.viewport_h;
+    const simd::float4x4 vp =
+        vc.camera.ProjectionMatrix(aspect) * vc.camera.ViewMatrix();
+    const float vw = vc.viewport_w;
+    const float vh = vc.viewport_h;
+
+    if (!e.mods.shift) ctx.ClearObjectSelection();
+    const Scene& scene = ctx.document.scene;
+    for (size_t i = 0; i < scene.objects.size(); ++i) {
+        if (scene.objects[i].hidden) continue;
+        Bounds3 b;
+        if (!ObjectDimsWorldBounds(scene, static_cast<int>(i), &b)) continue;
+        // Screen-space bbox over the AABB's projected corners; select
+        // on rect INTERSECTION (Magica-style). Both spaces are view-
+        // local bottom-up, so a direct compare is correct.
+        float sx_min = 1e9f, sx_max = -1e9f;
+        float sy_min = 1e9f, sy_max = -1e9f;
+        bool any = false;
+        for (int c = 0; c < 8; ++c) {
+            const float gx = static_cast<float>((c & 1) ? b.max_x + 1
+                                                        : b.min_x);
+            const float gy = static_cast<float>((c & 2) ? b.max_y + 1
+                                                        : b.min_y);
+            const float gz = static_cast<float>((c & 4) ? b.max_z + 1
+                                                        : b.min_z);
+            const simd::float4 clip =
+                simd_mul(vp, simd::float4{gx, gz, -gy, 1.0f});
+            if (clip.w <= 1e-3f) continue;
+            const float sx = (clip.x / clip.w * 0.5f + 0.5f) * vw;
+            const float sy = (clip.y / clip.w * 0.5f + 0.5f) * vh;
+            sx_min = std::min(sx_min, sx);
+            sx_max = std::max(sx_max, sx);
+            sy_min = std::min(sy_min, sy);
+            sy_max = std::max(sy_max, sy);
+            any = true;
+        }
+        if (!any) continue;
+        const bool overlaps = sx_min <= rx_max && sx_max >= rx_min &&
+                              sy_min <= ry_max && sy_max >= ry_min;
+        if (overlaps && !ctx.IsObjectSelected(static_cast<int32_t>(i))) {
+            ctx.ToggleObjectSelected(static_cast<int32_t>(i));
+        }
+    }
+}
+
 void RotateSelected(EditorContext& ctx, int axis, bool ccw) {
     ApplyRotation(ctx, AxisRotation(axis, ccw));
 }
@@ -286,11 +373,34 @@ void DrawOverlay(const EditorContext& ctx, const InteractionState& state,
                  const ViewContext& vc, OverlayDraw& od) {
     const Scene& scene = ctx.document.scene;
     const int active = ctx.document.active_object;
-    if (active != ctx.selected_object) {
+    if (!ctx.IsObjectSelected(active)) {
         Bounds3 b;
         if (ObjectDimsWorldBounds(scene, active, &b)) {
             selection_overlay::DrawWorldAabb(
                 b, Rgba8(140, 150, 175, 160), 1.0f, vc, od);
+        }
+    }
+
+    // Rubber band, over nothing but under the outlines.
+    if (state.drag_mode == DragMode::ObjectMarquee &&
+        vc.viewport_h > 0.0f) {
+        const simd::float2 a = state.marquee.anchor_local;
+        const simd::float2 c = state.marquee.current_local;
+        const float h = vc.viewport_h;
+        // Local y is bottom-up; the overlay renderer is top-down.
+        const simd::float2 tl{std::min(a.x, c.x), h - std::max(a.y, c.y)};
+        const simd::float2 br{std::max(a.x, c.x), h - std::min(a.y, c.y)};
+        od.AddRectFilled(tl, br, Rgba8(255, 220, 80, 28));
+        od.AddRect(tl, br, Rgba8(255, 220, 80, 220), 1.0f);
+    }
+
+    // Every member gets an outline; the primary draws thicker.
+    for (int32_t m : ctx.selected_objects) {
+        if (m == ctx.selected_object) continue;
+        Bounds3 mb;
+        if (ObjectDimsWorldBounds(scene, m, &mb)) {
+            selection_overlay::DrawWorldAabb(
+                mb, Rgba8(255, 220, 80, 190), 1.0f, vc, od);
         }
     }
     int i;

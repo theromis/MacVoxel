@@ -23,7 +23,8 @@ struct OutlinerPanel: View {
             VStack(spacing: 1) {
                 ForEach(Array(names.enumerated()), id: \.offset) { i, name in
                     row(index: i, name: name,
-                        isSelected: i == selected, isActive: i == active)
+                        isSelected: state.isObjectSelected(at: i),
+                        isPrimary: i == selected, isActive: i == active)
                 }
             }
 
@@ -76,7 +77,8 @@ struct OutlinerPanel: View {
     }
 
     private func row(index: Int, name: String,
-                     isSelected: Bool, isActive: Bool) -> some View {
+                     isSelected: Bool, isPrimary: Bool,
+                     isActive: Bool) -> some View {
         HStack(spacing: 6) {
             Circle()
                 .fill(isActive ? Color.accentColor : Color.clear)
@@ -90,15 +92,20 @@ struct OutlinerPanel: View {
         .padding(.vertical, 3)
         .background(
             RoundedRectangle(cornerRadius: 4)
-                .fill(isSelected ? Color.accentColor.opacity(0.25)
-                                 : Color.clear)
+                .fill(isPrimary ? Color.accentColor.opacity(0.25)
+                      : isSelected ? Color.accentColor.opacity(0.15)
+                                   : Color.clear)
         )
         .contentShape(Rectangle())
-        // Double-tap declared first so it wins over the single-tap.
+        // Gesture precedence: double-tap first, then shift-tap, then
+        // the plain tap — later declarations lose ties.
         .onTapGesture(count: 2) {
             state.selectedObjectIndex = index
             state.activateObject(at: index)
         }
+        .gesture(TapGesture().modifiers(.shift).onEnded {
+            state.selectObject(at: index, extend: true)
+        })
         .onTapGesture {
             state.selectedObjectIndex = index
         }

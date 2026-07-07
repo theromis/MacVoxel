@@ -122,7 +122,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     _ctx->history.Clear();
     // Object clipboard models would dangle across documents.
     _ctx->object_clipboard = macvoxel::ObjectClipboard{};
-    _ctx->selected_object = -1;
+    _ctx->ClearObjectSelection();
     _ctx->editor_mode = macvoxel::EditorMode::Model;
 }
 
@@ -155,7 +155,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     _ctx->document.BumpAll();
     _ctx->history.Clear();
     _ctx->object_clipboard = macvoxel::ObjectClipboard{};
-    _ctx->selected_object = -1;
+    _ctx->ClearObjectSelection();
     _ctx->editor_mode = macvoxel::EditorMode::Model;
     [[NSDocumentController sharedDocumentController]
         noteNewRecentDocumentURL:url];
@@ -244,11 +244,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
         doc.SyncActiveModel();
         doc.BumpScene();
     }
-    if (_ctx->selected_object >= 0 &&
-        static_cast<size_t>(_ctx->selected_object) >=
-            doc.scene.objects.size()) {
-        _ctx->selected_object = -1;
-    }
+    _ctx->PruneObjectSelection();
 }
 
 // ---------------------------------------------------------------------------
@@ -405,7 +401,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 
 - (void)deselect {
     if ([self inSceneMode]) {
-        _ctx->selected_object = -1;
+        _ctx->ClearObjectSelection();
         return;
     }
     if (_ctx->selection.lift_active()) {
@@ -449,10 +445,28 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 
 - (void)setSelectedObjectIndex:(NSInteger)index {
     const auto count = _ctx->document.scene.objects.size();
-    _ctx->selected_object =
+    _ctx->SelectObjectOnly(
         (index >= 0 && static_cast<size_t>(index) < count)
             ? static_cast<int32_t>(index)
-            : -1;
+            : -1);
+}
+
+- (BOOL)isObjectSelectedAtIndex:(NSInteger)index {
+    return _ctx->IsObjectSelected(static_cast<int32_t>(index));
+}
+
+- (NSInteger)selectedObjectCount {
+    return static_cast<NSInteger>(_ctx->selected_objects.size());
+}
+
+- (void)selectObjectAtIndex:(NSInteger)index extend:(BOOL)extend {
+    const auto count = _ctx->document.scene.objects.size();
+    if (index < 0 || static_cast<size_t>(index) >= count) return;
+    if (extend) {
+        _ctx->ToggleObjectSelected(static_cast<int32_t>(index));
+    } else {
+        _ctx->SelectObjectOnly(static_cast<int32_t>(index));
+    }
 }
 
 - (NSInteger)activeObjectIndex {

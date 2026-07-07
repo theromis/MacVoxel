@@ -178,8 +178,15 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 @property (nonatomic, readonly) BridgeEditorMode editorMode;
 @property (nonatomic, readonly) NSInteger objectCount;
 - (nonnull NSArray<NSString *> *)objectNames;
-@property (nonatomic) NSInteger selectedObjectIndex;   // -1 = none
+@property (nonatomic) NSInteger selectedObjectIndex;   // primary; -1 = none
 @property (nonatomic, readonly) NSInteger activeObjectIndex;
+// Multi-selection: `selectedObjectIndex` is the primary and always a
+// member of the set. extend:YES toggles membership (shift-click).
+@property (nonatomic, readonly) NSInteger selectedObjectCount;
+- (BOOL)isObjectSelectedAtIndex:(NSInteger)index
+    NS_SWIFT_NAME(isObjectSelected(at:));
+- (void)selectObjectAtIndex:(NSInteger)index extend:(BOOL)extend
+    NS_SWIFT_NAME(selectObject(at:extend:));
 @property (nonatomic, readonly) BOOL canDeleteSelectedObject;
 // Deferred to the next frame (lift/gizmo commit preconditions).
 - (void)requestActivateObjectAtIndex:(NSInteger)index;

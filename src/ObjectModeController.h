@@ -30,6 +30,14 @@ void OnGizmoDragged(EditorContext& ctx, InteractionState& state,
                     const ViewContext& vc, const MouseEvent& e);
 void OnGizmoUp(EditorContext& ctx, InteractionState& state);
 
+// Rubber-band select (DragMode::ObjectMarquee, started by a click on
+// empty space): objects whose projected AABB intersects the rect get
+// selected; shift adds to the set, plain replaces it. A sub-2px rect
+// keeps the old click-empty semantics (plain deselects).
+void OnMarqueeDragged(InteractionState& state, const MouseEvent& e);
+void OnMarqueeUp(EditorContext& ctx, InteractionState& state,
+                 const ViewContext& vc, const MouseEvent& e);
+
 // Rotate the selected object 90° about a world axis (0=X 1=Y 2=Z),
 // or mirror it across that axis. Pivot = the object's center
 // translation; translation unchanged.
