@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace macvoxel::object_mode_controller {
 namespace {
@@ -58,10 +59,12 @@ bool SelectedObject(const EditorContext& ctx, int* out_index) {
     return true;
 }
 
-// Record a leaf-transform edit going from (old_t, old_r) to the node's
-// current values as one history op. No-op if nothing changed.
-void RecordTransformOp(EditorContext& ctx, int32_t trn_id,
-                       const Vec3i32& old_t, uint8_t old_r) {
+using Snap = InteractionState::ObjectGizmo::Snap;
+
+// Append one leaf-transform record (old → current) to the OPEN op.
+// No-op if nothing changed.
+void AppendTransformRecord(EditorContext& ctx, int32_t trn_id,
+                           const Vec3i32& old_t, uint8_t old_r) {
     auto it = ctx.document.scene.nodes.find(trn_id);
     if (it == ctx.document.scene.nodes.end()) return;
     const SceneNode& node = it->second;
@@ -73,24 +76,120 @@ void RecordTransformOp(EditorContext& ctx, int32_t trn_id,
     sc.old_r = old_r;
     sc.new_t = node.t;
     sc.new_r = node.rot;
-    ctx.history.BeginOp();
     ctx.history.RecordSceneChange(sc);
+}
+
+// One op covering every snapshot's net change. CommitOp drops the op
+// when no record survived the no-change filter.
+void RecordSnapOps(EditorContext& ctx, const std::vector<Snap>& snaps) {
+    ctx.history.BeginOp();
+    for (const Snap& s : snaps) {
+        AppendTransformRecord(ctx, s.trn_id, s.start_leaf_t,
+                              s.start_leaf_r);
+    }
     ctx.history.CommitOp();
 }
 
+// Union of the selection's dims-box AABBs. False when no member has
+// a valid box.
+bool SelectionUnionBounds(const EditorContext& ctx, Bounds3* out) {
+    const Scene& scene = ctx.document.scene;
+    bool any = false;
+    for (int32_t m : ctx.selected_objects) {
+        Bounds3 b;
+        if (!ObjectDimsWorldBounds(scene, m, &b)) continue;
+        if (!any) {
+            *out = b;
+            any = true;
+        } else {
+            out->min_x = std::min(out->min_x, b.min_x);
+            out->min_y = std::min(out->min_y, b.min_y);
+            out->min_z = std::min(out->min_z, b.min_z);
+            out->max_x = std::max(out->max_x, b.max_x);
+            out->max_y = std::max(out->max_y, b.max_y);
+            out->max_z = std::max(out->max_z, b.max_z);
+        }
+    }
+    return any;
+}
+
+// Transform snapshots for every movable member, deduped by leaf id —
+// instanced leaves alias one nTRN and must be transformed once.
+std::vector<Snap> BuildSnaps(const EditorContext& ctx) {
+    const Scene& scene = ctx.document.scene;
+    std::vector<Snap> snaps;
+    for (int32_t m : ctx.selected_objects) {
+        if (m < 0 || static_cast<size_t>(m) >= scene.objects.size()) {
+            continue;
+        }
+        const SceneObject& o = scene.objects[static_cast<size_t>(m)];
+        if (o.trn_id < 0) continue;
+        const bool seen =
+            std::any_of(snaps.begin(), snaps.end(), [&](const Snap& s) {
+                return s.trn_id == o.trn_id;
+            });
+        if (seen) continue;
+        const SceneNode& node = scene.nodes.at(o.trn_id);
+        snaps.push_back({o.trn_id, m, o.world_r, o.world_t, node.t,
+                         node.rot});
+    }
+    return snaps;
+}
+
+// floor((lo + hi + 1) / 2): the integer center of an inclusive span,
+// sign-safe, matching the HalfDims floor convention.
+int32_t SpanCenter(int32_t lo, int32_t hi) {
+    const int32_t s = lo + hi + 1;
+    return s >= 0 ? s / 2 : -((-s + 1) / 2);
+}
+
+// Translation that pushes an AABB back inside ±kWorldHalf (zero when
+// already inside).
+int32_t NudgeIntoWorld(int32_t lo, int32_t hi) {
+    if (lo < -kWorldHalf) return -kWorldHalf - lo;
+    if (hi > kWorldHalf - 1) return (kWorldHalf - 1) - hi;
+    return 0;
+}
+
 void ApplyRotation(EditorContext& ctx, const RotMat& q) {
-    int i;
-    if (!SelectedObject(ctx, &i)) return;
     Scene& scene = ctx.document.scene;
-    const SceneObject& o = scene.objects[static_cast<size_t>(i)];
-    if (o.trn_id < 0) return;
-    const SceneNode& node = scene.nodes.at(o.trn_id);
-    const Vec3i32 old_t = node.t;
-    const uint8_t old_r = node.rot;
-    const int32_t trn_id = o.trn_id;
-    SetObjectWorldTransform(scene, i, q * o.world_r, o.world_t);
+    std::vector<Snap> snaps = BuildSnaps(ctx);
+    if (snaps.empty()) return;
+
+    if (snaps.size() == 1) {
+        // Single object rotates in place (translation unchanged).
+        const Snap& s = snaps.front();
+        SetObjectWorldTransform(scene, s.object_index, q * s.world_r,
+                                s.start_world_t);
+    } else {
+        // Rigid group rotation about the union-AABB center.
+        Bounds3 ub;
+        if (!SelectionUnionBounds(ctx, &ub)) return;
+        const Vec3i32 p{SpanCenter(ub.min_x, ub.max_x),
+                        SpanCenter(ub.min_y, ub.max_y),
+                        SpanCenter(ub.min_z, ub.max_z)};
+        for (const Snap& s : snaps) {
+            SetObjectWorldTransform(scene, s.object_index, q * s.world_r,
+                                    p + q * (s.start_world_t - p));
+        }
+        // Push the rotated union back inside the world, uniformly.
+        Bounds3 nb;
+        if (SelectionUnionBounds(ctx, &nb)) {
+            const Vec3i32 d{NudgeIntoWorld(nb.min_x, nb.max_x),
+                            NudgeIntoWorld(nb.min_y, nb.max_y),
+                            NudgeIntoWorld(nb.min_z, nb.max_z)};
+            if (!(d == Vec3i32{})) {
+                for (const Snap& s : snaps) {
+                    const SceneObject& o =
+                        scene.objects[static_cast<size_t>(s.object_index)];
+                    SetObjectWorldTransform(scene, s.object_index,
+                                            o.world_r, o.world_t + d);
+                }
+            }
+        }
+    }
     ctx.document.BumpScene();
-    RecordTransformOp(ctx, trn_id, old_t, old_r);
+    RecordSnapOps(ctx, snaps);
 }
 
 }  // namespace
@@ -101,23 +200,19 @@ bool OnMouseDown(EditorContext& ctx, InteractionState& state,
 
     // The translate arrows get first claim on the click — their tips
     // often float over empty space, where a fall-through pick would
-    // deselect instead of grabbing the handle.
-    int sel;
-    if (SelectedObject(ctx, &sel)) {
-        const SceneObject& so = scene.objects[static_cast<size_t>(sel)];
-        Bounds3 gb;
-        if (so.trn_id >= 0 && ObjectDimsWorldBounds(scene, sel, &gb)) {
-            const int axis =
-                vc.PickObjectAxisHandle(gb, e.local.x, e.local.y);
-            if (axis >= 0) {
-                const SceneNode& node = scene.nodes.at(so.trn_id);
+    // deselect instead of grabbing the handle. The gizmo sits on the
+    // union AABB and drags every movable member.
+    Bounds3 gb;
+    if (SelectionUnionBounds(ctx, &gb)) {
+        const int axis = vc.PickObjectAxisHandle(gb, e.local.x, e.local.y);
+        if (axis >= 0) {
+            std::vector<Snap> snaps = BuildSnaps(ctx);
+            if (!snaps.empty()) {
                 auto& g = state.object_gizmo;
                 g.axis = axis;
                 g.start_local = e.local;
                 g.start_bounds = gb;
-                g.snaps.clear();
-                g.snaps.push_back({so.trn_id, sel, so.world_r, so.world_t,
-                                   node.t, node.rot});
+                g.snaps = std::move(snaps);
                 state.drag_mode = DragMode::ObjectGizmo;
                 return true;
             }
@@ -186,22 +281,49 @@ bool OnMouseDown(EditorContext& ctx, InteractionState& state,
     }
     const SceneObject& o = scene.objects[static_cast<size_t>(hit)];
     if (o.trn_id < 0) return false;  // bare shape: selectable, not movable
-    const SceneNode& node = scene.nodes.at(o.trn_id);
     state.object_move.axis = axis;
     state.object_move.anchor_grid = anchor;
-    state.object_move.start_world_t = o.world_t;
-    state.object_move.trn_id = o.trn_id;
-    state.object_move.start_leaf_t = node.t;
-    state.object_move.start_leaf_r = node.rot;
+    // Body drags move the whole selection rigidly; the same snapshot
+    // store serves both drag kinds.
+    auto& g = state.object_gizmo;
+    g.snaps = BuildSnaps(ctx);
+    if (g.snaps.empty()) return false;
+    Bounds3 ub;
+    if (!SelectionUnionBounds(ctx, &ub)) return false;
+    g.start_bounds = ub;
     state.drag_mode = DragMode::ObjectMove;
     return true;
 }
 
+// Apply one rigid translation to every snapshot (absolute targets, so
+// repeated frames can't accumulate error). Assumes `delta` is already
+// clamped to keep the union AABB in the world.
+static void ApplySnapTranslation(EditorContext& ctx,
+                                 const std::vector<Snap>& snaps,
+                                 const Vec3i32& delta) {
+    Scene& scene = ctx.document.scene;
+    const Snap& first = snaps.front();
+    if (first.object_index < 0 ||
+        static_cast<size_t>(first.object_index) >= scene.objects.size()) {
+        return;
+    }
+    const Vec3i32 lead = first.start_world_t + delta;
+    if (lead == scene.objects[static_cast<size_t>(first.object_index)]
+                    .world_t) {
+        return;  // dispatch-on-change
+    }
+    for (const Snap& s : snaps) {
+        SetObjectWorldTransform(scene, s.object_index, s.world_r,
+                                s.start_world_t + delta);
+    }
+    ctx.document.BumpScene();
+}
+
 void OnMouseDragged(EditorContext& ctx, InteractionState& state,
                     const ViewContext& vc, const MouseEvent& e) {
-    int i;
-    if (!SelectedObject(ctx, &i)) return;
     const auto& m = state.object_move;
+    const auto& g = state.object_gizmo;
+    if (g.snaps.empty()) return;
     const float plane_coord = (m.axis == 0)   ? m.anchor_grid.x
                               : (m.axis == 1) ? m.anchor_grid.y
                                               : m.anchor_grid.z;
@@ -213,49 +335,33 @@ void OnMouseDragged(EditorContext& ctx, InteractionState& state,
     auto snap = [](float f) {
         return static_cast<int32_t>(std::lround(f));
     };
-    Vec3i32 target = m.start_world_t;
-    if (m.axis != 0) target.x += snap(hit.x - m.anchor_grid.x);
-    if (m.axis != 1) target.y += snap(hit.y - m.anchor_grid.y);
-    if (m.axis != 2) target.z += snap(hit.z - m.anchor_grid.z);
+    Vec3i32 delta{};
+    if (m.axis != 0) delta.x = snap(hit.x - m.anchor_grid.x);
+    if (m.axis != 1) delta.y = snap(hit.y - m.anchor_grid.y);
+    if (m.axis != 2) delta.z = snap(hit.z - m.anchor_grid.z);
 
-    Scene& scene = ctx.document.scene;
-    const SceneObject& o = scene.objects[static_cast<size_t>(i)];
-    if (target == o.world_t) return;  // dispatch-on-change
+    // Clamp so the union AABB stays inside the world.
+    auto clamp_axis = [](int32_t d, int32_t lo, int32_t hi) {
+        return std::clamp(d, -kWorldHalf - lo, (kWorldHalf - 1) - hi);
+    };
+    const Bounds3& ub = g.start_bounds;
+    delta.x = clamp_axis(delta.x, ub.min_x, ub.max_x);
+    delta.y = clamp_axis(delta.y, ub.min_y, ub.max_y);
+    delta.z = clamp_axis(delta.z, ub.min_z, ub.max_z);
 
-    // Clamp so the object's AABB stays inside the world.
-    Bounds3 b;
-    if (ObjectDimsWorldBounds(scene, i, &b)) {
-        const Vec3i32 d = target - o.world_t;
-        auto clamp_axis = [](int32_t delta, int32_t lo, int32_t hi) {
-            const int32_t max_up = (kWorldHalf - 1) - hi;
-            const int32_t max_dn = -kWorldHalf - lo;
-            return std::clamp(delta, max_dn, max_up);
-        };
-        target = o.world_t + Vec3i32{clamp_axis(d.x, b.min_x, b.max_x),
-                                     clamp_axis(d.y, b.min_y, b.max_y),
-                                     clamp_axis(d.z, b.min_z, b.max_z)};
-        if (target == o.world_t) return;
-    }
-    SetObjectWorldTransform(scene, i, o.world_r, target);
-    ctx.document.BumpScene();
+    ApplySnapTranslation(ctx, g.snaps, delta);
 }
 
 void OnMouseUp(EditorContext& ctx, InteractionState& state) {
-    const auto& m = state.object_move;
-    if (m.trn_id < 0) return;
-    RecordTransformOp(ctx, m.trn_id, m.start_leaf_t, m.start_leaf_r);
+    auto& g = state.object_gizmo;
+    RecordSnapOps(ctx, g.snaps);
+    g.snaps.clear();
 }
 
 void OnGizmoDragged(EditorContext& ctx, InteractionState& state,
                     const ViewContext& vc, const MouseEvent& e) {
     auto& g = state.object_gizmo;
     if (g.axis < 0 || g.snaps.empty()) return;
-    Scene& scene = ctx.document.scene;
-    const auto& s = g.snaps.front();
-    if (s.object_index < 0 ||
-        static_cast<size_t>(s.object_index) >= scene.objects.size()) {
-        return;
-    }
 
     auto mid = [](int32_t lo, int32_t hi) {
         return (static_cast<float>(lo) + static_cast<float>(hi) + 1.0f) * 0.5f;
@@ -263,34 +369,29 @@ void OnGizmoDragged(EditorContext& ctx, InteractionState& state,
     const simd::float3 anchor{mid(g.start_bounds.min_x, g.start_bounds.max_x),
                               mid(g.start_bounds.min_y, g.start_bounds.max_y),
                               mid(g.start_bounds.min_z, g.start_bounds.max_z)};
-    int delta = vc.AxisDragVoxels(g.axis, anchor, e.local.x, e.local.y,
-                                  g.start_local.x, g.start_local.y);
+    int d = vc.AxisDragVoxels(g.axis, anchor, e.local.x, e.local.y,
+                              g.start_local.x, g.start_local.y);
 
-    // Clamp so the AABB stays inside the world on the drag axis.
+    // Clamp so the union AABB stays inside the world on the drag axis.
     const int32_t lo = (g.axis == 0)   ? g.start_bounds.min_x
                        : (g.axis == 1) ? g.start_bounds.min_y
                                        : g.start_bounds.min_z;
     const int32_t hi = (g.axis == 0)   ? g.start_bounds.max_x
                        : (g.axis == 1) ? g.start_bounds.max_y
                                        : g.start_bounds.max_z;
-    delta = std::clamp(delta, -kWorldHalf - lo, (kWorldHalf - 1) - hi);
+    d = std::clamp(d, -kWorldHalf - lo, (kWorldHalf - 1) - hi);
 
-    Vec3i32 target = s.start_world_t;
-    if (g.axis == 0) target.x += delta;
-    else if (g.axis == 1) target.y += delta;
-    else target.z += delta;
+    Vec3i32 delta{};
+    if (g.axis == 0) delta.x = d;
+    else if (g.axis == 1) delta.y = d;
+    else delta.z = d;
 
-    const SceneObject& o = scene.objects[static_cast<size_t>(s.object_index)];
-    if (target == o.world_t) return;  // dispatch-on-change
-    SetObjectWorldTransform(scene, s.object_index, s.world_r, target);
-    ctx.document.BumpScene();
+    ApplySnapTranslation(ctx, g.snaps, delta);
 }
 
 void OnGizmoUp(EditorContext& ctx, InteractionState& state) {
     auto& g = state.object_gizmo;
-    for (const auto& s : g.snaps) {
-        RecordTransformOp(ctx, s.trn_id, s.start_leaf_t, s.start_leaf_r);
-    }
+    RecordSnapOps(ctx, g.snaps);
     g.snaps.clear();
     g.axis = -1;
 }
@@ -405,14 +506,16 @@ void DrawOverlay(const EditorContext& ctx, const InteractionState& state,
     }
     int i;
     if (!SelectedObject(ctx, &i)) return;
-    Bounds3 b;
-    if (!ObjectDimsWorldBounds(scene, i, &b)) return;
-    selection_overlay::DrawWorldAabb(b, Rgba8(255, 220, 80, 255), 1.5f, vc,
+    Bounds3 pb;
+    if (!ObjectDimsWorldBounds(scene, i, &pb)) return;
+    selection_overlay::DrawWorldAabb(pb, Rgba8(255, 220, 80, 255), 1.5f, vc,
                                      od);
 
-    // Translate arrows — movable objects only (bare shapes have no
-    // leaf nTRN to edit).
-    if (scene.objects[static_cast<size_t>(i)].trn_id < 0) return;
+    // Translate arrows on the union AABB — shown when at least one
+    // member is movable (bare shapes have no leaf nTRN to edit).
+    Bounds3 b;
+    if (!SelectionUnionBounds(ctx, &b)) return;
+    if (BuildSnaps(ctx).empty()) return;
     const float w = vc.viewport_w;
     const float h = vc.viewport_h;
     if (w <= 0.0f || h <= 0.0f) return;

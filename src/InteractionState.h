@@ -141,28 +141,23 @@ struct InteractionState {
     // texture so each frame only does O(seed_cells × Δd) work as the
     // user drags through layer boundaries.
 
-    // Scene-mode object drag: grab plane through the picked object's
-    // AABB entry face (same trick as MoveSelect), world translation
-    // snapshotted at mouseDown so each frame recomputes an absolute
-    // target from the cursor delta.
+    // Scene-mode body drag: grab plane through the picked object's
+    // AABB entry face (same trick as MoveSelect). The per-object
+    // snapshots live in `object_gizmo.snaps` — body and gizmo drags
+    // share one snapshot store.
     struct ObjectMove {
         int axis = 0;
         simd::float3 anchor_grid{0.0f, 0.0f, 0.0f};
-        Vec3i32 start_world_t{};
-        // Leaf-node snapshot for the mouseUp history record.
-        int32_t trn_id = -1;
-        Vec3i32 start_leaf_t{};
-        uint8_t start_leaf_r = 4;
     } object_move;
 
-    // Scene-mode translate gizmo: axis-arrow drag on the selection's
-    // AABB. Everything is snapshotted at mouseDown so each frame
-    // recomputes an absolute target from the cursor delta; one Snap
-    // per selected object.
+    // Scene-mode translate gizmo + shared drag snapshots. Captured at
+    // mouseDown so each frame recomputes an absolute target from the
+    // cursor delta; one Snap per movable selected object (deduped by
+    // leaf — instanced leaves alias one nTRN).
     struct ObjectGizmo {
         int axis = -1;
         simd::float2 start_local{0.0f, 0.0f};
-        // Selection AABB at mouseDown: drag anchor + world clamp.
+        // Selection UNION AABB at mouseDown: drag anchor + world clamp.
         Bounds3 start_bounds{};
         struct Snap {
             int32_t trn_id = -1;
