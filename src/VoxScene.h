@@ -34,6 +34,10 @@ struct RotMat {
 
     static RotMat FromByte(uint8_t rot);
 
+    // Inverse of FromByte. Only meaningful for well-formed signed
+    // permutations (everything FromByte can produce).
+    uint8_t ToByte() const;
+
     // For signed permutations the transpose is the inverse.
     RotMat Transposed() const;
 

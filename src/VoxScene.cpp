@@ -22,6 +22,19 @@ RotMat RotMat::FromByte(uint8_t rot) {
     return out;
 }
 
+uint8_t RotMat::ToByte() const {
+    int c0 = 0, c1 = 1;
+    int s0 = 1, s1 = 1, s2 = 1;
+    for (int j = 0; j < 3; ++j) {
+        if (m[0][j] != 0) { c0 = j; s0 = m[0][j]; }
+        if (m[1][j] != 0) { c1 = j; s1 = m[1][j]; }
+        if (m[2][j] != 0) {          s2 = m[2][j]; }
+    }
+    return static_cast<uint8_t>(c0 | (c1 << 2) | ((s0 < 0 ? 1 : 0) << 4) |
+                                ((s1 < 0 ? 1 : 0) << 5) |
+                                ((s2 < 0 ? 1 : 0) << 6));
+}
+
 RotMat RotMat::Transposed() const {
     RotMat out;
     for (int i = 0; i < 3; ++i)
