@@ -113,6 +113,32 @@ struct Document {
         BumpGeometry();
     }
 
+    // Bake the active object into `grid` at its world transform and make
+    // sure the edit volume covers it (moving the volume only when it has
+    // to — the default anchor wins ties so ordinary single-model docs
+    // keep the floor-anchored box). Rebuilding the shadow either way
+    // leaves every chunk dirty for a full tex_a re-upload.
+    void RebakeActiveObject() {
+        FlattenObject(scene, active_object, &grid);
+        const Bounds3 b = grid.Bounds();
+        const bool covered =
+            b.empty() || (volume.Contains(b.min_x, b.min_y, b.min_z) &&
+                          volume.Contains(b.max_x, b.max_y, b.max_z));
+        if (!covered) {
+            MoveEditVolume(EditVolume::CenteredOn(b));
+        } else {
+            ReseedVolumeShadow();
+            BumpGeometry();
+        }
+    }
+
+    // Inverse-map the (possibly edited) active-object grid back into its
+    // model + leaf transform. Lossless; renormalizes SIZE when the
+    // object grew.
+    void SyncActiveModel() {
+        SyncModelFromWorldGrid(scene, active_object, grid);
+    }
+
     // Translate the scene so it fits inside `volume`: centered in X/Y,
     // resting on the floor (volume.z0) in Z — the editor's ground-plane
     // convention. Loaded .vox coords are authored arbitrarily
@@ -134,12 +160,26 @@ struct Document {
         if (ox == 0 && oy == 0 && oz == 0) return;
         scene.TranslateAll(Vec3i32{ox, oy, oz});
     }
+
+    // Loaded scenes keep their authored coordinates (round-trip
+    // placement preservation); only scenes escaping the world box get
+    // re-fitted. Call on load, before the first RebakeActiveObject.
+    void EnsureSceneInWorld() {
+        const Bounds3 b = scene.WorldBounds();
+        if (b.empty()) return;
+        const bool in_world =
+            b.min_x >= -kWorldHalf && b.min_y >= -kWorldHalf &&
+            b.min_z >= -kWorldHalf && b.max_x < kWorldHalf &&
+            b.max_y < kWorldHalf && b.max_z < kWorldHalf;
+        if (!in_world) FitSceneToVolume();
+    }
     // Whole-document replacement (load / new / open). Bumps every
     // typed counter so renderers invalidate all categories at once.
     void BumpAll() {
         ++geometry_version;
         ++palette_version;
         ++material_version;
+        ++scene_version;
         ++version;
     }
 };

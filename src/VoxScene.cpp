@@ -287,31 +287,47 @@ Scene Scene::FromSingleGrid(const VoxelGrid& world_grid) {
     return scene;
 }
 
+namespace {
+
+void BakeObjectCells(const Scene& scene, const SceneObject& o,
+                     VoxelGrid* out) {
+    if (!ValidObject(scene, o)) return;
+    const SceneModel& model = scene.models[static_cast<size_t>(o.model_id)];
+    const Vec3i32 h = HalfDims(model);
+    constexpr int32_t cs = static_cast<int32_t>(VoxelGrid::kChunkSize);
+    for (const auto& [coord, chunk] : model.grid.chunks()) {
+        if (chunk->filled_count == 0) continue;
+        for (int32_t lz = 0; lz < cs; ++lz)
+        for (int32_t ly = 0; ly < cs; ++ly)
+        for (int32_t lx = 0; lx < cs; ++lx) {
+            const uint8_t v = chunk->cells[VoxelGrid::LocalIndex(lx, ly, lz)];
+            if (v == 0) continue;
+            const Vec3i32 l{coord.x * cs + lx, coord.y * cs + ly,
+                            coord.z * cs + lz};
+            const Vec3i32 w = o.world_r * (l - h) + o.world_t;
+            out->Set(w.x, w.y, w.z, v);
+        }
+    }
+}
+
+}  // namespace
+
 void FlattenScene(const Scene& scene, int exclude_object, VoxelGrid* out) {
     out->Clear();
     for (size_t i = 0; i < scene.objects.size(); ++i) {
         if (static_cast<int>(i) == exclude_object) continue;
-        const SceneObject& o = scene.objects[i];
-        if (!ValidObject(scene, o)) continue;
-        const SceneModel& model =
-            scene.models[static_cast<size_t>(o.model_id)];
-        const Vec3i32 h = HalfDims(model);
-        constexpr int32_t cs = static_cast<int32_t>(VoxelGrid::kChunkSize);
-        for (const auto& [coord, chunk] : model.grid.chunks()) {
-            if (chunk->filled_count == 0) continue;
-            for (int32_t lz = 0; lz < cs; ++lz)
-            for (int32_t ly = 0; ly < cs; ++ly)
-            for (int32_t lx = 0; lx < cs; ++lx) {
-                const uint8_t v =
-                    chunk->cells[VoxelGrid::LocalIndex(lx, ly, lz)];
-                if (v == 0) continue;
-                const Vec3i32 l{coord.x * cs + lx, coord.y * cs + ly,
-                                coord.z * cs + lz};
-                const Vec3i32 w = o.world_r * (l - h) + o.world_t;
-                out->Set(w.x, w.y, w.z, v);
-            }
-        }
+        BakeObjectCells(scene, scene.objects[i], out);
     }
+}
+
+void FlattenObject(const Scene& scene, int object_index, VoxelGrid* out) {
+    out->Clear();
+    if (object_index < 0 ||
+        static_cast<size_t>(object_index) >= scene.objects.size()) {
+        return;
+    }
+    BakeObjectCells(scene, scene.objects[static_cast<size_t>(object_index)],
+                    out);
 }
 
 void SyncModelFromWorldGrid(Scene& scene, int object_index,

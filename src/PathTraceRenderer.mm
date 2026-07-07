@@ -241,7 +241,12 @@ struct AovResolveUniforms {
     uint64_t _cachedGeometryVersion;
     uint64_t _cachedPaletteVersion;
     uint64_t _cachedMaterialVersion;
+    uint64_t _cachedSceneVersion;
     BOOL _resourcesValid;
+    // Whole-scene world flatten built once per geometry sync; the voxel
+    // buffers pack it and the light scan traverses it (doc->grid only
+    // holds the active object).
+    macvoxel::VoxelGrid _flatGrid;
     simd::int3 _coarseMin;
     simd::int3 _coarseDim;
 
@@ -523,7 +528,7 @@ struct AovResolveUniforms {
     }
 
     macvoxel::PackedChunks packed =
-        macvoxel::PackGridChunks(doc->grid, std::move(lift_cells));
+        macvoxel::PackGridChunks(_flatGrid, std::move(lift_cells));
     if (packed.empty()) {
         _coarseMin = simd::int3{0, 0, 0};
         _coarseDim = simd::int3{0, 0, 0};
@@ -595,7 +600,7 @@ struct AovResolveUniforms {
 // so skipping it on pure render-mode entries is meaningful.
 - (void)rebuildLightBufferFromDocument:(macvoxel::Document*)doc {
     using VG = macvoxel::VoxelGrid;
-    const auto& chunks = doc->grid.chunks();
+    const auto& chunks = _flatGrid.chunks();
     // Next-event estimation light list — one entry per *exposed*
     // emissive face. A face is exposed when the neighbor cell across
     // it is empty (v == 0); faces against any solid neighbor — even
@@ -603,14 +608,13 @@ struct AovResolveUniforms {
     // and are skipped. The light-list size therefore scales with the
     // emissive *surface area*, not the emissive *volume*, which is
     // what fixes the 40³ solid-emissive-cube perf cliff (64k → 9.6k).
-    // `volume_shadow.Get` returns 0 for out-of-bounds reads, which is
-    // exactly what we want — faces on the outer wall of an emissive
-    // region are exposed to space.
+    // Neighbor probes consult the full flatten (the dense shadow only
+    // covers the active object's edit volume).
     std::vector<GpuLight> lights;
     lights.reserve(64);
-    const macvoxel::VoxelVolume& vol = doc->volume_shadow;
-    auto is_empty = [&vol](int32_t x, int32_t y, int32_t z) {
-        return vol.Get(x, y, z) == 0;
+    const macvoxel::VoxelGrid& flat = _flatGrid;
+    auto is_empty = [&flat](int32_t x, int32_t y, int32_t z) {
+        return flat.Get(x, y, z) == 0;
     };
     for (const auto& [coord, chunk] : chunks) {
         if (chunk->filled_count == 0) continue;
@@ -734,7 +738,12 @@ struct AovResolveUniforms {
     macvoxel::Document* doc = &ctx->document;
     BOOL geom_dirty = NO, pal_dirty = NO, mat_dirty = NO;
     if (!_resourcesValid ||
-        _cachedGeometryVersion != doc->geometry_version) {
+        _cachedGeometryVersion != doc->geometry_version ||
+        _cachedSceneVersion != doc->scene_version) {
+        // Fold any active-object edits back into its model, then flatten
+        // the live scene — the PT always renders every object.
+        doc->SyncActiveModel();
+        macvoxel::FlattenScene(doc->scene, -1, &_flatGrid);
         // An active floating selection lives only in tex_lift; read it back
         // and bake it into the grid rebuild so the PT matches the viewport.
         LiftOverlay overlay;
@@ -755,6 +764,7 @@ struct AovResolveUniforms {
         [self rebuildVoxelBuffersFromDocument:doc
                                   liftOverlay:overlay.valid() ? &overlay : nullptr];
         _cachedGeometryVersion = doc->geometry_version;
+        _cachedSceneVersion = doc->scene_version;
         geom_dirty = YES;
     }
     if (!_resourcesValid ||

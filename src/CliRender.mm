@@ -160,9 +160,10 @@ bool ParseArgs(int argc, const char* argv[], Args* out) {
 }
 
 // Match VoxelView's frameCameraToDocument: fit a ~30°/25° orbit camera
-// to the document's grid bounds. Grid → world is (gx, gz, -gy).
+// to the whole scene's world bounds (grid only holds the active
+// object). Grid → world is (gx, gz, -gy).
 void FitCameraToDocument(Camera* camera, const Document& doc) {
-    const Bounds3 b = doc.grid.Bounds();
+    const Bounds3 b = doc.scene.WorldBounds();
     simd::float3 target_world{0.0f, 0.0f, 0.0f};
     int32_t maxExtent = 1;
     if (!b.empty()) {
@@ -206,13 +207,15 @@ int RunCliRender(int argc, const char* argv[]) {
             std::fprintf(stderr, "load failed: %s\n", err.c_str());
             return 1;
         }
-        // No volume fit — headless renders authored coordinates as-is.
-        FlattenScene(doc.scene, -1, &doc.grid);
-        doc.ReseedVolumeShadow();
+        // No world fit — headless renders authored coordinates as-is.
+        // grid holds the active object (index 0); the path tracer
+        // flattens the full scene itself.
+        doc.active_object = 0;
+        doc.RebakeActiveObject();
         doc.path = args.input;
         doc.BumpAll();
 
-        if (doc.grid.empty()) {
+        if (doc.scene.empty()) {
             std::fprintf(stderr, "document has no voxels\n");
             return 1;
         }

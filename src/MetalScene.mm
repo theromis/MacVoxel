@@ -238,7 +238,8 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
 
 - (void)frameCameraToDocument {
     macvoxel::Document *doc = &_ctx->document;
-    const macvoxel::Bounds3 b = doc->grid.Bounds();
+    // Frame the whole scene, not just the active object in `grid`.
+    const macvoxel::Bounds3 b = doc->scene.WorldBounds();
     const int32_t maxExtent = std::max({b.size_x(), b.size_y(), b.size_z()});
     simd::float3 target_world{0.0f, 0.0f, 0.0f};
     if (!b.empty()) {

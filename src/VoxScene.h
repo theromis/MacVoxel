@@ -131,6 +131,10 @@ struct Scene {
 // in object order, last-writer-wins. exclude_object < 0 flattens all.
 void FlattenScene(const Scene& scene, int exclude_object, VoxelGrid* out);
 
+// Rasterize exactly one object into a world-space grid (clears `out`
+// first) — the active-object bake.
+void FlattenObject(const Scene& scene, int object_index, VoxelGrid* out);
+
 // Lossless world→model-local inverse map for one object: every non-empty
 // cell of world_grid is mapped through the object's inverse transform into
 // its model grid. Local bounds are renormalized to a tight [0, dims) box

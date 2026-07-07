@@ -64,9 +64,9 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
         const std::string p = [path UTF8String];
         std::string err;
         if (macvoxel::LoadVoxScene(p, &doc.scene, &doc.palette, &err)) {
-            doc.FitSceneToVolume();
-            macvoxel::FlattenScene(doc.scene, -1, &doc.grid);
-            doc.ReseedVolumeShadow();
+            doc.EnsureSceneInWorld();
+            doc.active_object = 0;
+            doc.RebakeActiveObject();
             return;
         }
         std::fprintf(stderr,
@@ -78,6 +78,8 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     doc.SetCell(0, 0, 0, 1);
     doc.palette.ResetToDefault();
     doc.scene = macvoxel::Scene::FromSingleGrid(doc.grid);
+    doc.active_object = 0;
+    doc.RebakeActiveObject();
 }
 
 - (macvoxel::EditorContext *)context {
@@ -142,9 +144,9 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     }
     fresh.path = path;
     _ctx->document = std::move(fresh);
-    _ctx->document.FitSceneToVolume();
-    macvoxel::FlattenScene(_ctx->document.scene, -1, &_ctx->document.grid);
-    _ctx->document.ReseedVolumeShadow();
+    _ctx->document.EnsureSceneInWorld();
+    _ctx->document.active_object = 0;
+    _ctx->document.RebakeActiveObject();
     _ctx->document.BumpAll();
     _ctx->history.Clear();
     [[NSDocumentController sharedDocumentController]
