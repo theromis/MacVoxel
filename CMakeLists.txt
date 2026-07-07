@@ -37,6 +37,7 @@ set(APP_SOURCES
     src/RaycastRenderer.mm
     src/PathTraceRenderer.mm
     src/SceneOverlayRenderer.mm
+    src/SceneWorldBuffer.mm
     src/VoxelGrid.cpp
     src/VoxelVolume.cpp
     src/VolumeTexture.mm

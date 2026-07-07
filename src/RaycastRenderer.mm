@@ -1,4 +1,5 @@
 #import "RaycastRenderer.h"
+#import "SceneWorldBuffer.h"
 #import "VolumeTexture.h"
 
 #include "EditorContext.h"
@@ -38,7 +39,22 @@ struct Uniforms {
     // override the doc value at the same cell and get the selection
     // tint applied.
     int lift_active;
+    // Scene composite: doc_tex_active gates tex_a sampling (0 when the
+    // world buffer carries every object, i.e. object mode); world_active
+    // gates the sparse coarse+pool world buffers at buffer(2)/buffer(3).
+    int doc_tex_active;
+    int world_active;
     int _pad4;
+    int _pad5;
+    int _pad6;
+    simd::int3 world_coarse_min;
+    simd::int3 world_coarse_dim;
+    // March AABB: union of the edit box and the world buffer's bounds
+    // (== the edit box when the world is inactive).
+    simd::float3 march_min;
+    float _pad7;
+    simd::float3 march_max;
+    float _pad8;
 };
 
 NSString* const kShaderSource = @R"MSL(
@@ -65,7 +81,17 @@ struct Uniforms {
     int      preview_active;
     float    preview_alpha;
     int      lift_active;
+    int      doc_tex_active;
+    int      world_active;
     int      _pad4;
+    int      _pad5;
+    int      _pad6;
+    int3     world_coarse_min;
+    int3     world_coarse_dim;
+    float3   march_min;
+    float    _pad7;
+    float3   march_max;
+    float    _pad8;
 };
 
 // Fullscreen triangle covering NDC [-1, 1]² with one extra-large vertex
@@ -84,7 +110,9 @@ vertex VertOut raycast_vertex(uint vid [[vertex_id]]) {
 constexpr constant int kChunkBits = 4;
 constexpr constant int kChunkSize = 1 << kChunkBits;
 constexpr constant int kChunkMask = kChunkSize - 1;
-constexpr constant int kMaxSteps = 1024;
+// Worst case is a near-diagonal march across the 2048-cell world; chunk
+// skips keep real rays far below this.
+constexpr constant int kMaxSteps = 2048;
 
 float3 ray_to_axis_line(float3 ro, float3 rd, int axis, float a, float b) {
     float2 r_perp;
@@ -160,7 +188,9 @@ fragment float4 raycast_fragment(
     texture3d<uint, access::read> preview_rem [[texture(4)]],
     texture3d<uint, access::read> preview_rem_oracle [[texture(5)]],
     texture3d<uint, access::read> tex_lift [[texture(6)]],
-    texture3d<uint, access::read> lift_oracle [[texture(7)]])
+    texture3d<uint, access::read> lift_oracle [[texture(7)]],
+    constant uint* world_coarse [[buffer(2)]],
+    constant uchar* world_pool [[buffer(3)]])
 {
     // Reconstruct world-space ray from the camera basis (no matrix
     // inverse): unit-scale vectors keep the direction precise even with a
@@ -176,8 +206,8 @@ fragment float4 raycast_fragment(
     float3 ray_dir   = float3(ray_dir_world.x,   -ray_dir_world.z,   ray_dir_world.y);
     float3 cam_origin = ray_origin;
 
-    float3 aabb_min = u.box_min;
-    float3 aabb_max = u.box_max;
+    float3 aabb_min = u.march_min;
+    float3 aabb_max = u.march_max;
     float3 inv_dir = 1.0 / ray_dir;
     float3 t1 = (aabb_min - ray_origin) * inv_dir;
     float3 t2 = (aabb_max - ray_origin) * inv_dir;
@@ -224,21 +254,28 @@ fragment float4 raycast_fragment(
     int3 box_min_i = int3(int(u.box_min.x), int(u.box_min.y), int(u.box_min.z));
     int3 box_max_i = int3(int(u.box_max.x), int(u.box_max.y), int(u.box_max.z));
     int3 box_chunk_min = box_min_i >> int(kChunkBits);
+    int3 march_min_i = int3(int(u.march_min.x), int(u.march_min.y), int(u.march_min.z));
+    int3 march_max_i = int3(int(u.march_max.x), int(u.march_max.y), int(u.march_max.z));
 
     for (int s = 0; s < kMaxSteps; ++s) {
         int3 cell_local = cell - box_min_i;
         bool doc_in = (cell.x >= box_min_i.x && cell.x < box_max_i.x &&
                        cell.y >= box_min_i.y && cell.y < box_max_i.y &&
                        cell.z >= box_min_i.z && cell.z < box_max_i.z);
+        bool march_in = (cell.x >= march_min_i.x && cell.x < march_max_i.x &&
+                         cell.y >= march_min_i.y && cell.y < march_max_i.y &&
+                         cell.z >= march_min_i.z && cell.z < march_max_i.z);
         int3 doc_chunk_c = cell >> int(kChunkBits);
         bool doc_chunk_empty = true;
         uint val_doc = 0u;
         int3 oracle_c = int3(0);
         if (doc_in) {
             oracle_c = doc_chunk_c - box_chunk_min;
-            doc_chunk_empty = (doc_oracle.read(uint3(oracle_c)).r == 0u);
-            if (!doc_chunk_empty) {
-                val_doc = tex_a.read(uint3(cell_local)).r;
+            if (u.doc_tex_active != 0) {
+                doc_chunk_empty = (doc_oracle.read(uint3(oracle_c)).r == 0u);
+                if (!doc_chunk_empty) {
+                    val_doc = tex_a.read(uint3(cell_local)).r;
+                }
             }
         }
         // preview_rem hides doc cells during a Remove stroke.
@@ -267,8 +304,30 @@ fragment float4 raycast_fragment(
                 val_lift = tex_lift.read(uint3(cell_local)).r;
             }
         }
+        // Sparse world buffer (inactive objects / object-mode scene).
+        bool world_chunk_empty = true;
+        uint val_world = 0u;
+        if (u.world_active != 0) {
+            int3 wc = doc_chunk_c - u.world_coarse_min;
+            if (wc.x >= 0 && wc.x < u.world_coarse_dim.x &&
+                wc.y >= 0 && wc.y < u.world_coarse_dim.y &&
+                wc.z >= 0 && wc.z < u.world_coarse_dim.z) {
+                uint slot = world_coarse[
+                    uint(wc.x) +
+                    uint(wc.y) * uint(u.world_coarse_dim.x) +
+                    uint(wc.z) * uint(u.world_coarse_dim.x) *
+                        uint(u.world_coarse_dim.y)];
+                if (slot != 0u) {
+                    world_chunk_empty = false;
+                    int3 lc = cell & kChunkMask;
+                    val_world = uint(world_pool[
+                        (slot - 1u) * 4096u +
+                        uint(lc.x) + uint(lc.y) * 16u + uint(lc.z) * 256u]);
+                }
+            }
+        }
 
-        if (!doc_in) {
+        if (!march_in) {
             float3 bg = float3(0.118, 0.118, 0.18);
             float3 bg_edged = bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max);
             if (ghost_seen) {
@@ -315,7 +374,10 @@ fragment float4 raycast_fragment(
             }
             return float4(shaded, 1.0);
         }
-        if (val_doc != 0u) {
+        // Doc wins overlaps against the world (the active object is the
+        // one being edited); both shade identically otherwise.
+        uint val_solid = val_doc != 0u ? val_doc : val_world;
+        if (val_solid != 0u) {
             float3 grid_normal = float3(0.0);
             if (last_axis == 0) grid_normal.x = -float(step_dir.x);
             else if (last_axis == 1) grid_normal.y = -float(step_dir.y);
@@ -323,7 +385,7 @@ fragment float4 raycast_fragment(
             float3 world_normal = float3(grid_normal.x, grid_normal.z, -grid_normal.y);
             float ndl = max(dot(world_normal, u.light_dir), 0.0);
             float lambert = 0.3 + 0.7 * ndl;
-            float3 base = palette[val_doc].rgb;
+            float3 base = palette[val_solid].rgb;
             float3 shaded = base * lambert;
             if (ghost_seen) {
                 return float4(mix(shaded, ghost_color, u.preview_alpha), 1.0);
@@ -331,9 +393,11 @@ fragment float4 raycast_fragment(
             return float4(shaded, 1.0);
         }
 
-        // No hit at this cell. If doc + preview + lift chunks are all
-        // empty, coarse-skip to the next chunk boundary.
-        if (doc_chunk_empty && preview_chunk_empty && lift_chunk_empty) {
+        // No hit at this cell. If doc + preview + lift + world chunks are
+        // all empty, coarse-skip to the next chunk boundary (one lattice:
+        // the edit-volume origin is 16-aligned).
+        if (doc_chunk_empty && preview_chunk_empty && lift_chunk_empty &&
+            world_chunk_empty) {
             float3 chunk_min_doc = float3(doc_chunk_c) * float(kChunkSize);
             float3 chunk_max_doc = chunk_min_doc + float(kChunkSize);
             float3 exit_face = select(chunk_min_doc, chunk_max_doc, step_dir > 0);
@@ -395,6 +459,9 @@ fragment float4 raycast_fragment(
     id<MTLDevice> _device;
     id<MTLRenderPipelineState> _pipeline;
     id<MTLBuffer> _paletteBuffer;
+    // 4-byte placeholder so the world coarse/pool slots always have a
+    // binding even when the world composite is inactive.
+    id<MTLBuffer> _dummyBuffer;
     uint64_t _cachedPaletteVersion;
     BOOL _cacheValid;
 }
@@ -431,6 +498,11 @@ fragment float4 raycast_fragment(
                 [[error localizedDescription] UTF8String]);
         return nil;
     }
+    const uint32_t zero = 0;
+    _dummyBuffer = [_device newBufferWithBytes:&zero
+                                        length:sizeof(zero)
+                                       options:MTLResourceStorageModeShared];
+    _dummyBuffer.label = @"RaycastWorldDummy";
     return self;
 }
 
@@ -472,7 +544,9 @@ fragment float4 raycast_fragment(
                projection:(simd::float4x4)projection
               cameraWorld:(simd::float3)cameraWorld
                   context:(macvoxel::EditorContext*)ctx
-            volumeTexture:(VolumeTexture*)docVolumeTex {
+            volumeTexture:(VolumeTexture*)docVolumeTex
+              worldBuffer:(SceneWorldBuffer*)worldBuffer
+             docTexActive:(BOOL)docTexActive {
     if (ctx == nullptr || docVolumeTex == nil) return;
     macvoxel::Document* doc = &ctx->document;
     if (_paletteBuffer == nil ||
@@ -510,13 +584,42 @@ fragment float4 raycast_fragment(
     u.preview_active = ctx->preview_active ? 1 : 0;
     u.preview_alpha = ctx->preview_alpha;
     u.lift_active = ctx->selection.lift_active() ? 1 : 0;
-    u._pad4 = 0;
+    u.doc_tex_active = docTexActive ? 1 : 0;
+    u._pad4 = u._pad5 = u._pad6 = 0;
+    u._pad7 = u._pad8 = 0.0f;
+
+    const BOOL world_on = (worldBuffer != nil && worldBuffer.nonEmpty);
+    u.world_active = world_on ? 1 : 0;
+    u.march_min = u.box_min;
+    u.march_max = u.box_max;
+    if (world_on) {
+        u.world_coarse_min = worldBuffer.coarseMin;
+        u.world_coarse_dim = worldBuffer.coarseDim;
+        const macvoxel::Bounds3& wb = worldBuffer.worldBounds;
+        u.march_min = simd::min(
+            u.march_min, simd::float3{static_cast<float>(wb.min_x),
+                                      static_cast<float>(wb.min_y),
+                                      static_cast<float>(wb.min_z)});
+        u.march_max = simd::max(
+            u.march_max, simd::float3{static_cast<float>(wb.max_x + 1),
+                                      static_cast<float>(wb.max_y + 1),
+                                      static_cast<float>(wb.max_z + 1)});
+    } else {
+        u.world_coarse_min = simd::int3{0, 0, 0};
+        u.world_coarse_dim = simd::int3{0, 0, 0};
+    }
 
     [encoder pushDebugGroup:@"Voxels (raycast)"];
     [encoder setRenderPipelineState:_pipeline];
     [encoder setCullMode:MTLCullModeNone];
     [encoder setFragmentBytes:&u length:sizeof(u) atIndex:0];
     [encoder setFragmentBuffer:_paletteBuffer offset:0 atIndex:1];
+    [encoder setFragmentBuffer:world_on ? worldBuffer.coarse : _dummyBuffer
+                        offset:0
+                       atIndex:2];
+    [encoder setFragmentBuffer:world_on ? worldBuffer.pool : _dummyBuffer
+                        offset:0
+                       atIndex:3];
     [encoder setFragmentTexture:docVolumeTex.texture atIndex:0];
     [encoder setFragmentTexture:docVolumeTex.oracleTexture atIndex:1];
     [encoder setFragmentTexture:docVolumeTex.previewTexture atIndex:2];

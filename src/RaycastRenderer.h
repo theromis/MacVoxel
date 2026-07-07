@@ -4,6 +4,7 @@
 
 #include <simd/simd.h>
 
+@class SceneWorldBuffer;
 @class VolumeTexture;
 namespace macvoxel { struct EditorContext; }
 
@@ -26,12 +27,17 @@ namespace macvoxel { struct EditorContext; }
                    colorFormat:(MTLPixelFormat)colorFormat
                    depthFormat:(MTLPixelFormat)depthFormat;
 
+// worldBuffer (nullable) supplies the sparse world composite for
+// inactive objects; docTexActive gates tex_a sampling (NO in object
+// mode, where the world buffer carries every object).
 - (void)encodeWithEncoder:(id<MTLRenderCommandEncoder>)encoder
                      view:(simd::float4x4)view
                projection:(simd::float4x4)projection
               cameraWorld:(simd::float3)cameraWorld
                   context:(macvoxel::EditorContext*)ctx
-            volumeTexture:(VolumeTexture*)docVolumeTex;
+            volumeTexture:(VolumeTexture*)docVolumeTex
+              worldBuffer:(SceneWorldBuffer*)worldBuffer
+             docTexActive:(BOOL)docTexActive;
 
 - (uint32_t)lastChunkCount;
 - (size_t)lastGPUBytes;

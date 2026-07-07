@@ -627,7 +627,9 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
                                  projection:projMat
                                 cameraWorld:_camera.Position()
                                     context:_ctx
-                              volumeTexture:_docVolumeTex];
+                              volumeTexture:_docVolumeTex
+                                worldBuffer:nil
+                               docTexActive:YES];
         if (!_od.empty()) {
             [_overlayRenderer encodeWithEncoder:enc
                                         overlay:_od
