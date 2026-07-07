@@ -935,8 +935,10 @@ constexpr unsigned short kKeyCodeTab         = 48;
             macvoxel::box_select_controller::OnMouseUp(*_ctx);
             break;
         case DragMode::MoveSelect:
-        case DragMode::ObjectMove:
             // No-op — the drag itself was the work; release just ends it.
+            break;
+        case DragMode::ObjectMove:
+            macvoxel::object_mode_controller::OnMouseUp(*_ctx, _interaction);
             break;
         case DragMode::XformHandle:
             macvoxel::xform_handle_controller::OnMouseUp(_interaction);

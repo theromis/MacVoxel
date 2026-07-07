@@ -213,6 +213,45 @@ void SetObjectWorldTransform(Scene& scene, int object_index,
     scene.RebuildObjects();
 }
 
+int FindObjectByTrn(const Scene& scene, int32_t trn_id) {
+    for (size_t i = 0; i < scene.objects.size(); ++i) {
+        if (scene.objects[i].trn_id == trn_id) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+bool ParentGroupOf(const Scene& scene, int32_t trn_id, int32_t* out_group,
+                   int32_t* out_pos) {
+    for (const auto& [id, node] : scene.nodes) {
+        if (node.kind != SceneNode::Kind::Group) continue;
+        for (size_t p = 0; p < node.children.size(); ++p) {
+            if (node.children[p] == trn_id) {
+                *out_group = id;
+                *out_pos = static_cast<int32_t>(p);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int32_t RootGroupId(const Scene& scene) {
+    auto rit = scene.nodes.find(scene.root_id);
+    if (rit == scene.nodes.end()) return -1;
+    if (rit->second.kind == SceneNode::Kind::Group) return rit->second.id;
+    if (rit->second.kind != SceneNode::Kind::Transform) return -1;
+    auto cit = scene.nodes.find(rit->second.child);
+    if (cit == scene.nodes.end() ||
+        cit->second.kind != SceneNode::Kind::Group) {
+        return -1;
+    }
+    return cit->second.id;
+}
+
+int32_t NextNodeId(const Scene& scene) {
+    return scene.nodes.empty() ? 0 : scene.nodes.rbegin()->first + 1;
+}
+
 Bounds3 Scene::WorldBounds() const {
     Bounds3 out;
     bool any = false;

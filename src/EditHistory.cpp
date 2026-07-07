@@ -4,6 +4,7 @@
 #include "Document.h"
 #include "VoxelGrid.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <type_traits>
 
@@ -32,6 +33,91 @@ static_assert(std::is_trivially_copyable_v<EditOp::Change>,
 static_assert(std::is_trivially_copyable_v<CellChange>,
               "CellChange must be trivially copyable for memcpy path");
 
+namespace {
+
+// Apply one SceneChange in the undo (reverse) or redo (forward)
+// direction, keeping the flat object cache, the active-object bake,
+// and the edit volume coherent.
+void ApplySceneChange(Document& doc, const EditOp::SceneChange& sc,
+                      bool undo, Selection* sel) {
+    Scene& scene = doc.scene;
+    using Kind = EditOp::SceneChange::Kind;
+    switch (sc.kind) {
+        case Kind::Transform: {
+            auto it = scene.nodes.find(sc.trn_id);
+            if (it == scene.nodes.end()) return;
+            it->second.t = undo ? sc.old_t : sc.new_t;
+            it->second.rot = undo ? sc.old_r : sc.new_r;
+            scene.RebuildObjects();
+            // The active object's bake is frozen at its old transform.
+            const int active = doc.active_object;
+            if (active >= 0 &&
+                static_cast<size_t>(active) < scene.objects.size() &&
+                scene.objects[static_cast<size_t>(active)].trn_id ==
+                    sc.trn_id) {
+                doc.RebakeActiveObject();
+            }
+            return;
+        }
+        case Kind::AddObject:
+        case Kind::RemoveObject: {
+            const bool link = (sc.kind == Kind::AddObject) != undo;
+            auto git = scene.nodes.find(sc.parent_group);
+            if (git == scene.nodes.end() ||
+                git->second.kind != SceneNode::Kind::Group) {
+                return;
+            }
+            // Structural edits shift object indices; re-locate the
+            // active object by its (stable) leaf id afterwards.
+            const int active = doc.active_object;
+            const int32_t active_trn =
+                (active >= 0 &&
+                 static_cast<size_t>(active) < scene.objects.size())
+                    ? scene.objects[static_cast<size_t>(active)].trn_id
+                    : -1;
+            auto& kids = git->second.children;
+            if (link) {
+                const size_t pos = std::min(
+                    static_cast<size_t>(std::max(sc.child_pos, 0)),
+                    kids.size());
+                kids.insert(kids.begin() + static_cast<ptrdiff_t>(pos),
+                            sc.child_trn);
+            } else {
+                for (size_t p = 0; p < kids.size(); ++p) {
+                    if (kids[p] == sc.child_trn) {
+                        kids.erase(kids.begin() +
+                                   static_cast<ptrdiff_t>(p));
+                        break;
+                    }
+                }
+            }
+            scene.RebuildObjects();
+            if (active_trn >= 0) {
+                const int relocated = FindObjectByTrn(scene, active_trn);
+                if (relocated >= 0) doc.active_object = relocated;
+            }
+            return;
+        }
+        case Kind::ActiveSwitch: {
+            const int32_t target = undo ? sc.old_active : sc.new_active;
+            if (target < 0 ||
+                static_cast<size_t>(target) >= scene.objects.size()) {
+                return;
+            }
+            // Fold any (possibly just-undone) grid edits into the
+            // outgoing model before rebasing onto the incoming one —
+            // the world buffer renders inactive objects from models.
+            doc.SyncActiveModel();
+            doc.active_object = target;
+            doc.RebakeActiveObject();
+            if (sel != nullptr) sel->Clear();
+            return;
+        }
+    }
+}
+
+}  // namespace
+
 void EditHistory::BeginOp() {
     // Starting a new op invalidates redo (a typical undo-stack convention:
     // any new edit branch loses the redo timeline).
@@ -39,6 +125,7 @@ void EditHistory::BeginOp() {
     current_.changes.clear();
     current_.palette_changes.clear();
     current_.material_changes.clear();
+    current_.scene_changes.clear();
     current_.pre_select.reset();
     current_.post_select.reset();
     current_index_.clear();
@@ -140,6 +227,11 @@ void EditHistory::RecordPalette(uint8_t index, Color old_val, Color new_val) {
     current_.palette_changes.push_back({index, old_val, new_val});
 }
 
+void EditHistory::RecordSceneChange(const EditOp::SceneChange& change) {
+    if (!in_op_) return;
+    current_.scene_changes.push_back(change);
+}
+
 void EditHistory::RecordMaterial(uint8_t index, Material old_val,
                                  Material new_val) {
     if (!in_op_ || old_val == new_val) return;
@@ -161,13 +253,15 @@ void EditHistory::CommitOp() {
     palette_slot_index_.fill(-1);
     material_slot_index_.fill(-1);
     if (current_.changes.empty() && current_.palette_changes.empty() &&
-        current_.material_changes.empty()) {
+        current_.material_changes.empty() &&
+        current_.scene_changes.empty()) {
         return;
     }
     undo_.push_back(std::move(current_));
     current_.changes.clear();
     current_.palette_changes.clear();
     current_.material_changes.clear();
+    current_.scene_changes.clear();
     while (undo_.size() > kMaxOps) undo_.pop_front();
 }
 
@@ -176,6 +270,7 @@ void EditHistory::AbandonOp() {
     current_.changes.clear();
     current_.palette_changes.clear();
     current_.material_changes.clear();
+    current_.scene_changes.clear();
     current_index_.clear();
     index_built_ = true;
     palette_slot_index_.fill(-1);
@@ -201,6 +296,13 @@ bool EditHistory::Undo(Document& doc, Selection* sel) {
     if (!op.changes.empty()) doc.BumpGeometry();
     if (!op.palette_changes.empty()) doc.BumpPalette();
     if (!op.material_changes.empty()) doc.BumpMaterials();
+    // Scene changes revert after cells, newest first (an op reads as
+    // "scene mutations, then cells" going forward).
+    for (auto it = op.scene_changes.rbegin(); it != op.scene_changes.rend();
+         ++it) {
+        ApplySceneChange(doc, *it, /*undo=*/true, sel);
+    }
+    if (!op.scene_changes.empty()) doc.BumpScene();
     redo_.push_back(std::move(op));
     while (redo_.size() > kMaxOps) redo_.pop_front();
     return true;
@@ -210,6 +312,10 @@ bool EditHistory::Redo(Document& doc, Selection* sel) {
     if (redo_.empty()) return false;
     EditOp op = std::move(redo_.back());
     redo_.pop_back();
+    for (const auto& sc : op.scene_changes) {
+        ApplySceneChange(doc, sc, /*undo=*/false, sel);
+    }
+    if (!op.scene_changes.empty()) doc.BumpScene();
     for (const auto& c : op.changes) {
         doc.SetCell(c.x, c.y, c.z, c.new_val);
     }
@@ -236,6 +342,7 @@ void EditHistory::Clear() {
     current_.changes.clear();
     current_.palette_changes.clear();
     current_.material_changes.clear();
+    current_.scene_changes.clear();
     current_index_.clear();
     index_built_ = true;
     palette_slot_index_.fill(-1);

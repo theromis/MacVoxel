@@ -143,6 +143,10 @@ struct InteractionState {
         int axis = 0;
         simd::float3 anchor_grid{0.0f, 0.0f, 0.0f};
         Vec3i32 start_world_t{};
+        // Leaf-node snapshot for the mouseUp history record.
+        int32_t trn_id = -1;
+        Vec3i32 start_leaf_t{};
+        uint8_t start_leaf_r = 4;
     } object_move;
 
     // Whether the Generator gizmo is alive (drag-out, idle-with-gizmo,

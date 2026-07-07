@@ -58,13 +58,39 @@ bool SelectedObject(const EditorContext& ctx, int* out_index) {
     return true;
 }
 
+// Record a leaf-transform edit going from (old_t, old_r) to the node's
+// current values as one history op. No-op if nothing changed.
+void RecordTransformOp(EditorContext& ctx, int32_t trn_id,
+                       const Vec3i32& old_t, uint8_t old_r) {
+    auto it = ctx.document.scene.nodes.find(trn_id);
+    if (it == ctx.document.scene.nodes.end()) return;
+    const SceneNode& node = it->second;
+    if (node.t == old_t && node.rot == old_r) return;
+    EditOp::SceneChange sc;
+    sc.kind = EditOp::SceneChange::Kind::Transform;
+    sc.trn_id = trn_id;
+    sc.old_t = old_t;
+    sc.old_r = old_r;
+    sc.new_t = node.t;
+    sc.new_r = node.rot;
+    ctx.history.BeginOp();
+    ctx.history.RecordSceneChange(sc);
+    ctx.history.CommitOp();
+}
+
 void ApplyRotation(EditorContext& ctx, const RotMat& q) {
     int i;
     if (!SelectedObject(ctx, &i)) return;
     Scene& scene = ctx.document.scene;
     const SceneObject& o = scene.objects[static_cast<size_t>(i)];
+    if (o.trn_id < 0) return;
+    const SceneNode& node = scene.nodes.at(o.trn_id);
+    const Vec3i32 old_t = node.t;
+    const uint8_t old_r = node.rot;
+    const int32_t trn_id = o.trn_id;
     SetObjectWorldTransform(scene, i, q * o.world_r, o.world_t);
     ctx.document.BumpScene();
+    RecordTransformOp(ctx, trn_id, old_t, old_r);
 }
 
 }  // namespace
@@ -112,9 +138,14 @@ bool OnMouseDown(EditorContext& ctx, InteractionState& state,
         return false;
     }
     const SceneObject& o = scene.objects[static_cast<size_t>(hit)];
+    if (o.trn_id < 0) return false;  // bare shape: selectable, not movable
+    const SceneNode& node = scene.nodes.at(o.trn_id);
     state.object_move.axis = axis;
     state.object_move.anchor_grid = anchor;
     state.object_move.start_world_t = o.world_t;
+    state.object_move.trn_id = o.trn_id;
+    state.object_move.start_leaf_t = node.t;
+    state.object_move.start_leaf_r = node.rot;
     state.drag_mode = DragMode::ObjectMove;
     return true;
 }
@@ -160,6 +191,12 @@ void OnMouseDragged(EditorContext& ctx, InteractionState& state,
     }
     SetObjectWorldTransform(scene, i, o.world_r, target);
     ctx.document.BumpScene();
+}
+
+void OnMouseUp(EditorContext& ctx, InteractionState& state) {
+    const auto& m = state.object_move;
+    if (m.trn_id < 0) return;
+    RecordTransformOp(ctx, m.trn_id, m.start_leaf_t, m.start_leaf_r);
 }
 
 void RotateSelected(EditorContext& ctx, int axis, bool ccw) {

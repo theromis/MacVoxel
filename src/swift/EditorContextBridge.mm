@@ -218,10 +218,29 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
         return;
     }
     _ctx->history.Undo(doc, &_ctx->selection);
+    [self reconcileAfterHistory];
 }
 
 - (void)redo {
     _ctx->history.Redo(_ctx->document, &_ctx->selection);
+    [self reconcileAfterHistory];
+}
+
+// History can restructure the scene (or, in Scene mode, change cells
+// that the world buffer renders from the models): fold grid edits when
+// models are the truth, and drop a selection index that no longer
+// points at a real object.
+- (void)reconcileAfterHistory {
+    macvoxel::Document &doc = _ctx->document;
+    if (_ctx->editor_mode == macvoxel::EditorMode::Scene) {
+        doc.SyncActiveModel();
+        doc.BumpScene();
+    }
+    if (_ctx->selected_object >= 0 &&
+        static_cast<size_t>(_ctx->selected_object) >=
+            doc.scene.objects.size()) {
+        _ctx->selected_object = -1;
+    }
 }
 
 // ---------------------------------------------------------------------------

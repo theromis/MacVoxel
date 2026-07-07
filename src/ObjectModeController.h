@@ -21,6 +21,9 @@ bool OnMouseDown(EditorContext& ctx, InteractionState& state,
 void OnMouseDragged(EditorContext& ctx, InteractionState& state,
                     const ViewContext& vc, const MouseEvent& e);
 
+// Records the drag's net transform change as one history op.
+void OnMouseUp(EditorContext& ctx, InteractionState& state);
+
 // Rotate the selected object 90° about a world axis (0=X 1=Y 2=Z),
 // or mirror it across that axis. Pivot = the object's center
 // translation; translation unchanged.

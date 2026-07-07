@@ -3,6 +3,7 @@
 #include "Material.h"
 #include "Palette.h"
 #include "Selection.h"
+#include "VoxScene.h"
 
 #include <array>
 #include <cstddef>
@@ -43,9 +44,41 @@ struct EditOp {
         Material old_val;
         Material new_val;
     };
+    // Scene-graph mutation. Cheap by construction: unlinked nodes stay
+    // resident in scene.nodes (the writer only emits reachable ones), so
+    // Add/Remove are pure child-list link records — no voxel snapshots.
+    //
+    //   Transform:    leaf nTRN t/rot rewrite, addressed by trn_id
+    //                 (stable across structural edits, unlike indices).
+    //   Add/Remove:   (un)link `child_trn` at `child_pos` in group
+    //                 `parent_group`'s child list.
+    //   ActiveSwitch: active-object change. Recorded on EVERY
+    //                 activation — undoing past a switch re-activates
+    //                 the prior object before its cell ops replay, which
+    //                 is what keeps cross-object undo correct.
+    struct SceneChange {
+        enum class Kind : uint8_t {
+            Transform,
+            AddObject,
+            RemoveObject,
+            ActiveSwitch,
+        };
+        Kind kind = Kind::Transform;
+        // Transform:
+        int32_t trn_id = -1;
+        Vec3i32 old_t{}, new_t{};
+        uint8_t old_r = 4, new_r = 4;
+        // Add / Remove:
+        int32_t parent_group = -1;
+        int32_t child_pos = -1;
+        int32_t child_trn = -1;
+        // ActiveSwitch (object indices at op time):
+        int32_t old_active = -1, new_active = -1;
+    };
     std::vector<Change> changes;
     std::vector<PaletteChange> palette_changes;
     std::vector<MaterialChange> material_changes;
+    std::vector<SceneChange> scene_changes;
     // Optional selection snapshots, set by ops whose meaning includes
     // a selection state change (today: only the move-selection drag).
     // When present, Undo / Redo also restore the captured selection so
@@ -72,6 +105,9 @@ public:
     void RecordBatch(const CellChange* changes, size_t count);
     void RecordPalette(uint8_t index, Color old_val, Color new_val);
     void RecordMaterial(uint8_t index, Material old_val, Material new_val);
+    // Append a scene-graph mutation (no coalescing — scene ops are
+    // few and order matters).
+    void RecordSceneChange(const EditOp::SceneChange& change);
     // Attach pre/post selection snapshots to the in-progress op. Called
     // by selection-aware ops (move, eventually rotate / paste / cut)
     // so Undo / Redo can restore the marquee alongside the voxels.

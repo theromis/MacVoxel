@@ -153,4 +153,21 @@ bool ObjectWorldBounds(const Scene& scene, int object_index, Bounds3* out);
 void SetObjectWorldTransform(Scene& scene, int object_index,
                              const RotMat& world_r, const Vec3i32& world_t);
 
+// First object whose leaf nTRN is `trn_id`, or -1. (Diamond-instanced
+// leaves alias; the first DFS occurrence wins.)
+int FindObjectByTrn(const Scene& scene, int32_t trn_id);
+
+// Locate the group whose child list links `trn_id`; false when the
+// node is unreachable that way (e.g. the root transform).
+bool ParentGroupOf(const Scene& scene, int32_t trn_id,
+                   int32_t* out_group, int32_t* out_pos);
+
+// The group new objects append into: the root transform's child when
+// it is a group, else -1.
+int32_t RootGroupId(const Scene& scene);
+
+// One past the largest node id — unlinked (undo-resident) nodes stay
+// in the map, so ids are never reused.
+int32_t NextNodeId(const Scene& scene);
+
 }  // namespace macvoxel
