@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <array>
-#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -108,24 +107,6 @@ struct ParsedModel {
     std::vector<uint8_t> voxels;  // 4 bytes per voxel: x, y, z, color
 };
 
-enum class NodeKind { Transform, Group, Shape };
-
-struct ParsedNode {
-    NodeKind kind = NodeKind::Transform;
-    int32_t id = -1;
-    int32_t child = -1;
-    Vec3i32 translation{};
-    uint8_t rotation = 4;
-    std::vector<int32_t> children;
-    std::vector<int32_t> model_ids;
-};
-
-struct PlacedShape {
-    int32_t model_id = 0;
-    Vec3i32 translation{};
-    RotMat rotation{};
-};
-
 // Parse a MagicaVoxel MATL property dict into our Material struct.
 //
 // Mapping notes:
@@ -173,35 +154,38 @@ Material ParseMatlDict(const std::map<std::string, std::string>& d) {
     return m;
 }
 
-bool ParseTransformNode(Reader& r, ParsedNode* node) {
-    node->kind = NodeKind::Transform;
+bool ParseTransformNode(Reader& r, SceneNode* node) {
+    node->kind = SceneNode::Kind::Transform;
     if (!r.ReadI32(&node->id)) return false;
-    std::map<std::string, std::string> attrs;
-    if (!r.ReadDict(&attrs)) return false;
+    if (!r.ReadDict(&node->attrs)) return false;
     if (!r.ReadI32(&node->child)) return false;
-    int32_t reserved = 0, layer = 0, num_frames = 0;
-    if (!r.ReadI32(&reserved) || !r.ReadI32(&layer) || !r.ReadI32(&num_frames)) return false;
+    int32_t reserved = 0, num_frames = 0;
+    if (!r.ReadI32(&reserved) || !r.ReadI32(&node->layer_id) ||
+        !r.ReadI32(&num_frames)) {
+        return false;
+    }
     for (int32_t i = 0; i < num_frames; ++i) {
-        std::map<std::string, std::string> frame;
+        AttrDict frame;
         if (!r.ReadDict(&frame)) return false;
         if (i == 0) {
             auto it = frame.find("_t");
-            if (it != frame.end()) ParseTranslation(it->second, &node->translation);
+            if (it != frame.end()) ParseTranslation(it->second, &node->t);
             it = frame.find("_r");
             if (it != frame.end()) {
-                node->rotation =
+                node->rot =
                     static_cast<uint8_t>(std::strtol(it->second.c_str(), nullptr, 10));
             }
         }
+        node->frames.push_back(std::move(frame));
     }
+    if (node->frames.empty()) node->frames.emplace_back();
     return true;
 }
 
-bool ParseGroupNode(Reader& r, ParsedNode* node) {
-    node->kind = NodeKind::Group;
+bool ParseGroupNode(Reader& r, SceneNode* node) {
+    node->kind = SceneNode::Kind::Group;
     if (!r.ReadI32(&node->id)) return false;
-    std::map<std::string, std::string> attrs;
-    if (!r.ReadDict(&attrs)) return false;
+    if (!r.ReadDict(&node->attrs)) return false;
     int32_t n = 0;
     if (!r.ReadI32(&n) || n < 0) return false;
     node->children.resize(static_cast<size_t>(n));
@@ -211,52 +195,25 @@ bool ParseGroupNode(Reader& r, ParsedNode* node) {
     return true;
 }
 
-bool ParseShapeNode(Reader& r, ParsedNode* node) {
-    node->kind = NodeKind::Shape;
+bool ParseShapeNode(Reader& r, SceneNode* node) {
+    node->kind = SceneNode::Kind::Shape;
     if (!r.ReadI32(&node->id)) return false;
-    std::map<std::string, std::string> attrs;
-    if (!r.ReadDict(&attrs)) return false;
+    if (!r.ReadDict(&node->attrs)) return false;
     int32_t num_models = 0;
     if (!r.ReadI32(&num_models) || num_models < 0) return false;
     for (int32_t i = 0; i < num_models; ++i) {
         int32_t model_id = 0;
-        std::map<std::string, std::string> model_attrs;
+        AttrDict model_attrs;
         if (!r.ReadI32(&model_id) || !r.ReadDict(&model_attrs)) return false;
-        node->model_ids.push_back(model_id);
+        node->models.emplace_back(model_id, std::move(model_attrs));
     }
     return true;
 }
 
-void WalkNode(const std::map<int32_t, ParsedNode>& nodes,
-              int32_t node_id,
-              const Vec3i32& accum_t,
-              const RotMat& accum_r,
-              std::vector<PlacedShape>* out) {
-    auto it = nodes.find(node_id);
-    if (it == nodes.end()) return;
-    const ParsedNode& n = it->second;
-    switch (n.kind) {
-        case NodeKind::Transform: {
-            const Vec3i32 t = accum_t + accum_r * n.translation;
-            const RotMat r = accum_r * RotMat::FromByte(n.rotation);
-            WalkNode(nodes, n.child, t, r, out);
-            break;
-        }
-        case NodeKind::Group: {
-            for (int32_t c : n.children) WalkNode(nodes, c, accum_t, accum_r, out);
-            break;
-        }
-        case NodeKind::Shape: {
-            for (int32_t mid : n.model_ids) {
-                PlacedShape ps;
-                ps.model_id = mid;
-                ps.translation = accum_t;
-                ps.rotation = accum_r;
-                out->push_back(ps);
-            }
-            break;
-        }
-    }
+bool ParseLayerChunk(Reader& r, SceneLayer* layer) {
+    if (!r.ReadI32(&layer->id)) return false;
+    if (!r.ReadDict(&layer->attrs)) return false;
+    return true;  // trailing reserved id (-1) skipped with the chunk
 }
 
 }  // namespace
@@ -265,10 +222,10 @@ void WalkNode(const std::map<int32_t, ParsedNode>& nodes,
 // Load
 // ---------------------------------------------------------------------------
 
-bool LoadVox(const std::string& path,
-             VoxelGrid* out_grid,
-             Palette* out_palette,
-             std::string* out_error) {
+bool LoadVoxScene(const std::string& path,
+                  Scene* out_scene,
+                  Palette* out_palette,
+                  std::string* out_error) {
     std::vector<uint8_t> bytes;
     if (!ReadFile(path, &bytes)) {
         SetError(out_error, "could not read file");
@@ -311,7 +268,7 @@ bool LoadVox(const std::string& path,
     Palette palette;
     bool rgba_seen = false;
 
-    std::map<int32_t, ParsedNode> nodes;
+    Scene scene;
     std::map<int32_t, Material> materials;
 
     while (!children.Eof()) {
@@ -377,16 +334,20 @@ bool LoadVox(const std::string& path,
             rgba_seen = true;
         } else if (ChunkIdEquals(id, "nTRN")) {
             Reader cr(content_ptr, content_size);
-            ParsedNode n;
-            if (ParseTransformNode(cr, &n)) nodes[n.id] = std::move(n);
+            SceneNode n;
+            if (ParseTransformNode(cr, &n)) scene.nodes[n.id] = std::move(n);
         } else if (ChunkIdEquals(id, "nGRP")) {
             Reader cr(content_ptr, content_size);
-            ParsedNode n;
-            if (ParseGroupNode(cr, &n)) nodes[n.id] = std::move(n);
+            SceneNode n;
+            if (ParseGroupNode(cr, &n)) scene.nodes[n.id] = std::move(n);
         } else if (ChunkIdEquals(id, "nSHP")) {
             Reader cr(content_ptr, content_size);
-            ParsedNode n;
-            if (ParseShapeNode(cr, &n)) nodes[n.id] = std::move(n);
+            SceneNode n;
+            if (ParseShapeNode(cr, &n)) scene.nodes[n.id] = std::move(n);
+        } else if (ChunkIdEquals(id, "LAYR")) {
+            Reader cr(content_ptr, content_size);
+            SceneLayer layer;
+            if (ParseLayerChunk(cr, &layer)) scene.layers.push_back(std::move(layer));
         } else if (ChunkIdEquals(id, "MATL")) {
             Reader cr(content_ptr, content_size);
             int32_t mid = 0;
@@ -394,10 +355,9 @@ bool LoadVox(const std::string& path,
             if (cr.ReadI32(&mid) && cr.ReadDict(&attrs)) {
                 materials[mid] = ParseMatlDict(attrs);
             }
-        } else if (ChunkIdEquals(id, "PACK") || ChunkIdEquals(id, "LAYR") ||
-                   ChunkIdEquals(id, "rOBJ") || ChunkIdEquals(id, "rCAM") ||
-                   ChunkIdEquals(id, "NOTE") || ChunkIdEquals(id, "IMAP") ||
-                   ChunkIdEquals(id, "MATT")) {
+        } else if (ChunkIdEquals(id, "PACK") || ChunkIdEquals(id, "rOBJ") ||
+                   ChunkIdEquals(id, "rCAM") || ChunkIdEquals(id, "NOTE") ||
+                   ChunkIdEquals(id, "IMAP") || ChunkIdEquals(id, "MATT")) {
             // Recognised but not relevant for geometry/palette.
         } else {
             fprintf(stderr,
@@ -416,61 +376,79 @@ bool LoadVox(const std::string& path,
         return false;
     }
 
-    std::vector<PlacedShape> placements;
-    if (!nodes.empty()) {
-        int32_t root = nodes.count(0) ? 0 : nodes.begin()->first;
-        WalkNode(nodes, root, Vec3i32{}, RotMat{}, &placements);
-    }
-    if (placements.empty()) {
-        // No scene graph: place model 0 corner-at-origin, which we get by
-        // pre-loading the rasterizer's center pivot.
-        PlacedShape ps;
-        ps.model_id = 0;
-        const ModelDims d0 = models[0].dims;
-        ps.translation = Vec3i32{static_cast<int32_t>(d0.x / 2),
-                                 static_cast<int32_t>(d0.y / 2),
-                                 static_cast<int32_t>(d0.z / 2)};
-        placements.push_back(ps);
-    }
-
-    // Rasterize directly into a fresh chunked grid. Chunks materialize on
-    // demand; empty regions cost nothing.
-    VoxelGrid grid;
-    int32_t min_w = INT_MAX, max_w = INT_MIN;
-    for (const PlacedShape& ps : placements) {
-        if (ps.model_id < 0 || static_cast<size_t>(ps.model_id) >= models.size()) continue;
-        const ParsedModel& m = models[static_cast<size_t>(ps.model_id)];
-        const int hx = static_cast<int>(m.dims.x) / 2;
-        const int hy = static_cast<int>(m.dims.y) / 2;
-        const int hz = static_cast<int>(m.dims.z) / 2;
+    // Convert SIZE/XYZI pairs into model-local grids.
+    for (const ParsedModel& m : models) {
+        SceneModel sm;
+        sm.dims[0] = static_cast<int32_t>(m.dims.x);
+        sm.dims[1] = static_cast<int32_t>(m.dims.y);
+        sm.dims[2] = static_cast<int32_t>(m.dims.z);
         const size_t voxel_count = m.voxels.size() / 4;
         for (size_t i = 0; i < voxel_count; ++i) {
-            const int lx = static_cast<int>(m.voxels[i * 4 + 0]) - hx;
-            const int ly = static_cast<int>(m.voxels[i * 4 + 1]) - hy;
-            const int lz = static_cast<int>(m.voxels[i * 4 + 2]) - hz;
-            const uint8_t ci = m.voxels[i * 4 + 3];
-            const Vec3i32 rotated = ps.rotation * Vec3i32{lx, ly, lz};
-            const int wx = rotated.x + ps.translation.x;
-            const int wy = rotated.y + ps.translation.y;
-            const int wz = rotated.z + ps.translation.z;
-            min_w = std::min({min_w, wx, wy, wz});
-            max_w = std::max({max_w, wx, wy, wz});
-            grid.Set(wx, wy, wz, ci);
+            sm.grid.Set(m.voxels[i * 4 + 0], m.voxels[i * 4 + 1],
+                        m.voxels[i * 4 + 2], m.voxels[i * 4 + 3]);
         }
+        scene.models.push_back(std::move(sm));
+    }
+
+    if (!scene.nodes.empty()) {
+        scene.root_id =
+            scene.nodes.count(0) ? 0 : scene.nodes.begin()->first;
+        scene.RebuildObjects();
+    }
+    if (scene.objects.empty()) {
+        // No (or broken) scene graph: synthesize the canonical skeleton
+        // around model 0, corner-at-origin — the leaf translation equals
+        // the center pivot the flatten subtracts, matching the legacy
+        // fallback placement exactly. Extra graphless models stay
+        // unreferenced (the legacy loader dropped them too).
+        scene.nodes.clear();
+        const SceneModel& m0 = scene.models[0];
+        const Vec3i32 h{m0.dims[0] / 2, m0.dims[1] / 2, m0.dims[2] / 2};
+
+        SceneNode root;
+        root.kind = SceneNode::Kind::Transform;
+        root.id = 0;
+        root.child = 1;
+        root.frames.emplace_back();
+        SceneNode group;
+        group.kind = SceneNode::Kind::Group;
+        group.id = 1;
+        group.children.push_back(2);
+        SceneNode leaf;
+        leaf.kind = SceneNode::Kind::Transform;
+        leaf.id = 2;
+        leaf.child = 3;
+        leaf.frames.emplace_back();
+        leaf.t = h;
+        SceneNode shape;
+        shape.kind = SceneNode::Kind::Shape;
+        shape.id = 3;
+        shape.models.emplace_back(0, AttrDict{});
+
+        scene.nodes[0] = std::move(root);
+        scene.nodes[1] = std::move(group);
+        scene.nodes[2] = std::move(leaf);
+        scene.nodes[3] = std::move(shape);
+        scene.root_id = 0;
+        scene.RebuildObjects();
     }
 
     // Render-side limitation: the per-instance attribute is int16. Refuse
     // scenes that would overflow it. Kept loose (kInt16RenderCap < INT16_MAX)
     // so the renderer never sees a corner case.
-    if (grid.FilledCount() > 0 &&
-        (min_w < -kInt16RenderCap || max_w > kInt16RenderCap)) {
-        char buf[160];
-        std::snprintf(buf, sizeof(buf),
-                      "scene exceeds renderer's int16 coordinate range "
-                      "(world coords span [%d, %d])",
-                      min_w, max_w);
-        SetError(out_error, buf);
-        return false;
+    const Bounds3 wb = scene.WorldBounds();
+    if (!wb.empty()) {
+        const int32_t min_w = std::min({wb.min_x, wb.min_y, wb.min_z});
+        const int32_t max_w = std::max({wb.max_x, wb.max_y, wb.max_z});
+        if (min_w < -kInt16RenderCap || max_w > kInt16RenderCap) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "scene exceeds renderer's int16 coordinate range "
+                          "(world coords span [%d, %d])",
+                          min_w, max_w);
+            SetError(out_error, buf);
+            return false;
+        }
     }
 
     if (!rgba_seen) palette.ResetToDefault();
@@ -482,9 +460,23 @@ bool LoadVox(const std::string& path,
         }
     }
 
-    *out_grid = std::move(grid);
+    *out_scene = std::move(scene);
     *out_palette = palette;
     (void)version;
+    return true;
+}
+
+bool LoadVox(const std::string& path,
+             VoxelGrid* out_grid,
+             Palette* out_palette,
+             std::string* out_error) {
+    Scene scene;
+    Palette palette;
+    if (!LoadVoxScene(path, &scene, &palette, out_error)) return false;
+    VoxelGrid grid;
+    FlattenScene(scene, -1, &grid);
+    *out_grid = std::move(grid);
+    *out_palette = palette;
     return true;
 }
 
