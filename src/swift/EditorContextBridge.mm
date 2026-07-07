@@ -166,18 +166,10 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     macvoxel::Document &doc = _ctx->document;
     const std::string path = [[url path] UTF8String];
     std::string err;
-    // Single-object scenes save through the scene-graph writer (the
-    // edited grid is inverse-mapped back into the model first).
-    // Multi-object docs keep the legacy merged-model save until editing
-    // binds to a single active object.
-    bool ok;
-    if (doc.scene.objects.size() == 1) {
-        macvoxel::SyncModelFromWorldGrid(doc.scene, 0, doc.grid);
-        ok = macvoxel::SaveVoxScene(path, doc.scene, doc.palette, &err);
-    } else {
-        ok = macvoxel::SaveVox(path, doc.grid, doc.palette, &err);
-    }
-    if (!ok) {
+    // Fold active-object edits back into its model, then write the
+    // full scene graph.
+    doc.SyncActiveModel();
+    if (!macvoxel::SaveVoxScene(path, doc.scene, doc.palette, &err)) {
         if (error) {
             NSString *msg = [NSString stringWithUTF8String:err.c_str()];
             *error = [NSError errorWithDomain:@"MacVoxel" code:4

@@ -7,6 +7,7 @@
 #import "PathTraceRenderer.h"
 #import "RaycastRenderer.h"
 #import "SceneOverlayRenderer.h"
+#import "SceneWorldBuffer.h"
 #import "ShapeEngine.h"
 #import "VolumeTexture.h"
 
@@ -78,6 +79,13 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
     // access::read_write, the rasterizer fragment shader reads.
     VolumeTexture *_docVolumeTex;
     uint64_t _docVolumeTexCachedVersion;
+    // Sparse composite of every object except the active one. Rebuilt
+    // when the scene graph or the active index changes — never per
+    // frame, and never during a voxel stroke (strokes only bump
+    // geometry_version).
+    SceneWorldBuffer *_worldBuffer;
+    uint64_t _worldBufferSceneVersion;
+    int32_t _worldBufferActiveObject;
 
     macvoxel::Camera _camera;
     NSTrackingArea *_trackingArea;
@@ -206,6 +214,10 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
     if (_docVolumeTex == nil) return nil;
     _docVolumeTexCachedVersion = 0;
 
+    _worldBuffer = [[SceneWorldBuffer alloc] initWithDevice:device];
+    _worldBufferSceneVersion = 0;
+    _worldBufferActiveObject = -1;
+
     _editEngine = macvoxel::MakeEditEngine(_brushEngine, _shapeEngine,
                                            _generatorEngine, _mutatorEngine,
                                            _liftEngine,
@@ -262,6 +274,8 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
     // already mark every chunk dirty; resetting the cached version
     // ensures the sync path actually fires.
     _docVolumeTexCachedVersion = 0;
+    _worldBufferSceneVersion = UINT64_MAX;
+    _worldBufferActiveObject = -1;
 }
 
 - (BOOL)exportRenderToURL:(NSURL *)url error:(NSError **)error {
@@ -616,6 +630,13 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
             [_docVolumeTex syncFromVolume:_ctx->document.volume_shadow];
             _docVolumeTexCachedVersion = _ctx->document.geometry_version;
         }
+        if (_worldBufferSceneVersion != _ctx->document.scene_version ||
+            _worldBufferActiveObject != _ctx->document.active_object) {
+            [_worldBuffer rebuildFromScene:_ctx->document.scene
+                                   exclude:_ctx->document.active_object];
+            _worldBufferSceneVersion = _ctx->document.scene_version;
+            _worldBufferActiveObject = _ctx->document.active_object;
+        }
         // The lift's GPU state (tex_lift) is mutated directly by lift
         // kernels — no CPU mirror to sync. The bbox outline drawn by
         // SelectionOverlay reads sel.bounds() each frame.
@@ -629,7 +650,7 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
                                 cameraWorld:_camera.Position()
                                     context:_ctx
                               volumeTexture:_docVolumeTex
-                                worldBuffer:nil
+                                worldBuffer:_worldBuffer
                                docTexActive:YES];
         if (!_od.empty()) {
             [_overlayRenderer encodeWithEncoder:enc
