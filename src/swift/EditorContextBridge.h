@@ -184,6 +184,8 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 // Deferred to the next frame (lift/gizmo commit preconditions).
 - (void)requestActivateObjectAtIndex:(NSInteger)index;
 - (void)deleteSelectedObject;
+// New empty 40³ object under the root group; selects it.
+- (void)newEmptyObject;
 - (void)renameObjectAtIndex:(NSInteger)index name:(nonnull NSString *)name;
 // Selected object's dims box as WORLD-axis extents (what the size
 // fields show for a rotated object). Zero when there's no resizable

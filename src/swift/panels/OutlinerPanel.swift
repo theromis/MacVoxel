@@ -28,6 +28,7 @@ struct OutlinerPanel: View {
             }
 
             HStack(spacing: 6) {
+                Button("New") { state.newEmptyObject() }
                 Button("Duplicate") { state.duplicateObject() }
                     .disabled(!state.canDuplicateObject)
                 Button("Delete") { state.deleteSelectedObject() }

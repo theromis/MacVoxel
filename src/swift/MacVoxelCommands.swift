@@ -71,6 +71,8 @@ struct MacVoxelCommands: Commands {
                 .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(!state.canCutOrCopyOrDelete)
             Divider()
+            Button("New Object") { state.newEmptyObject() }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
             Button("Duplicate") { state.duplicateObject() }
                 .keyboardShortcut("d", modifiers: .command)
                 .disabled(!state.canDuplicateObject)

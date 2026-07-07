@@ -24,6 +24,11 @@ void ActivateObject(EditorContext& ctx, int32_t index);
 // AddObject. Returns the new object index or -1.
 int DuplicateObject(EditorContext& ctx);
 
+// Append a new empty 40³ object under the root group, resting on the
+// floor at the origin (+8x nudge when an object already sits at that
+// exact translation), and select it. Returns the new index or -1.
+int NewEmptyObject(EditorContext& ctx);
+
 // Unlink the selected object (nodes stay resident for undo; the writer
 // GCs unreachable models at save). Deleting the active object switches
 // to a survivor first — both land in ONE op. False when it's the last

@@ -474,6 +474,10 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     macvoxel::scene_ops::DeleteObject(*_ctx);
 }
 
+- (void)newEmptyObject {
+    macvoxel::scene_ops::NewEmptyObject(*_ctx);
+}
+
 - (BOOL)canResizeSelectedObject {
     return macvoxel::scene_ops::CanResizeSelectedObject(*_ctx);
 }

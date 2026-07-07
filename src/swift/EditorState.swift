@@ -259,6 +259,7 @@ final class EditorState {
     func deleteSelection() { bridge.deleteSelection(); afterMutation(reframeCamera: false) }
     func deselect()        { bridge.deselect();        afterMutation(reframeCamera: false) }
     func duplicateObject() { bridge.duplicateObject(); afterMutation(reframeCamera: false) }
+    func newEmptyObject()  { bridge.newEmptyObject();  afterMutation(reframeCamera: false) }
 
     // ---- Document stats (panel-facing) ----
     //

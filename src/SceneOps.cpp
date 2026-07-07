@@ -141,6 +141,53 @@ int DuplicateObject(EditorContext& ctx) {
                       parent, pos + 1);
 }
 
+int NewEmptyObject(EditorContext& ctx) {
+    Document& doc = ctx.document;
+    Scene& scene = doc.scene;
+    const int32_t parent = RootGroupId(scene);
+    if (parent < 0) return -1;
+
+    constexpr int32_t kNewObjectDim = 40;  // matches the default doc cube
+    SceneModel model;
+    model.dims[0] = model.dims[1] = model.dims[2] = kNewObjectDim;
+
+    SceneNode trn;
+    trn.kind = SceneNode::Kind::Transform;
+    trn.frames.emplace_back();
+    trn.id = NextNodeId(scene);
+    trn.attrs["_name"] =
+        "Object " + std::to_string(scene.objects.size() + 1);
+    SceneNode shp;
+    shp.kind = SceneNode::Kind::Shape;
+    shp.id = trn.id + 1;
+    shp.models.emplace_back(static_cast<int32_t>(scene.models.size()),
+                            AttrDict{});
+    trn.child = shp.id;
+
+    // Rest on the floor at the origin, nudged +8x off exact
+    // translation collisions (PasteObject's rule).
+    Vec3i32 target_t{0, 0, kNewObjectDim / 2};
+    bool collides = true;
+    while (collides) {
+        collides = false;
+        for (const SceneObject& o : scene.objects) {
+            if (o.world_t == target_t) {
+                target_t.x += 8;
+                collides = true;
+                break;
+            }
+        }
+    }
+
+    const int new_index = InsertLeaf(
+        ctx, std::move(model), std::move(trn), std::move(shp), parent,
+        static_cast<int32_t>(scene.nodes.at(parent).children.size()));
+    if (new_index < 0) return -1;
+    SetObjectWorldTransform(scene, new_index, RotMat{}, target_t);
+    doc.BumpScene();
+    return new_index;
+}
+
 bool DeleteObject(EditorContext& ctx) {
     int i;
     if (!ValidSelection(ctx, &i)) return false;
