@@ -29,11 +29,22 @@ on MagicaVoxel:
   Square/Box), **Face** (flood), **Generator** (gizmo-bounded
   primitives), **Mutator** (cursor-AOE that reads existing state and
   emits a delta — Foliage v1).
+- The .vox **scene graph is resident** and there are two top-level
+  editor modes: **Model** (voxel editing inside the active object —
+  everything above) and **Scene** ("object mode": pick/move/rotate/
+  flip/duplicate/delete whole objects). Tab toggles. See "Scene graph
+  & object mode".
 
-The full design lives in the plan at `/Users/pstarr/.claude/plans/
-okay-despite-some-reasonable-sequential-torvalds.md`.
+The full design lives in the plans at `/Users/pstarr/.claude/plans/
+okay-despite-some-reasonable-sequential-torvalds.md` (tools) and
+`/Users/pstarr/.claude/plans/cryptic-pondering-lobster.md` (object
+mode).
 
 Deferred polish, not yet implemented:
+
+- Object-mode UX pass (Paul: "works, needs polish"). Also deferred:
+  group create/ungroup ops, instancing creation, layers UI, _hidden
+  toggle, animation-frame awareness (all preserved on round-trip).
 
 - Brush-size quick-keys (`[` / `]`). Tool/mode letter keys
   (V / L / B / F / U / M / T / R / G) are wired in `MetalScene` keyDown
@@ -51,23 +62,36 @@ name says. Read the file for the rest.
 
 ```
 src/
-├── main.mm                Tiny entry: argv `render` → CliRender, else
-│                          → Swift App.main().
+├── main.mm                Tiny entry: argv `render` → CliRender,
+│                          `voxrt` → VoxRoundTrip, else Swift App.main().
 ├── CliRender.mm           Headless `MacVoxel render`. Device-create
-│                          precedes LoadVox so VoxelVolume can attach
+│                          precedes load so VoxelVolume can attach
 │                          the Metal texture.
+├── VoxRoundTrip.{h,cpp}   `MacVoxel voxrt`: load→save→reload compare +
+│                          save-fixpoint byte check + rotation-codec
+│                          property check; --dump prints chunk structure.
 │
 │   Document & geometry
-├── Document.h             Bundles grid + palette + volume +
-│                          volume_shadow; SetCell / ApplyChanges /
-│                          ClearCells / ReseedVolumeShadow.
-├── VoxelGrid.{h,cpp}      Sparse 16³-chunk grid; disk + .vox format.
+├── Document.h             grid (ACTIVE object baked at world transform)
+│                          + scene + palette + volume + volume_shadow;
+│                          RebakeActiveObject / SyncActiveModel /
+│                          MoveEditVolume / EnsureSceneInWorld.
+├── VoxScene.{h,cpp}       Resident .vox scene graph: Scene/SceneNode/
+│                          SceneModel/SceneObject, RotMat (_r codec),
+│                          FlattenScene/FlattenObject,
+│                          SyncModelFromWorldGrid (lossless inverse map),
+│                          SetObjectWorldTransform, node-tree helpers.
+├── VoxelGrid.{h,cpp}      Sparse 16³-chunk grid.
 │                          `CellChange` lives here (ABI-compatible with
 │                          BrushChange).
 ├── VoxelVolume.{h,cpp}    Dense 256³ uchar shadow + 16³ dirty bitset.
 │                          Pre-stroke occupancy oracle. Reads outside
 │                          the EditVolume return 0; writes are dropped.
-├── EditVolume.h           Fixed 256³ canonical edit region.
+│                          Rebase() re-anchors to a moved EditVolume.
+├── EditVolume.h           256³ canonical edit region — movable
+│                          (CenteredOn snaps to the 16 lattice) inside
+│                          the 2048³ world (kWorldHalf).
+├── ChunkPool.{h,cpp}      Shared coarse+pool packer (PT + world buffer).
 ├── Palette.{h,cpp}        256-entry color + Material array.
 ├── Raycast.{h,cpp}        CPU DDA for picking (on VoxelGrid; kept
 │                          current by end-of-stroke sync).
@@ -114,7 +138,17 @@ src/
 ├── RenderState.h          Defines `RenderSettings` + `RenderProgress`.
 ├── GeneratorState.h / Mutators.h / MutatorState.h   Kind + Params.
 ├── EditHistory.{h,cpp}    Stroke-grained undo; RecordBatch takes a
-│                          CellChange[] and reserves capacity up front.
+│                          CellChange[]. EditOp also carries
+│                          SceneChange (Transform / Add / Remove /
+│                          ActiveSwitch) — see "Scene graph & object
+│                          mode" for the cross-object undo rules.
+├── EditorMode.h           EditorMode {Model, Scene}.
+├── SceneOps.{h,cpp}       ActivateObject (THE activation sequence) +
+│                          Duplicate/Delete/Copy/Paste object ops.
+├── ObjectPick.{h,cpp}     Scene-mode picking: AABB slab test + exact
+│                          model-grid DDA via inverse-transformed ray.
+├── ObjectModeController.{h,cpp}  Scene-mode gestures: move drag,
+│                          rotate/flip keys, selection outlines.
 ├── Selection / SelectionOps / FloatingBuffer / FloatingBufferOps /
 │   Clipboard            Selection set, transforms, lift/paste.
 ├── PreviewOverlay.h       LARGELY DORMANT — only the `active` flag
@@ -150,12 +184,16 @@ src/
 │                          forward to _activeTool (set on mouseDown);
 │                          selection tools + gen-gizmo have own branches.
 ├── RaycastRenderer.{h,mm} Rasterizer fragment. DDA samples tex_a (+ its
-│                          oracle), preview_tex when active, buf
-│                          coarse+pool for the FloatingBuffer.
-├── PathTraceRenderer.mm   Path tracer. STILL reads VoxelGrid via the
-│                          legacy coarse+pool path (rewriting its 1760-
-│                          line DDA was out of scope); grid is kept
-│                          current by end-of-stroke diff application.
+│                          oracle), preview/lift texes, and the sparse
+│                          world buffer (inactive objects) — precedence
+│                          preview > lift > doc > world; marches the
+│                          union AABB of edit box + world bounds.
+├── SceneWorldBuffer.{h,mm} Coarse+pool GPU buffers of a scene flatten
+│                          (exclude = active object; -1 in Scene mode).
+│                          Rebuilt on (scene_version, exclude) change.
+├── PathTraceRenderer.mm   Path tracer. Flattens the live scene per
+│                          (geometry|scene)_version change; the emissive
+│                          light scan probes the flatten.
 ├── PathTrace.metal        pt_fragment + display_fragment.
 ├── SceneOverlayRenderer / Overlay.metal / OverlayDraw / SelectionOverlay
 │                          Immediate-mode 2D overlay pass.
@@ -167,16 +205,19 @@ src/
 
 Three representations live in `Document` and stay in sync at known
 points; **none is unconditionally authoritative** — which one is "the
-truth" depends on the phase of the edit.
+truth" depends on the phase of the edit. Since object mode landed,
+all three hold **only the ACTIVE object**, baked at its world
+transform (`Document.scene` holds every object's model-local grid —
+see "Scene graph & object mode").
 
 ```
   VoxelVolume.shadow (CPU dense 256³)   end-of-stroke diff target;
         │                               pre-stroke occupancy oracle
         │  ApplyChanges(diff)
         ▼
-  VoxelGrid (CPU sparse chunks)         disk/.vox format; undo records;
-        │                               picking (frozen pre-stroke);
-        │  syncFromVolume               path-tracer source; selection ops
+  VoxelGrid (CPU sparse chunks)         active object in world coords;
+        │                               undo records; Model-mode picking
+        │  syncFromVolume               (frozen pre-stroke); selection ops
         ▼
   VolumeTexture.tex_a (GPU R8Uint 256³) rasterizer samples this; frozen
         +                               at pre-stroke state during a
@@ -206,6 +247,51 @@ This is why all three reps stay in sync at every commit point. It also
 means: **don't read `VoxelGrid` or `volume_shadow` for cells in the
 active stroke's bbox** — they're stale until commit. Use the texture
 (or the controller's local state).
+
+## Scene graph & object mode
+
+The .vox scene graph lives on `Document.scene` (`VoxScene.h`):
+per-model LOCAL grids (coords in `[0, dims)`, center pivot
+`h = floor(dims/2)`) + the nTRN/nGRP/nSHP node tree, preserved
+verbatim (names, hidden flags, layers, animation frames, nested
+groups, instanced models). `scene.objects` is the derived flat leaf
+view, in DFS order. Load keeps authored world coordinates; save emits
+the full graph (`SaveVoxScene`, Magica's exact chunk skeleton) —
+round-tripping is lossless, verified by `MacVoxel voxrt`.
+
+Transform math (rotations are signed permutations; inverse =
+transpose): `world = R·(l − h) + T`. Object-mode rotate/flip composes
+`Q·R_world` on the leaf nTRN — **voxels are never rewritten**.
+
+Key invariants:
+
+- **grid = active object only.** `RebakeActiveObject` bakes model →
+  grid (moving the 256³ EditVolume when the object lives elsewhere in
+  the ±1024 world; origin always snaps to the 16 lattice so doc and
+  world-buffer chunks share one lattice). `SyncActiveModel` is the
+  lossless inverse map (grid → model, SIZE renormalized on growth),
+  guarded by `synced_geometry_version` so a second call after a
+  transform edit can't corrupt the model — never bypass the guard.
+- **Mode-conditional truth.** Model mode: grid is truth for the active
+  object; the rasterizer samples tex_a + the world buffer (inactive
+  objects). Scene mode: models + transforms are truth; the rasterizer
+  renders EVERY object from the world buffer (`doc_tex_active = 0`),
+  so object drags never rebake; the rebake happens once on Tab-return.
+- **The activation sequence** is `SceneOps::ActivateObject`, the single
+  authority: sync outgoing → switch index → rebake incoming → clear
+  selection → BumpScene → record ActiveSwitch. Bridge-initiated
+  activations go through `ctx.requested_active_object`, serviced by
+  MetalScene's frame loop (lift/gizmo preconditions live there).
+- **Cross-object undo** works because every activation records an
+  ActiveSwitch: undoing past one re-activates the prior object before
+  its cell ops replay. Deleted objects' nodes stay resident in
+  `scene.nodes` (unlinked from the parent's child list only), so
+  Add/Remove history records are pure link records and node ids are
+  never reused. The writer emits only reachable nodes and GCs
+  unreferenced models at save.
+- `scene_version` covers graph/transform changes; `geometry_version`
+  covers cell changes. The PT rebuild keys on both and flattens the
+  live scene; the world buffer keys on (scene_version, exclude).
 
 ## Tool abstraction
 
@@ -434,6 +520,14 @@ Then `Read /tmp/check.png` to see the result.
   @ 256×256, 32 spp, seed=1 → `efd30ac59a3c501d55efac0907076f8d`. Exercise
   it after any renderer change.
 - `--no-aces` swaps the ACES tonemap for plain gamma-2.2.
+
+There's also `MacVoxel voxrt --input X.vox` — the scene-graph
+round-trip harness (load→save→reload compare, save-fixpoint byte
+check, rotation-codec property check; `--dump` prints raw chunk
+structure). Run it after any VoxFile/VoxScene change; it's green on
+every file in test/vox. `test/vox/2 objects.vox` is the canonical
+multi-object scene, and the real MagicaVoxel.app lives at
+`/Users/pstarr/dev/magicaVoxel-decompile/` for A/B save captures.
 
 **UI / gesture testing: Paul does it, not you.** Anything that needs
 moving the mouse, clicking, dragging, or watching frames is Paul's job.
