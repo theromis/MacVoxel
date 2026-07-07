@@ -52,6 +52,9 @@ struct Document {
     uint64_t material_version = 0;
     // Scene-graph structure / transforms (not cell contents) changed.
     uint64_t scene_version = 0;
+    // geometry_version value whose grid edits have been folded into the
+    // active model (see SyncActiveModel).
+    uint64_t synced_geometry_version = 0;
 
     void BumpGeometry()  { ++geometry_version; ++version; }
     void BumpPalette()   { ++palette_version;  ++version; }
@@ -130,13 +133,21 @@ struct Document {
             ReseedVolumeShadow();
             BumpGeometry();
         }
+        // A fresh bake has nothing to fold back.
+        synced_geometry_version = geometry_version;
     }
 
     // Inverse-map the (possibly edited) active-object grid back into its
     // model + leaf transform. Lossless; renormalizes SIZE when the
-    // object grew.
+    // object grew. Guarded by `synced_geometry_version`: once the grid's
+    // edits are folded, further calls are no-ops until geometry changes
+    // again — this is what makes it safe to move the active object's
+    // transform afterwards (a re-sync through the NEW transform would
+    // corrupt the model).
     void SyncActiveModel() {
+        if (synced_geometry_version == geometry_version) return;
         SyncModelFromWorldGrid(scene, active_object, grid);
+        synced_geometry_version = geometry_version;
     }
 
     // Translate the scene so it fits inside `volume`: centered in X/Y,

@@ -4,6 +4,7 @@
 
 namespace macvoxel {
 class OverlayDraw;
+struct Bounds3;
 struct EditorContext;
 struct InteractionState;
 struct ViewContext;
@@ -35,5 +36,10 @@ void DrawHover(const InteractionState& state,
 void DrawCellWire(int cx, int cy, int cz,
                   uint32_t color, float thickness,
                   const ViewContext& vc, OverlayDraw& od);
+
+// Outline an arbitrary world-space cell AABB (inclusive bounds).
+// Object mode's selection/active outlines share the selection look.
+void DrawWorldAabb(const Bounds3& b, uint32_t color, float thickness,
+                   const ViewContext& vc, OverlayDraw& od);
 
 }  // namespace macvoxel::selection_overlay

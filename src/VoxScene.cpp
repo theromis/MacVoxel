@@ -165,22 +165,60 @@ void Scene::RebuildObjects() {
     WalkForObjects(*this, root_id, Vec3i32{}, RotMat{}, false, path, &objects);
 }
 
+namespace {
+
+bool ObjectBoundsImpl(const Scene& scene, const SceneObject& o,
+                      Bounds3* out) {
+    if (!ValidObject(scene, o)) return false;
+    const SceneModel& model = scene.models[static_cast<size_t>(o.model_id)];
+    const Bounds3 lb = model.grid.Bounds();
+    if (lb.empty()) return false;
+    const Vec3i32 h = HalfDims(model);
+    const Vec3i32 a =
+        o.world_r * (Vec3i32{lb.min_x, lb.min_y, lb.min_z} - h) + o.world_t;
+    const Vec3i32 b =
+        o.world_r * (Vec3i32{lb.max_x, lb.max_y, lb.max_z} - h) + o.world_t;
+    *out = Bounds3{std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z),
+                   std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)};
+    return true;
+}
+
+}  // namespace
+
+bool ObjectWorldBounds(const Scene& scene, int object_index, Bounds3* out) {
+    if (object_index < 0 ||
+        static_cast<size_t>(object_index) >= scene.objects.size()) {
+        return false;
+    }
+    return ObjectBoundsImpl(
+        scene, scene.objects[static_cast<size_t>(object_index)], out);
+}
+
+void SetObjectWorldTransform(Scene& scene, int object_index,
+                             const RotMat& world_r, const Vec3i32& world_t) {
+    if (object_index < 0 ||
+        static_cast<size_t>(object_index) >= scene.objects.size()) {
+        return;
+    }
+    const SceneObject& o =
+        scene.objects[static_cast<size_t>(object_index)];
+    if (o.trn_id < 0) return;
+    auto it = scene.nodes.find(o.trn_id);
+    if (it == scene.nodes.end()) return;
+    const RotMat anc_inv = o.anc_r.Transposed();
+    it->second.t = anc_inv * (world_t - o.anc_t);
+    it->second.rot = (anc_inv * world_r).ToByte();
+    // Cheap full refresh — transform edits don't change DFS order, so
+    // object indices stay stable.
+    scene.RebuildObjects();
+}
+
 Bounds3 Scene::WorldBounds() const {
     Bounds3 out;
     bool any = false;
     for (const SceneObject& o : objects) {
-        if (!ValidObject(*this, o)) continue;
-        const SceneModel& model = models[static_cast<size_t>(o.model_id)];
-        const Bounds3 lb = model.grid.Bounds();
-        if (lb.empty()) continue;
-        const Vec3i32 h = HalfDims(model);
-        const Vec3i32 a =
-            o.world_r * (Vec3i32{lb.min_x, lb.min_y, lb.min_z} - h) + o.world_t;
-        const Vec3i32 b =
-            o.world_r * (Vec3i32{lb.max_x, lb.max_y, lb.max_z} - h) + o.world_t;
-        const Bounds3 wb{std::min(a.x, b.x), std::min(a.y, b.y),
-                         std::min(a.z, b.z), std::max(a.x, b.x),
-                         std::max(a.y, b.y), std::max(a.z, b.z)};
+        Bounds3 wb;
+        if (!ObjectBoundsImpl(*this, o, &wb)) continue;
         if (!any) {
             out = wb;
             any = true;

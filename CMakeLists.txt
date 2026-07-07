@@ -67,6 +67,9 @@ set(APP_SOURCES
     src/MarqueeController.cpp
     src/MetalScene.mm
     src/MoveSelectController.cpp
+    src/ObjectModeController.cpp
+    src/ObjectPick.cpp
+    src/SceneOps.cpp
     src/MutatorEngine.mm
     src/MutatorTool.cpp
     src/OverlayDraw.cpp

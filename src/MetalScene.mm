@@ -25,6 +25,8 @@
 #include "Document.h"
 #include "EditHistory.h"
 #include "EditorContext.h"
+#include "ObjectModeController.h"
+#include "SceneOps.h"
 #include "FaceTool.h"
 #include "FloodSelectController.h"
 #include "GeneratorState.h"
@@ -60,6 +62,7 @@ constexpr unsigned short kKeyCodeReturn      = 36;
 constexpr unsigned short kKeyCodeKeypadEnter = 76;
 constexpr unsigned short kKeyCodeDelete      = 51;   // backspace
 constexpr unsigned short kKeyCodeFwdDelete   = 117;
+constexpr unsigned short kKeyCodeTab         = 48;
 }  // namespace
 
 @implementation MetalScene {
@@ -266,6 +269,43 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
     _camera.Frame(target_world, static_cast<float>(maxExtent));
 }
 
+// Model -> Scene: resolve everything in flight (lift, gizmo, hover
+// preview), fold grid edits into the active model (models + transforms
+// become the truth), and let the world buffer carry every object.
+// Scene -> Model: activate the selection (or rebake the active object,
+// which also re-centers the volume after a move) and hand the active
+// object back to tex_a.
+- (void)toggleEditorMode {
+    using EM = macvoxel::EditorMode;
+    macvoxel::Document &doc = _ctx->document;
+    if (_ctx->editor_mode == EM::Model) {
+        [self autoCommitLift];
+        if (_toolRegistry->generator()->HasActiveGizmo()) {
+            _toolRegistry->generator()->Commit(*_ctx, _interaction,
+                                                *_editEngine);
+        }
+        _activeTool = nullptr;
+        _ctx->preview_active = false;
+        _ctx->preview_alpha = 1.0f;
+        doc.SyncActiveModel();
+        _ctx->selection.Clear();
+        _ctx->editor_mode = EM::Scene;
+        _ctx->selected_object = doc.active_object;
+        doc.BumpScene();
+    } else {
+        if (_ctx->selected_object >= 0 &&
+            _ctx->selected_object != doc.active_object) {
+            macvoxel::scene_ops::ActivateObject(*_ctx, _ctx->selected_object);
+        } else {
+            // Same object: rebake anyway — its transform may have moved
+            // while the grid bake stayed frozen.
+            doc.RebakeActiveObject();
+        }
+        _ctx->editor_mode = EM::Model;
+        doc.BumpScene();
+    }
+}
+
 - (void)invalidateRenderers {
     [_raycastRenderer invalidate];
     [_pathTraceRenderer invalidate];
@@ -316,8 +356,56 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
         _spaceHeld = YES;
         return;
     }
+    // Tab toggles Model <-> Scene ("object") mode. Intercepted before
+    // super so the key-view loop never sees it; only meaningful in the
+    // Edit renderer and outside a drag.
+    if (kc == kKeyCodeTab) {
+        if (_ctx->render_settings.mode == macvoxel::RenderMode::Edit &&
+            _interaction.drag_mode == DragMode::None) {
+            [self toggleEditorMode];
+        }
+        return;
+    }
     if (kc == kKeyCodeEscape) {
+        if (_ctx->editor_mode == macvoxel::EditorMode::Scene) {
+            _ctx->selected_object = -1;
+            return;
+        }
         _escapePending = YES;
+        return;
+    }
+    // Scene-mode transform keys: x/y/z rotate the selected object 90°
+    // about that world axis; Shift+x/y/z mirrors across it.
+    if (_ctx->editor_mode == macvoxel::EditorMode::Scene) {
+        const NSEventModifierFlags mm = event.modifierFlags &
+            (NSEventModifierFlagCommand | NSEventModifierFlagOption |
+             NSEventModifierFlagControl);
+        NSString *chars = event.charactersIgnoringModifiers;
+        if (mm == 0 && chars.length == 1) {
+            const unichar c = [chars characterAtIndex:0];
+            int axis = -1;
+            bool flip = false;
+            switch (c) {
+            case 'x': axis = 0; break;
+            case 'y': axis = 1; break;
+            case 'z': axis = 2; break;
+            case 'X': axis = 0; flip = true; break;
+            case 'Y': axis = 1; flip = true; break;
+            case 'Z': axis = 2; flip = true; break;
+            default: break;
+            }
+            if (axis >= 0) {
+                if (flip) {
+                    macvoxel::object_mode_controller::FlipSelected(*_ctx, axis);
+                } else {
+                    macvoxel::object_mode_controller::RotateSelected(
+                        *_ctx, axis, /*ccw=*/true);
+                }
+                return;
+            }
+        }
+        // Model-mode tool letters / lift keys don't apply in Scene mode.
+        [super keyDown:event];
         return;
     }
     if (kc == kKeyCodeReturn || kc == kKeyCodeKeypadEnter) {
@@ -535,9 +623,14 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
 
     // Per-frame Tick on every Tool. Currently only Generator does
     // anything in Tick (gizmo dirty-check / cancel-on-Esc); others
-    // default to no-op.
-    _toolRegistry->TickAll(*_ctx, _interaction, [self viewContext],
-                            _ctx->tool.tool, escape_now, *_editEngine);
+    // default to no-op. Suppressed in Scene mode — no tool is live and
+    // hover previews must not dispatch.
+    const bool scene_mode =
+        _ctx->editor_mode == macvoxel::EditorMode::Scene;
+    if (!scene_mode) {
+        _toolRegistry->TickAll(*_ctx, _interaction, [self viewContext],
+                                _ctx->tool.tool, escape_now, *_editEngine);
+    }
 
     // Auto-commit the active lift on "user moved on" gestures
     // detectable from the per-frame loop: tool switch and render-mode
@@ -564,13 +657,18 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
     const bool mouse_captured_by_ui = false;  // wired in Phase D when
                                               // SwiftUI panels arrive.
     const macvoxel::ViewContext vc = [self viewContext];
-    macvoxel::selection_overlay::DrawSelection(vc, _od);
-    macvoxel::xform_handle_controller::DrawOverlay(
-        _interaction, vc, _od, mouse_captured_by_ui);
-    macvoxel::marquee_controller::DrawOverlay(_interaction, vc, _od);
-    macvoxel::selection_overlay::DrawHover(
-        _interaction, vc, mouse_captured_by_ui, _od);
-    _toolRegistry->DrawOverlays(_interaction, vc, _od, mouse_captured_by_ui);
+    if (scene_mode) {
+        macvoxel::object_mode_controller::DrawOverlay(*_ctx, vc, _od);
+    } else {
+        macvoxel::selection_overlay::DrawSelection(vc, _od);
+        macvoxel::xform_handle_controller::DrawOverlay(
+            _interaction, vc, _od, mouse_captured_by_ui);
+        macvoxel::marquee_controller::DrawOverlay(_interaction, vc, _od);
+        macvoxel::selection_overlay::DrawHover(
+            _interaction, vc, mouse_captured_by_ui, _od);
+        _toolRegistry->DrawOverlays(_interaction, vc, _od,
+                                    mouse_captured_by_ui);
+    }
 
     id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
     cmd.label = @"MacVoxel Frame";
@@ -630,12 +728,17 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
             [_docVolumeTex syncFromVolume:_ctx->document.volume_shadow];
             _docVolumeTexCachedVersion = _ctx->document.geometry_version;
         }
+        // Scene mode renders every object from the world buffer (models
+        // + transforms are the truth there); Model mode excludes the
+        // active object, which lives in tex_a.
+        const int world_exclude =
+            scene_mode ? -1 : _ctx->document.active_object;
         if (_worldBufferSceneVersion != _ctx->document.scene_version ||
-            _worldBufferActiveObject != _ctx->document.active_object) {
+            _worldBufferActiveObject != world_exclude) {
             [_worldBuffer rebuildFromScene:_ctx->document.scene
-                                   exclude:_ctx->document.active_object];
+                                   exclude:world_exclude];
             _worldBufferSceneVersion = _ctx->document.scene_version;
-            _worldBufferActiveObject = _ctx->document.active_object;
+            _worldBufferActiveObject = world_exclude;
         }
         // The lift's GPU state (tex_lift) is mutated directly by lift
         // kernels — no CPU mirror to sync. The bbox outline drawn by
@@ -651,7 +754,7 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
                                     context:_ctx
                               volumeTexture:_docVolumeTex
                                 worldBuffer:_worldBuffer
-                               docTexActive:YES];
+                               docTexActive:!scene_mode];
         if (!_od.empty()) {
             [_overlayRenderer encodeWithEncoder:enc
                                         overlay:_od
@@ -686,6 +789,16 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
     if (_spaceHeld) {
         _interaction.drag_mode = DragMode::Pan;
         _interaction.last_drag_location = event.locationInWindow;
+        return;
+    }
+    // Scene mode: clicks pick / drag whole objects; the entire tool
+    // ladder below is Model-mode-only.
+    if (_ctx->editor_mode == macvoxel::EditorMode::Scene) {
+        if (!macvoxel::object_mode_controller::OnMouseDown(
+                *_ctx, _interaction, [self viewContext],
+                [self mouseEventFromNSEvent:event])) {
+            _interaction.drag_mode = DragMode::None;
+        }
         return;
     }
     // Active generator gizmo intercepts every click regardless of which
@@ -776,6 +889,11 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
                 *_ctx, _interaction.move_select, [self viewContext],
                 [self mouseEventFromNSEvent:event]);
             break;
+        case DragMode::ObjectMove:
+            macvoxel::object_mode_controller::OnMouseDragged(
+                *_ctx, _interaction, [self viewContext],
+                [self mouseEventFromNSEvent:event]);
+            break;
         case DragMode::XformHandle:
             macvoxel::xform_handle_controller::OnMouseDragged(
                 *_ctx, _interaction, [self viewContext],
@@ -817,6 +935,7 @@ constexpr unsigned short kKeyCodeFwdDelete   = 117;
             macvoxel::box_select_controller::OnMouseUp(*_ctx);
             break;
         case DragMode::MoveSelect:
+        case DragMode::ObjectMove:
             // No-op — the drag itself was the work; release just ends it.
             break;
         case DragMode::XformHandle:

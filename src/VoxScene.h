@@ -142,4 +142,15 @@ void FlattenObject(const Scene& scene, int object_index, VoxelGrid* out);
 void SyncModelFromWorldGrid(Scene& scene, int object_index,
                             const VoxelGrid& world_grid);
 
+// Tight world-space AABB of one object's voxels. False when the object
+// is invalid or empty.
+bool ObjectWorldBounds(const Scene& scene, int object_index, Bounds3* out);
+
+// Write a new world transform back through the object's ancestor
+// inverse into its leaf nTRN (t + rotation byte), refresh the derived
+// object cache. No voxel data moves — this IS the object-mode
+// move/rotate/flip primitive. No-op for bare-shape objects (no leaf).
+void SetObjectWorldTransform(Scene& scene, int object_index,
+                             const RotMat& world_r, const Vec3i32& world_t);
+
 }  // namespace macvoxel

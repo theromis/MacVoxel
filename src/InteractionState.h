@@ -2,6 +2,7 @@
 
 #include "Shapes.h"
 #include "ToolState.h"
+#include "VoxScene.h"
 #include "VoxelGrid.h"
 
 #include <CoreGraphics/CGGeometry.h>
@@ -26,6 +27,7 @@ enum class DragMode {
     XformHandle,
     Shape,
     GenHandle,
+    ObjectMove,
 };
 
 // Owned, named home for everything that used to live as a private ivar
@@ -132,6 +134,16 @@ struct InteractionState {
     // d/face_with values currently materialised into the preview
     // texture so each frame only does O(seed_cells × Δd) work as the
     // user drags through layer boundaries.
+
+    // Scene-mode object drag: grab plane through the picked object's
+    // AABB entry face (same trick as MoveSelect), world translation
+    // snapshotted at mouseDown so each frame recomputes an absolute
+    // target from the cursor delta.
+    struct ObjectMove {
+        int axis = 0;
+        simd::float3 anchor_grid{0.0f, 0.0f, 0.0f};
+        Vec3i32 start_world_t{};
+    } object_move;
 
     // Whether the Generator gizmo is alive (drag-out, idle-with-gizmo,
     // or handle-scaling). The bulk of the gizmo state lives privately

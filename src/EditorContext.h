@@ -3,6 +3,7 @@
 #include "Clipboard.h"
 #include "Document.h"
 #include "EditHistory.h"
+#include "EditorMode.h"
 #include "GeneratorState.h"
 #include "MutatorState.h"
 #include "PanelState.h"
@@ -47,6 +48,11 @@ struct EditorContext {
     EditHistory history;
     Clipboard clipboard;
     PanelState panel;
+    // Model (voxel editing) vs Scene ("object mode"). See EditorMode.h.
+    EditorMode editor_mode = EditorMode::Model;
+    // Scene-mode selection: index into document.scene.objects, -1 = none.
+    // v1 is single-select; widen to a set later.
+    int32_t selected_object = -1;
     // Non-owning back-ref so non-Tool paths (SelectionOps, bridge
     // actions) can reach the GPU dispatch façade. MetalScene sets
     // this in its init right after MakeEditEngine; clears in dealloc.

@@ -81,6 +81,27 @@ void DrawCellWire(int cx, int cy, int cz, uint32_t color, float thickness,
     StrokeEdges(screen, valid, kEdges, 12, color, thickness, od);
 }
 
+void DrawWorldAabb(const Bounds3& b, uint32_t color, float thickness,
+                   const ViewContext& vc, OverlayDraw& od) {
+    if (b.empty()) return;
+    const float w = vc.viewport_w;
+    const float h = vc.viewport_h;
+    if (w <= 0.0f || h <= 0.0f) return;
+    const float aspect = w / h;
+    const simd::float4x4 vp =
+        vc.camera.ProjectionMatrix(aspect) * vc.camera.ViewMatrix();
+    const simd::float3 gmin{static_cast<float>(b.min_x),
+                            static_cast<float>(b.min_y),
+                            static_cast<float>(b.min_z)};
+    const simd::float3 gmax{static_cast<float>(b.max_x + 1),
+                            static_cast<float>(b.max_y + 1),
+                            static_cast<float>(b.max_z + 1)};
+    simd::float2 screen[8];
+    bool valid[8];
+    ProjectCorners(gmin, gmax, vp, w, h, screen, valid);
+    StrokeEdges(screen, valid, kEdges, 12, color, thickness, od);
+}
+
 void DrawSelection(const ViewContext& vc, OverlayDraw& od) {
     if (vc.ctx == nullptr) return;
     const EditorContext& ctx = *vc.ctx;
