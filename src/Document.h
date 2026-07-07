@@ -103,6 +103,16 @@ struct Document {
         volume_shadow.RebuildFromGrid(grid);
     }
 
+    // Relocate the edit volume (same 256³ size, new origin) and rebase
+    // the dense shadow onto it. `volume` mutates in place — EditEngine
+    // holds its address. The rebase leaves every chunk dirty, so the
+    // next texture sync re-uploads tex_a in full.
+    void MoveEditVolume(const EditVolume& v) {
+        volume = v;
+        volume_shadow.Rebase(volume, grid);
+        BumpGeometry();
+    }
+
     // Translate the scene so it fits inside `volume`: centered in X/Y,
     // resting on the floor (volume.z0) in Z — the editor's ground-plane
     // convention. Loaded .vox coords are authored arbitrarily

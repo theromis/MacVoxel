@@ -60,6 +60,13 @@ public:
     // source is sparse.
     void RebuildFromGrid(const VoxelGrid& src);
 
+    // Re-anchor to a (moved) EditVolume and reseed from `src`. Leaves
+    // every chunk dirty so the next texture sync re-uploads in full.
+    void Rebase(const EditVolume& volume, const VoxelGrid& src) {
+        *this = VoxelVolume(volume);
+        RebuildFromGrid(src);
+    }
+
     // Loose bounds, mirroring VoxelGrid: monotonically expanded on
     // non-zero Set, never retightened on Set(0). Reset by Clear().
     Bounds3 Bounds() const noexcept { return bounds_; }

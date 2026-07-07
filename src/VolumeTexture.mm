@@ -103,6 +103,13 @@
 }
 
 - (void)syncFromVolume:(macvoxel::VoxelVolume&)volume {
+    // The edit volume can move (re-centering on the active object); a
+    // rebased volume arrives with every chunk dirty, so re-reading the
+    // origin here keeps texture-space translation correct with no
+    // separate re-anchor call to forget.
+    _originX = volume.edit_volume().x0;
+    _originY = volume.edit_volume().y0;
+    _originZ = volume.edit_volume().z0;
     auto dirty = volume.TakeDirtyChunks();
     if (dirty.empty()) return;
 
@@ -172,6 +179,9 @@
 }
 
 - (void)refreshOracleFromVolume:(macvoxel::VoxelVolume&)volume {
+    _originX = volume.edit_volume().x0;
+    _originY = volume.edit_volume().y0;
+    _originZ = volume.edit_volume().z0;
     auto dirty = volume.TakeDirtyChunks();
     if (dirty.empty()) return;
 
