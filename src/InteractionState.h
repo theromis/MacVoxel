@@ -8,6 +8,8 @@
 #include <CoreGraphics/CGGeometry.h>
 #include <simd/simd.h>
 
+#include <vector>
+
 namespace macvoxel {
 
 // Top-level gesture machine state for VoxelView. Each value identifies
@@ -28,6 +30,7 @@ enum class DragMode {
     Shape,
     GenHandle,
     ObjectMove,
+    ObjectGizmo,
 };
 
 // Owned, named home for everything that used to live as a private ivar
@@ -148,6 +151,27 @@ struct InteractionState {
         Vec3i32 start_leaf_t{};
         uint8_t start_leaf_r = 4;
     } object_move;
+
+    // Scene-mode translate gizmo: axis-arrow drag on the selection's
+    // AABB. Everything is snapshotted at mouseDown so each frame
+    // recomputes an absolute target from the cursor delta; one Snap
+    // per selected object.
+    struct ObjectGizmo {
+        int axis = -1;
+        simd::float2 start_local{0.0f, 0.0f};
+        // Selection AABB at mouseDown: drag anchor + world clamp.
+        Bounds3 start_bounds{};
+        struct Snap {
+            int32_t trn_id = -1;
+            int32_t object_index = -1;
+            RotMat world_r{};
+            Vec3i32 start_world_t{};
+            // Leaf-node snapshot for the mouseUp history record.
+            Vec3i32 start_leaf_t{};
+            uint8_t start_leaf_r = 4;
+        };
+        std::vector<Snap> snaps;
+    } object_gizmo;
 
     // Whether the Generator gizmo is alive (drag-out, idle-with-gizmo,
     // or handle-scaling). The bulk of the gizmo state lives privately

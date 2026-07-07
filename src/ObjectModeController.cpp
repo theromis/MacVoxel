@@ -97,9 +97,35 @@ void ApplyRotation(EditorContext& ctx, const RotMat& q) {
 
 bool OnMouseDown(EditorContext& ctx, InteractionState& state,
                  const ViewContext& vc, const MouseEvent& e) {
+    const Scene& scene = ctx.document.scene;
+
+    // The translate arrows get first claim on the click — their tips
+    // often float over empty space, where a fall-through pick would
+    // deselect instead of grabbing the handle.
+    int sel;
+    if (SelectedObject(ctx, &sel)) {
+        const SceneObject& so = scene.objects[static_cast<size_t>(sel)];
+        Bounds3 gb;
+        if (so.trn_id >= 0 && ObjectWorldBounds(scene, sel, &gb)) {
+            const int axis =
+                vc.PickObjectAxisHandle(gb, e.local.x, e.local.y);
+            if (axis >= 0) {
+                const SceneNode& node = scene.nodes.at(so.trn_id);
+                auto& g = state.object_gizmo;
+                g.axis = axis;
+                g.start_local = e.local;
+                g.start_bounds = gb;
+                g.snaps.clear();
+                g.snaps.push_back({so.trn_id, sel, so.world_r, so.world_t,
+                                   node.t, node.rot});
+                state.drag_mode = DragMode::ObjectGizmo;
+                return true;
+            }
+        }
+    }
+
     simd::float3 ro, rd;
     if (!vc.RayAt(e.local.x, e.local.y, &ro, &rd)) return false;
-    const Scene& scene = ctx.document.scene;
     const int hit = PickObject(scene, ro, rd, 1.0e6f);
     ctx.selected_object = hit;
     if (hit < 0) return false;
@@ -199,6 +225,55 @@ void OnMouseUp(EditorContext& ctx, InteractionState& state) {
     RecordTransformOp(ctx, m.trn_id, m.start_leaf_t, m.start_leaf_r);
 }
 
+void OnGizmoDragged(EditorContext& ctx, InteractionState& state,
+                    const ViewContext& vc, const MouseEvent& e) {
+    auto& g = state.object_gizmo;
+    if (g.axis < 0 || g.snaps.empty()) return;
+    Scene& scene = ctx.document.scene;
+    const auto& s = g.snaps.front();
+    if (s.object_index < 0 ||
+        static_cast<size_t>(s.object_index) >= scene.objects.size()) {
+        return;
+    }
+
+    auto mid = [](int32_t lo, int32_t hi) {
+        return (static_cast<float>(lo) + static_cast<float>(hi) + 1.0f) * 0.5f;
+    };
+    const simd::float3 anchor{mid(g.start_bounds.min_x, g.start_bounds.max_x),
+                              mid(g.start_bounds.min_y, g.start_bounds.max_y),
+                              mid(g.start_bounds.min_z, g.start_bounds.max_z)};
+    int delta = vc.AxisDragVoxels(g.axis, anchor, e.local.x, e.local.y,
+                                  g.start_local.x, g.start_local.y);
+
+    // Clamp so the AABB stays inside the world on the drag axis.
+    const int32_t lo = (g.axis == 0)   ? g.start_bounds.min_x
+                       : (g.axis == 1) ? g.start_bounds.min_y
+                                       : g.start_bounds.min_z;
+    const int32_t hi = (g.axis == 0)   ? g.start_bounds.max_x
+                       : (g.axis == 1) ? g.start_bounds.max_y
+                                       : g.start_bounds.max_z;
+    delta = std::clamp(delta, -kWorldHalf - lo, (kWorldHalf - 1) - hi);
+
+    Vec3i32 target = s.start_world_t;
+    if (g.axis == 0) target.x += delta;
+    else if (g.axis == 1) target.y += delta;
+    else target.z += delta;
+
+    const SceneObject& o = scene.objects[static_cast<size_t>(s.object_index)];
+    if (target == o.world_t) return;  // dispatch-on-change
+    SetObjectWorldTransform(scene, s.object_index, s.world_r, target);
+    ctx.document.BumpScene();
+}
+
+void OnGizmoUp(EditorContext& ctx, InteractionState& state) {
+    auto& g = state.object_gizmo;
+    for (const auto& s : g.snaps) {
+        RecordTransformOp(ctx, s.trn_id, s.start_leaf_t, s.start_leaf_r);
+    }
+    g.snaps.clear();
+    g.axis = -1;
+}
+
 void RotateSelected(EditorContext& ctx, int axis, bool ccw) {
     ApplyRotation(ctx, AxisRotation(axis, ccw));
 }
@@ -207,8 +282,8 @@ void FlipSelected(EditorContext& ctx, int axis) {
     ApplyRotation(ctx, AxisMirror(axis));
 }
 
-void DrawOverlay(const EditorContext& ctx, const ViewContext& vc,
-                 OverlayDraw& od) {
+void DrawOverlay(const EditorContext& ctx, const InteractionState& state,
+                 const ViewContext& vc, OverlayDraw& od) {
     const Scene& scene = ctx.document.scene;
     const int active = ctx.document.active_object;
     if (active != ctx.selected_object) {
@@ -219,12 +294,81 @@ void DrawOverlay(const EditorContext& ctx, const ViewContext& vc,
         }
     }
     int i;
-    if (SelectedObject(ctx, &i)) {
-        Bounds3 b;
-        if (ObjectWorldBounds(scene, i, &b)) {
-            selection_overlay::DrawWorldAabb(
-                b, Rgba8(255, 220, 80, 255), 1.5f, vc, od);
-        }
+    if (!SelectedObject(ctx, &i)) return;
+    Bounds3 b;
+    if (!ObjectWorldBounds(scene, i, &b)) return;
+    selection_overlay::DrawWorldAabb(b, Rgba8(255, 220, 80, 255), 1.5f, vc,
+                                     od);
+
+    // Translate arrows — movable objects only (bare shapes have no
+    // leaf nTRN to edit).
+    if (scene.objects[static_cast<size_t>(i)].trn_id < 0) return;
+    const float w = vc.viewport_w;
+    const float h = vc.viewport_h;
+    if (w <= 0.0f || h <= 0.0f) return;
+    const float aspect = w / h;
+    const simd::float4x4 vp =
+        vc.camera.ProjectionMatrix(aspect) * vc.camera.ViewMatrix();
+    auto project = [&](simd::float3 wpos, simd::float2* screen) -> bool {
+        const simd::float4 clip =
+            simd_mul(vp, simd::float4{wpos.x, wpos.y, wpos.z, 1.0f});
+        if (clip.w <= 0.001f) return false;
+        screen->x = (clip.x / clip.w * 0.5f + 0.5f) * w;
+        screen->y = (1.0f - (clip.y / clip.w * 0.5f + 0.5f)) * h;
+        return true;
+    };
+
+    const bool dragging = state.drag_mode == DragMode::ObjectGizmo;
+    int hot_axis = -1;
+    if (dragging) {
+        hot_axis = state.object_gizmo.axis;
+    } else if (state.hover.has_point &&
+               state.drag_mode == DragMode::None) {
+        hot_axis = vc.PickObjectAxisHandle(b, state.hover.local.x,
+                                           state.hover.local.y);
+    }
+
+    // Same X/Y/Z = red/green/blue palette as the generator gizmo so
+    // axis colour reads consistently across the editor.
+    constexpr uint32_t kAxisBase[3] = {Rgba8(230, 80, 80, 255),
+                                       Rgba8(90, 200, 100, 255),
+                                       Rgba8(90, 140, 240, 255)};
+    constexpr uint32_t kAxisHover[3] = {Rgba8(255, 160, 160, 255),
+                                        Rgba8(170, 250, 180, 255),
+                                        Rgba8(160, 200, 255, 255)};
+    constexpr uint32_t kAxisActive[3] = {Rgba8(255, 220, 220, 255),
+                                         Rgba8(220, 255, 230, 255),
+                                         Rgba8(220, 240, 255, 255)};
+    constexpr float kArrowheadLenPx = 14.0f;
+    constexpr float kArrowheadHalfWidthPx = 7.0f;
+
+    for (int axis = 0; axis < 3; ++axis) {
+        simd::float3 base_w, tip_w;
+        ObjectAxisArrowGeom(b, axis, &base_w, &tip_w);
+        simd::float2 p0, p1;
+        if (!project(base_w, &p0) || !project(tip_w, &p1)) continue;
+
+        const bool hot = axis == hot_axis;
+        const uint32_t color = (dragging && hot) ? kAxisActive[axis]
+                               : hot             ? kAxisHover[axis]
+                                                 : kAxisBase[axis];
+        const float thickness = hot ? 2.8f : 2.0f;
+        od.AddLine(p0, p1, color, thickness);
+
+        const simd::float2 d{p1.x - p0.x, p1.y - p0.y};
+        const float stem_len = std::sqrt(d.x * d.x + d.y * d.y);
+        if (stem_len <= 1e-3f) continue;
+        const simd::float2 u{d.x / stem_len, d.y / stem_len};
+        const simd::float2 perp{-u.y, u.x};
+        const simd::float2 back{p1.x - u.x * kArrowheadLenPx,
+                                p1.y - u.y * kArrowheadLenPx};
+        od.AddTriangleFilled(
+            p1,
+            {back.x + perp.x * kArrowheadHalfWidthPx,
+             back.y + perp.y * kArrowheadHalfWidthPx},
+            {back.x - perp.x * kArrowheadHalfWidthPx,
+             back.y - perp.y * kArrowheadHalfWidthPx},
+            color);
     }
 }
 

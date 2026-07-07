@@ -24,16 +24,22 @@ void OnMouseDragged(EditorContext& ctx, InteractionState& state,
 // Records the drag's net transform change as one history op.
 void OnMouseUp(EditorContext& ctx, InteractionState& state);
 
+// Axis-arrow gizmo drag (DragMode::ObjectGizmo): translate the
+// selection along one world axis, integer-snapped.
+void OnGizmoDragged(EditorContext& ctx, InteractionState& state,
+                    const ViewContext& vc, const MouseEvent& e);
+void OnGizmoUp(EditorContext& ctx, InteractionState& state);
+
 // Rotate the selected object 90° about a world axis (0=X 1=Y 2=Z),
 // or mirror it across that axis. Pivot = the object's center
 // translation; translation unchanged.
 void RotateSelected(EditorContext& ctx, int axis, bool ccw);
 void FlipSelected(EditorContext& ctx, int axis);
 
-// Selected-object outline (+ a dimmer outline on the active object
-// when it isn't the selected one).
-void DrawOverlay(const EditorContext& ctx, const ViewContext& vc,
-                 OverlayDraw& od);
+// Selected-object outline + translate arrows (+ a dimmer outline on
+// the active object when it isn't the selected one).
+void DrawOverlay(const EditorContext& ctx, const InteractionState& state,
+                 const ViewContext& vc, OverlayDraw& od);
 
 }  // namespace object_mode_controller
 }  // namespace macvoxel

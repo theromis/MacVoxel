@@ -115,6 +115,21 @@ struct ViewContext {
                             float start_local_x, float start_local_y,
                             const generators::Bounds3i& start_bounds) const;
 
+    // ---------- Object-mode translate gizmo ----------
+
+    // Pick the axis arrow of the object translate gizmo anchored at
+    // the center of `aabb` (inclusive grid bounds). Returns the axis
+    // 0..2 (X/Y/Z) or -1.
+    int PickObjectAxisHandle(const Bounds3& aabb,
+                             float local_x, float local_y) const;
+
+    // Project the cursor delta since drag start onto a world axis
+    // through `anchor_grid`. Signed voxel count along that axis, so
+    // one arrow serves both directions.
+    int AxisDragVoxels(int axis, simd::float3 anchor_grid,
+                       float local_x, float local_y,
+                       float start_local_x, float start_local_y) const;
+
     // ---------- Face tool ----------
 
     // Cursor → signed voxel distance along the clicked face's normal.
@@ -125,5 +140,13 @@ struct ViewContext {
                        int face_axis, int face_sign,
                        float anchor_local_x, float anchor_local_y) const;
 };
+
+// Object translate gizmo geometry in world (renderer) coords: base at
+// the AABB center, tip clearing the +axis face by 4 voxels. Shared by
+// the ViewContext hit-test and the overlay drawing so the two can
+// never drift apart.
+void ObjectAxisArrowGeom(const Bounds3& aabb, int axis,
+                         simd::float3* out_base_world,
+                         simd::float3* out_tip_world);
 
 }  // namespace macvoxel

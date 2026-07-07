@@ -688,7 +688,8 @@ constexpr unsigned short kKeyCodeTab         = 48;
                                               // SwiftUI panels arrive.
     const macvoxel::ViewContext vc = [self viewContext];
     if (scene_mode) {
-        macvoxel::object_mode_controller::DrawOverlay(*_ctx, vc, _od);
+        macvoxel::object_mode_controller::DrawOverlay(*_ctx, _interaction,
+                                                      vc, _od);
     } else {
         macvoxel::selection_overlay::DrawSelection(vc, _od);
         macvoxel::xform_handle_controller::DrawOverlay(
@@ -924,6 +925,11 @@ constexpr unsigned short kKeyCodeTab         = 48;
                 *_ctx, _interaction, [self viewContext],
                 [self mouseEventFromNSEvent:event]);
             break;
+        case DragMode::ObjectGizmo:
+            macvoxel::object_mode_controller::OnGizmoDragged(
+                *_ctx, _interaction, [self viewContext],
+                [self mouseEventFromNSEvent:event]);
+            break;
         case DragMode::XformHandle:
             macvoxel::xform_handle_controller::OnMouseDragged(
                 *_ctx, _interaction, [self viewContext],
@@ -969,6 +975,9 @@ constexpr unsigned short kKeyCodeTab         = 48;
             break;
         case DragMode::ObjectMove:
             macvoxel::object_mode_controller::OnMouseUp(*_ctx, _interaction);
+            break;
+        case DragMode::ObjectGizmo:
+            macvoxel::object_mode_controller::OnGizmoUp(*_ctx, _interaction);
             break;
         case DragMode::XformHandle:
             macvoxel::xform_handle_controller::OnMouseUp(_interaction);

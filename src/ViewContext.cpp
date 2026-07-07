@@ -163,6 +163,28 @@ void GizmoFaceWorldGeom(const generators::Bounds3i& b, int face,
 
 }  // namespace
 
+void ObjectAxisArrowGeom(const Bounds3& aabb, int axis,
+                         simd::float3* out_base_world,
+                         simd::float3* out_tip_world) {
+    auto mid = [](int32_t lo, int32_t hi) {
+        return (static_cast<float>(lo) + static_cast<float>(hi) + 1.0f) * 0.5f;
+    };
+    const simd::float3 c{mid(aabb.min_x, aabb.max_x),
+                         mid(aabb.min_y, aabb.max_y),
+                         mid(aabb.min_z, aabb.max_z)};
+    const int32_t ext = (axis == 0)   ? aabb.max_x - aabb.min_x + 1
+                        : (axis == 1) ? aabb.max_y - aabb.min_y + 1
+                                      : aabb.max_z - aabb.min_z + 1;
+    constexpr float kTipClearVoxels = 4.0f;
+    const float len = static_cast<float>(ext) * 0.5f + kTipClearVoxels;
+    simd::float3 tip = c;
+    if (axis == 0) tip.x += len;
+    else if (axis == 1) tip.y += len;
+    else tip.z += len;
+    *out_base_world = simd::float3{c.x, c.z, -c.y};
+    *out_tip_world = simd::float3{tip.x, tip.z, -tip.y};
+}
+
 bool ViewContext::RayAt(float local_x, float local_y,
                         simd::float3* out_origin,
                         simd::float3* out_dir) const {
@@ -427,6 +449,78 @@ int ViewContext::XformHandleDragVoxels(int face,
 
     simd::float3 cw, nw;
     XformFaceWorldGeom(wb, face, &cw, &nw);
+    auto to_ndc = [&](simd::float3 wp, simd::float2* ndc) -> bool {
+        const simd::float4 clip = simd_mul(
+            vp, simd::float4{wp.x, wp.y, wp.z, 1.0f});
+        if (clip.w <= 1e-6f) return false;
+        ndc->x = clip.x / clip.w;
+        ndc->y = clip.y / clip.w;
+        return true;
+    };
+    simd::float2 ndc0{}, ndc1{};
+    if (!to_ndc(cw, &ndc0)) return 0;
+    if (!to_ndc(cw + nw, &ndc1)) return 0;
+    const simd::float2 dir{ndc1.x - ndc0.x, ndc1.y - ndc0.y};
+    const float dir_len2 = dir.x * dir.x + dir.y * dir.y;
+    if (dir_len2 < 1e-8f) return 0;
+
+    const simd::float2 drag{
+        ((local_x - start_local_x) / viewport_w) * 2.0f,
+        ((local_y - start_local_y) / viewport_h) * 2.0f};
+    const float t = (drag.x * dir.x + drag.y * dir.y) / dir_len2;
+    return static_cast<int>(std::round(t));
+}
+
+int ViewContext::PickObjectAxisHandle(const Bounds3& aabb,
+                                      float local_x, float local_y) const {
+    if (viewport_w <= 0.0f || viewport_h <= 0.0f) return -1;
+    const float aspect = viewport_w / viewport_h;
+    const simd::float4x4 vp =
+        camera.ProjectionMatrix(aspect) * camera.ViewMatrix();
+
+    const float cur_x = local_x;
+    const float cur_y = viewport_h - local_y;  // screen Y-down
+
+    constexpr float kHitRadiusPx = 16.0f;
+    int best = -1;
+    float best_d2 = kHitRadiusPx * kHitRadiusPx;
+    for (int axis = 0; axis < 3; ++axis) {
+        simd::float3 base, tip;
+        ObjectAxisArrowGeom(aabb, axis, &base, &tip);
+        const simd::float4 clip = simd_mul(
+            vp, simd::float4{tip.x, tip.y, tip.z, 1.0f});
+        if (clip.w <= 0.001f) continue;
+        const float ndc_x = clip.x / clip.w;
+        const float ndc_y = clip.y / clip.w;
+        const float sx = (ndc_x * 0.5f + 0.5f) * viewport_w;
+        const float sy = (1.0f - (ndc_y * 0.5f + 0.5f)) * viewport_h;
+        const float dx = sx - cur_x;
+        const float dy = sy - cur_y;
+        const float d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best = axis;
+        }
+    }
+    return best;
+}
+
+int ViewContext::AxisDragVoxels(int axis, simd::float3 anchor_grid,
+                                float local_x, float local_y,
+                                float start_local_x,
+                                float start_local_y) const {
+    if (viewport_w <= 0.0f || viewport_h <= 0.0f) return 0;
+    const float aspect = viewport_w / viewport_h;
+    const simd::float4x4 vp =
+        camera.ProjectionMatrix(aspect) * camera.ViewMatrix();
+
+    const simd::float3 cw{anchor_grid.x, anchor_grid.z, -anchor_grid.y};
+    simd::float3 ng{0.0f, 0.0f, 0.0f};
+    if (axis == 0) ng.x = 1.0f;
+    else if (axis == 1) ng.y = 1.0f;
+    else ng.z = 1.0f;
+    const simd::float3 nw{ng.x, ng.z, -ng.y};
+
     auto to_ndc = [&](simd::float3 wp, simd::float2* ndc) -> bool {
         const simd::float4 clip = simd_mul(
             vp, simd::float4{wp.x, wp.y, wp.z, 1.0f});
