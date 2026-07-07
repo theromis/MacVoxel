@@ -28,6 +28,16 @@ bool LoadVox(const std::string& path,
              Palette* out_palette,
              std::string* out_error = nullptr);
 
+// Writes the full scene graph: SIZE/XYZI per referenced model (renumbered
+// in DFS order, unreferenced models dropped, shared models emitted once),
+// RGBA, nTRN/nGRP/nSHP tree with fresh sequential node ids, LAYR, MATL.
+// Frame-0 _t/_r re-encode the live transforms; everything else round-trips
+// verbatim. Returns true on success.
+bool SaveVoxScene(const std::string& path,
+                  const Scene& scene,
+                  const Palette& palette,
+                  std::string* out_error = nullptr);
+
 // Writes a single-model .vox file (header, MAIN, SIZE, XYZI, RGBA, MATL)
 // for the given grid and palette. Returns true on success.
 bool SaveVox(const std::string& path,

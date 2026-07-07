@@ -537,6 +537,147 @@ const char* MatlTypeString(MaterialType t) {
     return "_diffuse";
 }
 
+void AppendI32(std::vector<uint8_t>* out, int32_t v) {
+    AppendU32(out, static_cast<uint32_t>(v));
+}
+
+void AppendDict(std::vector<uint8_t>* out, const AttrDict& d) {
+    AppendU32(out, static_cast<uint32_t>(d.size()));
+    for (const auto& [k, v] : d) {
+        AppendString(out, k);
+        AppendString(out, v);
+    }
+}
+
+void AppendChunk(std::vector<uint8_t>* out, const char tag[4],
+                 const std::vector<uint8_t>& body) {
+    AppendId(out, tag);
+    AppendU32(out, static_cast<uint32_t>(body.size()));
+    AppendU32(out, 0);
+    out->insert(out->end(), body.begin(), body.end());
+}
+
+void AppendRgbaChunk(std::vector<uint8_t>* children, const Palette& palette) {
+    AppendId(children, "RGBA");
+    AppendU32(children, 1024);
+    AppendU32(children, 0);
+    for (size_t i = 0; i < 255; ++i) {
+        const Color c = palette.Get(static_cast<uint8_t>(i + 1));
+        children->push_back(c.r);
+        children->push_back(c.g);
+        children->push_back(c.b);
+        children->push_back(c.a);
+    }
+    children->push_back(0);
+    children->push_back(0);
+    children->push_back(0);
+    children->push_back(0);
+}
+
+// MATL chunks — one per non-default palette slot. Skipping defaults
+// keeps file size down and is round-trip-safe (a missing MATL on
+// load gets the Material struct's defaults, which is what we'd
+// write back). Emissive carries _emit + _flux on top of the common
+// keys; Glass adds _alpha; everything else gets type / rough /
+// metal / ior.
+void AppendMatlChunks(std::vector<uint8_t>* children, const Palette& palette) {
+    for (int i = 1; i <= 255; ++i) {
+        const Material m = palette.GetMaterial(static_cast<uint8_t>(i));
+        if (MaterialIsDefault(m)) continue;
+
+        std::vector<std::pair<std::string, std::string>> kv;
+        kv.emplace_back("_type", MatlTypeString(m.type));
+        kv.emplace_back("_rough", FormatFloat(m.roughness));
+        kv.emplace_back("_metal", FormatFloat(m.metallic));
+        kv.emplace_back("_ior", FormatFloat(m.ior - 1.0f));
+        if (m.type == MaterialType::Glass) {
+            kv.emplace_back("_alpha", FormatFloat(m.transparency));
+        }
+        if (m.type == MaterialType::Emissive) {
+            kv.emplace_back("_emit", FormatFloat(m.emission));
+            kv.emplace_back(
+                "_flux",
+                FormatFloat(static_cast<float>(m.emissionPower - 1)));
+        }
+
+        std::vector<uint8_t> body;
+        AppendU32(&body, static_cast<uint32_t>(i));  // material id
+        AppendU32(&body, static_cast<uint32_t>(kv.size()));
+        for (const auto& [k, v] : kv) {
+            AppendString(&body, k);
+            AppendString(&body, v);
+        }
+        AppendChunk(children, "MATL", body);
+    }
+}
+
+bool WriteVoxFile(const std::string& path,
+                  const std::vector<uint8_t>& children,
+                  std::string* out_error) {
+    std::vector<uint8_t> file;
+    AppendId(&file, "VOX ");
+    AppendU32(&file, kVoxVersion);
+    AppendId(&file, "MAIN");
+    AppendU32(&file, 0);
+    AppendU32(&file, static_cast<uint32_t>(children.size()));
+    file.insert(file.end(), children.begin(), children.end());
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        SetError(out_error, "could not open file for writing");
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(file.data()),
+              static_cast<std::streamsize>(file.size()));
+    if (!out) {
+        SetError(out_error, "write failed");
+        return false;
+    }
+    return true;
+}
+
+// Pre-order DFS over the reachable node tree, assigning dense new ids
+// (Magica's emission order: parent before child, siblings in group
+// order). Instanced subtrees are visited once and shared by id.
+void CollectSaveOrder(const Scene& scene, int32_t node_id,
+                      std::map<int32_t, int32_t>* node_new,
+                      std::vector<int32_t>* emit_order,
+                      std::map<int32_t, int32_t>* model_new,
+                      std::vector<int32_t>* model_order,
+                      int32_t* next_id) {
+    if (node_new->count(node_id)) return;
+    auto it = scene.nodes.find(node_id);
+    if (it == scene.nodes.end()) return;
+    (*node_new)[node_id] = (*next_id)++;
+    emit_order->push_back(node_id);
+    const SceneNode& n = it->second;
+    switch (n.kind) {
+        case SceneNode::Kind::Transform:
+            CollectSaveOrder(scene, n.child, node_new, emit_order, model_new,
+                             model_order, next_id);
+            break;
+        case SceneNode::Kind::Group:
+            for (int32_t c : n.children) {
+                CollectSaveOrder(scene, c, node_new, emit_order, model_new,
+                                 model_order, next_id);
+            }
+            break;
+        case SceneNode::Kind::Shape:
+            for (const auto& [mid, attrs] : n.models) {
+                if (mid < 0 ||
+                    static_cast<size_t>(mid) >= scene.models.size()) {
+                    continue;
+                }
+                if (!model_new->count(mid)) {
+                    (*model_new)[mid] =
+                        static_cast<int32_t>(model_order->size());
+                    model_order->push_back(mid);
+                }
+            }
+            break;
+    }
+}
+
 }  // namespace
 
 bool SaveVox(const std::string& path,
@@ -602,80 +743,187 @@ bool SaveVox(const std::string& path,
     AppendU32(&children, num_voxels);
     children.insert(children.end(), xyzi_voxels.begin(), xyzi_voxels.end());
 
-    AppendId(&children, "RGBA");
-    AppendU32(&children, 1024);
-    AppendU32(&children, 0);
-    for (size_t i = 0; i < 255; ++i) {
-        const Color c = palette.Get(static_cast<uint8_t>(i + 1));
-        children.push_back(c.r);
-        children.push_back(c.g);
-        children.push_back(c.b);
-        children.push_back(c.a);
+    AppendRgbaChunk(&children, palette);
+    AppendMatlChunks(&children, palette);
+    return WriteVoxFile(path, children, out_error);
+}
+
+bool SaveVoxScene(const std::string& path,
+                  const Scene& scene,
+                  const Palette& palette,
+                  std::string* out_error) {
+    if (scene.nodes.empty() || scene.empty()) {
+        SetError(out_error, "cannot save an empty scene");
+        return false;
     }
-    children.push_back(0);
-    children.push_back(0);
-    children.push_back(0);
-    children.push_back(0);
 
-    // MATL chunks — one per non-default palette slot. Skipping defaults
-    // keeps file size down and is round-trip-safe (a missing MATL on
-    // load gets the Material struct's defaults, which is what we'd
-    // write back). Emissive carries _emit + _flux on top of the common
-    // keys; Glass adds _alpha; everything else gets type / rough /
-    // metal / ior.
-    for (int i = 1; i <= 255; ++i) {
-        const Material m = palette.GetMaterial(static_cast<uint8_t>(i));
-        if (MaterialIsDefault(m)) continue;
+    // A root that isn't an nTRN (never produced by our loader, but the
+    // node map is arbitrary) gets a synthesized identity wrapper so the
+    // file keeps the canonical nTRN(0) root convention.
+    const auto root_it = scene.nodes.find(scene.root_id);
+    if (root_it == scene.nodes.end()) {
+        SetError(out_error, "scene root node missing");
+        return false;
+    }
+    const bool wrap_root =
+        root_it->second.kind != SceneNode::Kind::Transform;
 
-        std::vector<std::pair<std::string, std::string>> kv;
-        kv.emplace_back("_type", MatlTypeString(m.type));
-        kv.emplace_back("_rough", FormatFloat(m.roughness));
-        kv.emplace_back("_metal", FormatFloat(m.metallic));
-        kv.emplace_back("_ior", FormatFloat(m.ior - 1.0f));
-        if (m.type == MaterialType::Glass) {
-            kv.emplace_back("_alpha", FormatFloat(m.transparency));
+    std::map<int32_t, int32_t> node_new;
+    std::vector<int32_t> emit_order;
+    std::map<int32_t, int32_t> model_new;
+    std::vector<int32_t> model_order;
+    int32_t next_id = wrap_root ? 1 : 0;
+    CollectSaveOrder(scene, scene.root_id, &node_new, &emit_order,
+                     &model_new, &model_order, &next_id);
+    if (model_order.empty()) {
+        SetError(out_error, "scene references no models");
+        return false;
+    }
+
+    // Per-model guards: .vox models are uint8-addressed, 256 per axis.
+    for (int32_t mid : model_order) {
+        const SceneModel& m = scene.models[static_cast<size_t>(mid)];
+        const Bounds3 b = m.grid.Bounds();
+        if (!b.empty() &&
+            (b.min_x < 0 || b.min_y < 0 || b.min_z < 0 || b.max_x > 255 ||
+             b.max_y > 255 || b.max_z > 255)) {
+            SetError(out_error,
+                     "model voxels escape the .vox 256-per-axis local box");
+            return false;
         }
-        if (m.type == MaterialType::Emissive) {
-            kv.emplace_back("_emit", FormatFloat(m.emission));
-            kv.emplace_back(
-                "_flux",
-                FormatFloat(static_cast<float>(m.emissionPower - 1)));
+        if (m.dims[0] > 256 || m.dims[1] > 256 || m.dims[2] > 256) {
+            SetError(out_error, "model SIZE exceeds 256 per axis");
+            return false;
         }
+    }
 
+    std::vector<uint8_t> children;
+
+    // SIZE + XYZI per referenced model, renumbered in DFS-encounter order.
+    for (int32_t mid : model_order) {
+        const SceneModel& m = scene.models[static_cast<size_t>(mid)];
+        std::vector<uint8_t> size_body;
+        AppendI32(&size_body, std::max(m.dims[0], 1));
+        AppendI32(&size_body, std::max(m.dims[1], 1));
+        AppendI32(&size_body, std::max(m.dims[2], 1));
+        AppendChunk(&children, "SIZE", size_body);
+
+        std::vector<uint8_t> xyzi;
+        AppendU32(&xyzi, static_cast<uint32_t>(m.grid.FilledCount()));
+        constexpr int32_t cs = static_cast<int32_t>(VoxelGrid::kChunkSize);
+        for (const auto& [coord, chunk] : m.grid.chunks()) {
+            if (chunk->filled_count == 0) continue;
+            for (int32_t lz = 0; lz < cs; ++lz)
+            for (int32_t ly = 0; ly < cs; ++ly)
+            for (int32_t lx = 0; lx < cs; ++lx) {
+                const uint8_t v =
+                    chunk->cells[VoxelGrid::LocalIndex(lx, ly, lz)];
+                if (v == 0) continue;
+                xyzi.push_back(static_cast<uint8_t>(coord.x * cs + lx));
+                xyzi.push_back(static_cast<uint8_t>(coord.y * cs + ly));
+                xyzi.push_back(static_cast<uint8_t>(coord.z * cs + lz));
+                xyzi.push_back(v);
+            }
+        }
+        AppendChunk(&children, "XYZI", xyzi);
+    }
+
+    AppendRgbaChunk(&children, palette);
+
+    if (wrap_root) {
         std::vector<uint8_t> body;
-        AppendU32(&body, static_cast<uint32_t>(i));     // material id
-        AppendU32(&body, static_cast<uint32_t>(kv.size()));
-        for (const auto& [k, v] : kv) {
-            AppendString(&body, k);
-            AppendString(&body, v);
+        AppendI32(&body, 0);
+        AppendDict(&body, AttrDict{});
+        AppendI32(&body, node_new.at(scene.root_id));
+        AppendI32(&body, -1);  // reserved
+        AppendI32(&body, -1);  // layer
+        AppendI32(&body, 1);   // frames
+        AppendDict(&body, AttrDict{});
+        AppendChunk(&children, "nTRN", body);
+    }
+
+    for (int32_t old_id : emit_order) {
+        const SceneNode& n = scene.nodes.at(old_id);
+        std::vector<uint8_t> body;
+        AppendI32(&body, node_new.at(old_id));
+        AppendDict(&body, n.attrs);
+        switch (n.kind) {
+            case SceneNode::Kind::Transform: {
+                auto child_it = node_new.find(n.child);
+                if (child_it == node_new.end()) {
+                    SetError(out_error, "transform node has a dangling child");
+                    return false;
+                }
+                AppendI32(&body, child_it->second);
+                AppendI32(&body, -1);  // reserved
+                AppendI32(&body, n.layer_id);
+                // Frame 0 re-encodes the live t/rot (other keys, e.g. _f,
+                // ride along); extra animation frames pass through verbatim.
+                std::vector<AttrDict> frames = n.frames;
+                if (frames.empty()) frames.emplace_back();
+                AttrDict& f0 = frames[0];
+                if (n.t == Vec3i32{}) {
+                    f0.erase("_t");
+                } else {
+                    char buf[48];
+                    std::snprintf(buf, sizeof(buf), "%d %d %d", n.t.x, n.t.y,
+                                  n.t.z);
+                    f0["_t"] = buf;
+                }
+                if (RotMat::FromByte(n.rot).IsIdentity()) {
+                    f0.erase("_r");
+                } else {
+                    f0["_r"] = std::to_string(static_cast<int>(n.rot));
+                }
+                AppendI32(&body, static_cast<int32_t>(frames.size()));
+                for (const AttrDict& f : frames) AppendDict(&body, f);
+                AppendChunk(&children, "nTRN", body);
+                break;
+            }
+            case SceneNode::Kind::Group: {
+                std::vector<int32_t> kids;
+                for (int32_t c : n.children) {
+                    auto cit = node_new.find(c);
+                    if (cit != node_new.end()) kids.push_back(cit->second);
+                }
+                AppendI32(&body, static_cast<int32_t>(kids.size()));
+                for (int32_t k : kids) AppendI32(&body, k);
+                AppendChunk(&children, "nGRP", body);
+                break;
+            }
+            case SceneNode::Kind::Shape: {
+                std::vector<std::pair<int32_t, const AttrDict*>> ms;
+                for (const auto& [mid, attrs] : n.models) {
+                    auto mit = model_new.find(mid);
+                    if (mit != model_new.end()) {
+                        ms.emplace_back(mit->second, &attrs);
+                    }
+                }
+                if (ms.empty()) {
+                    SetError(out_error, "shape node references no models");
+                    return false;
+                }
+                AppendI32(&body, static_cast<int32_t>(ms.size()));
+                for (const auto& [mid, attrs] : ms) {
+                    AppendI32(&body, mid);
+                    AppendDict(&body, *attrs);
+                }
+                AppendChunk(&children, "nSHP", body);
+                break;
+            }
         }
-
-        AppendId(&children, "MATL");
-        AppendU32(&children, static_cast<uint32_t>(body.size()));
-        AppendU32(&children, 0);
-        children.insert(children.end(), body.begin(), body.end());
     }
 
-    std::vector<uint8_t> file;
-    AppendId(&file, "VOX ");
-    AppendU32(&file, kVoxVersion);
-    AppendId(&file, "MAIN");
-    AppendU32(&file, 0);
-    AppendU32(&file, static_cast<uint32_t>(children.size()));
-    file.insert(file.end(), children.begin(), children.end());
+    for (const SceneLayer& layer : scene.layers) {
+        std::vector<uint8_t> body;
+        AppendI32(&body, layer.id);
+        AppendDict(&body, layer.attrs);
+        AppendI32(&body, -1);  // reserved
+        AppendChunk(&children, "LAYR", body);
+    }
 
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        SetError(out_error, "could not open file for writing");
-        return false;
-    }
-    out.write(reinterpret_cast<const char*>(file.data()),
-              static_cast<std::streamsize>(file.size()));
-    if (!out) {
-        SetError(out_error, "write failed");
-        return false;
-    }
-    return true;
+    AppendMatlChunks(&children, palette);
+    return WriteVoxFile(path, children, out_error);
 }
 
 }  // namespace macvoxel
