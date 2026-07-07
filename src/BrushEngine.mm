@@ -105,9 +105,9 @@ NSString* LoadBrushLibrarySource() {
     u.palette_idx = p.palette_idx;
     u.vol_min[0] = p.vol_x0; u.vol_min[1] = p.vol_y0; u.vol_min[2] = p.vol_z0;
     u.vol_max[0] = p.vol_x1; u.vol_max[1] = p.vol_y1; u.vol_max[2] = p.vol_z1;
-    u.tex_origin[0] = p.vol_x0;
-    u.tex_origin[1] = p.vol_y0;
-    u.tex_origin[2] = p.vol_z0;
+    u.tex_origin[0] = p.tex_origin_x;
+    u.tex_origin[1] = p.tex_origin_y;
+    u.tex_origin[2] = p.tex_origin_z;
     u.center_offset_x10 = p.center_offset_x10;
     u.r2 = p.r2;
 

@@ -26,27 +26,41 @@ public:
                    GeneratorEngine* generator, MutatorEngine* mutator,
                    LiftEngine* lift,
                    VolumeTexture* texture,
-                   const EditVolume& vol)
+                   const EditVolume& vol,
+                   const Bounds3& edit_bounds)
         : brush_(brush),
           shape_(shape),
           generator_(generator),
           mutator_(mutator),
           lift_(lift),
           texture_(texture),
-          vol_(&vol) {}
+          vol_(&vol),
+          edit_(&edit_bounds) {}
+
+    // The volume-writing dispatches below all clamp to the LOGICAL
+    // edit region (the active object's dims box): the physical volume
+    // is its 16-aligned cover, and the pad cells must never take a
+    // write or the object's AABB would grow on the next model sync.
 
     void BrushStamp(const BrushParams& params) override {
-        [brush_ dispatch:params target:texture_];
+        BrushParams p = params;
+        const EditVolume w = Writable();
+        p.vol_x0 = w.x0; p.vol_y0 = w.y0; p.vol_z0 = w.z0;
+        p.vol_x1 = w.x1; p.vol_y1 = w.y1; p.vol_z1 = w.z1;
+        p.tex_origin_x = vol_->x0;
+        p.tex_origin_y = vol_->y0;
+        p.tex_origin_z = vol_->z0;
+        [brush_ dispatch:p target:texture_];
     }
 
     void ShapePreview(const ShapeParams& params) override {
-        [shape_ dispatchPreview:params target:texture_];
+        [shape_ dispatchPreview:ClampShapeParams(params) target:texture_];
     }
 
     void ShapeLineProjectPreview(const ShapeParams& params,
                                  const int32_t* cells_xyz,
                                  std::size_t cell_count) override {
-        [shape_ dispatchLineProjectPreview:params
+        [shape_ dispatchLineProjectPreview:ClampShapeParams(params)
                                       cells:cells_xyz
                                  cellCount:static_cast<NSUInteger>(cell_count)
                                      target:texture_];
@@ -73,15 +87,32 @@ public:
                   const generators::Bounds3i& bounds,
                   const generators::Bounds3i& last_bounds,
                   const generators::Params& params) override {
+        const EditVolume w = Writable();
+        generators::Bounds3i clip{};
+        clip.x0 = w.x0; clip.y0 = w.y0; clip.z0 = w.z0;
+        clip.x1 = w.x1; clip.y1 = w.y1; clip.z1 = w.z1;
         [generator_ dispatchInto:texture_
                             kind:kind
                           bounds:bounds
                       lastBounds:last_bounds
+                            clip:clip
                           params:params];
     }
 
     void DispatchMutator(const MutatorDispatchParams& params) override {
-        [mutator_ dispatchInto:texture_ params:params];
+        MutatorDispatchParams p = params;
+        const EditVolume w = Writable();
+        p.aoe_x0 = std::max(p.aoe_x0, w.x0);
+        p.aoe_y0 = std::max(p.aoe_y0, w.y0);
+        p.aoe_z0 = std::max(p.aoe_z0, w.z0);
+        p.aoe_x1 = std::min(p.aoe_x1, w.x1);
+        p.aoe_y1 = std::min(p.aoe_y1, w.y1);
+        p.aoe_z1 = std::min(p.aoe_z1, w.z1);
+        if (p.aoe_x0 > p.aoe_x1 || p.aoe_y0 > p.aoe_y1 ||
+            p.aoe_z0 > p.aoe_z1) {
+            return;
+        }
+        [mutator_ dispatchInto:texture_ params:p];
     }
 
     void CommitGeneric(const CommitGenericParams& params) override {
@@ -215,6 +246,29 @@ public:
     }
 
 private:
+    // Logical writable region (world, inclusive); falls back to the
+    // physical volume until the first rebake establishes edit_bounds.
+    EditVolume Writable() const {
+        if (edit_->empty()) return *vol_;
+        EditVolume w = *vol_;
+        w.x0 = edit_->min_x; w.x1 = edit_->max_x;
+        w.y0 = edit_->min_y; w.y1 = edit_->max_y;
+        w.z0 = edit_->min_z; w.z1 = edit_->max_z;
+        return w;
+    }
+
+    ShapeParams ClampShapeParams(const ShapeParams& params) const {
+        ShapeParams p = params;
+        const EditVolume w = Writable();
+        p.vol_min_x = std::max(p.vol_min_x, w.x0);
+        p.vol_min_y = std::max(p.vol_min_y, w.y0);
+        p.vol_min_z = std::max(p.vol_min_z, w.z0);
+        p.vol_max_x = std::min(p.vol_max_x, w.x1);
+        p.vol_max_y = std::min(p.vol_max_y, w.y1);
+        p.vol_max_z = std::min(p.vol_max_z, w.z1);
+        return p;
+    }
+
     void DrainOtherEngines() {
         // Lift kernels read/write tex_a alongside tex_lift. Drain any
         // pending brush / shape / mutator / generator work first so
@@ -232,6 +286,7 @@ private:
     LiftEngine* lift_;
     VolumeTexture* texture_;
     const EditVolume* vol_;
+    const Bounds3* edit_;
 };
 
 }  // namespace
@@ -242,10 +297,11 @@ std::unique_ptr<EditEngine> MakeEditEngine(BrushEngine* brush,
                                            MutatorEngine* mutator,
                                            LiftEngine* lift,
                                            VolumeTexture* texture,
-                                           const EditVolume& vol) {
+                                           const EditVolume& vol,
+                                           const Bounds3& edit_bounds) {
     return std::make_unique<EditEngineImpl>(brush, shape, generator,
                                             mutator, lift,
-                                            texture, vol);
+                                            texture, vol, edit_bounds);
 }
 
 }  // namespace macvoxel

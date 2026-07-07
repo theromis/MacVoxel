@@ -55,6 +55,13 @@ struct Uniforms {
     float _pad7;
     simd::float3 march_max;
     float _pad8;
+    // The VISIBLE edit box (the active object's exact dims-box AABB).
+    // box_min/box_max stay the physical texture bounds — the aligned
+    // cover can pad the min sides, and that pad must not be drawn.
+    simd::float3 edit_min;
+    float _pad9;
+    simd::float3 edit_max;
+    float _pad10;
 };
 
 NSString* const kShaderSource = @R"MSL(
@@ -92,6 +99,10 @@ struct Uniforms {
     float    _pad7;
     float3   march_max;
     float    _pad8;
+    float3   edit_min;
+    float    _pad9;
+    float3   edit_max;
+    float    _pad10;
 };
 
 // Fullscreen triangle covering NDC [-1, 1]² with one extra-large vertex
@@ -217,7 +228,7 @@ fragment float4 raycast_fragment(
     float t_exit  = min(min(t_hi.x, t_hi.y), t_hi.z);
     if (t_exit < 0.0 || t_enter > t_exit) {
         float3 bg = float3(0.118, 0.118, 0.18);
-        return float4(bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max), 1.0);
+        return float4(bbox_edges_color(cam_origin, ray_dir, bg, u.edit_min, u.edit_max), 1.0);
     }
     float t_start = max(t_enter, 0.0);
     ray_origin = ray_origin + ray_dir * (t_start + 1e-4);
@@ -329,7 +340,7 @@ fragment float4 raycast_fragment(
 
         if (!march_in) {
             float3 bg = float3(0.118, 0.118, 0.18);
-            float3 bg_edged = bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max);
+            float3 bg_edged = bbox_edges_color(cam_origin, ray_dir, bg, u.edit_min, u.edit_max);
             if (ghost_seen) {
                 return float4(mix(bg_edged, ghost_color, u.preview_alpha), 1.0);
             }
@@ -445,7 +456,7 @@ fragment float4 raycast_fragment(
         }
     }
     float3 bg = float3(0.118, 0.118, 0.18);
-    float3 bg_edged = bbox_edges_color(cam_origin, ray_dir, bg, u.box_min, u.box_max);
+    float3 bg_edged = bbox_edges_color(cam_origin, ray_dir, bg, u.edit_min, u.edit_max);
     if (ghost_seen) {
         return float4(mix(bg_edged, ghost_color, u.preview_alpha), 1.0);
     }
@@ -581,6 +592,20 @@ fragment float4 raycast_fragment(
                              static_cast<float>(vol.z1 + 1)};
     u._pad2 = 0.0f;
     u._pad3 = 0.0f;
+    const macvoxel::Bounds3& eb = doc->edit_bounds;
+    if (!eb.empty()) {
+        u.edit_min = simd::float3{static_cast<float>(eb.min_x),
+                                  static_cast<float>(eb.min_y),
+                                  static_cast<float>(eb.min_z)};
+        u.edit_max = simd::float3{static_cast<float>(eb.max_x + 1),
+                                  static_cast<float>(eb.max_y + 1),
+                                  static_cast<float>(eb.max_z + 1)};
+    } else {
+        u.edit_min = u.box_min;
+        u.edit_max = u.box_max;
+    }
+    u._pad9 = 0.0f;
+    u._pad10 = 0.0f;
     u.preview_active = ctx->preview_active ? 1 : 0;
     u.preview_alpha = ctx->preview_alpha;
     u.lift_active = ctx->selection.lift_active() ? 1 : 0;

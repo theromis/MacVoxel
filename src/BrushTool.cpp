@@ -34,7 +34,6 @@ BrushParams BuildParams(const EditorContext& ctx,
                         int target_x, int target_y, int target_z,
                         int face_axis, ToolMode mode) {
     const ToolSettings& tool = ctx.tool;
-    const EditVolume& vol = ctx.document.volume;
     const int size = std::max(1, tool.brush_size);
     const int lo = -((size - 1) / 2);
     const int hi = size / 2;
@@ -49,8 +48,8 @@ BrushParams BuildParams(const EditorContext& ctx,
     if (tool.brush_shape == BrushShape::Circle) p.flags |= 2u;
     p.mode = static_cast<uint32_t>(mode);
     p.palette_idx = tool.palette_idx;
-    p.vol_x0 = vol.x0; p.vol_y0 = vol.y0; p.vol_z0 = vol.z0;
-    p.vol_x1 = vol.x1; p.vol_y1 = vol.y1; p.vol_z1 = vol.z1;
+    // vol_* / tex_origin_* stay zero — EditEngine::BrushStamp owns the
+    // writable-bounds rejection and the texture origin.
     p.center_offset_x10 = static_cast<float>((lo + hi) * 5);
     const float r = size * 0.5f;
     p.r2 = r * r;

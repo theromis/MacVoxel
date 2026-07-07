@@ -146,6 +146,13 @@ void SyncModelFromWorldGrid(Scene& scene, int object_index,
 // is invalid or empty.
 bool ObjectWorldBounds(const Scene& scene, int object_index, Bounds3* out);
 
+// World-space AABB of the object's [0, dims) box — the user-facing
+// object AABB (exact under signed-permutation rotations, valid even
+// when the model holds no voxels). False when the object or its dims
+// are invalid.
+bool ObjectDimsWorldBounds(const Scene& scene, int object_index,
+                           Bounds3* out);
+
 // The object's dims box as extents along the WORLD axes (rotations are
 // signed permutations, so this is |R|·dims). Zero when invalid.
 Vec3i32 ObjectWorldExtents(const Scene& scene, int object_index);

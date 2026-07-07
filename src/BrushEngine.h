@@ -17,8 +17,14 @@ struct BrushParams {
     uint32_t flags;            // bit 0 = is_3d, bit 1 = is_circle
     uint32_t mode;             // 0=Add, 1=Remove, 2=Paint
     uint32_t palette_idx;      // 0..255
+    // Writable-cell rejection bounds (world, inclusive) — the logical
+    // edit region. EditEngine fills these; tools leave them zero.
     int32_t vol_x0, vol_y0, vol_z0;
     int32_t vol_x1, vol_y1, vol_z1;
+    // Doc texture's [0,0,0] in world cells (physical volume origin —
+    // distinct from vol_* since the aligned cover can pad the min
+    // sides). EditEngine fills these too.
+    int32_t tex_origin_x, tex_origin_y, tex_origin_z;
     float center_offset_x10;   // (lo + hi) * 5 to keep int→float clean
     float r2;                  // (max_dim * 0.5)^2
 };

@@ -131,6 +131,7 @@ static_assert(sizeof(Uniforms) == 144, "GeneratorUniforms layout drift");
                 kind:(gen::Kind)kind
               bounds:(gen::Bounds3i)bounds
           lastBounds:(gen::Bounds3i)last_bounds
+                clip:(gen::Bounds3i)clip
               params:(const gen::Params&)params {
     if (texture == nil) return;
     const NSUInteger ki = static_cast<NSUInteger>(kind);
@@ -157,12 +158,12 @@ static_assert(sizeof(Uniforms) == 144, "GeneratorUniforms layout drift");
         uy1 = std::max(uy1, last_bounds.y1);
         uz1 = std::max(uz1, last_bounds.z1);
     }
-    ux0 = std::max(ux0, tex_lo_x);
-    uy0 = std::max(uy0, tex_lo_y);
-    uz0 = std::max(uz0, tex_lo_z);
-    ux1 = std::min(ux1, tex_hi_x);
-    uy1 = std::min(uy1, tex_hi_y);
-    uz1 = std::min(uz1, tex_hi_z);
+    ux0 = std::max(ux0, std::max(tex_lo_x, clip.x0));
+    uy0 = std::max(uy0, std::max(tex_lo_y, clip.y0));
+    uz0 = std::max(uz0, std::max(tex_lo_z, clip.z0));
+    ux1 = std::min(ux1, std::min(tex_hi_x, clip.x1));
+    uy1 = std::min(uy1, std::min(tex_hi_y, clip.y1));
+    uz1 = std::min(uz1, std::min(tex_hi_z, clip.z1));
     if (ux0 > ux1 || uy0 > uy1 || uz0 > uz1) return;
 
     const int32_t dx = ux1 - ux0 + 1;

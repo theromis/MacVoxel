@@ -14,11 +14,12 @@ namespace macvoxel {
 inline constexpr int32_t kWorldHalf = 1024;
 
 // Canonical bounded edit region the user paints into. Lives on Document.
-// Always 256³ to match MagicaVoxel's max object size and keep .vox
-// round-tripping inside the format's limits, but movable: the box
-// re-centers on the active object when objects live elsewhere in the
-// world. Default anchor has x and y straddling the camera target while
-// z sits flat on the floor:
+// Sized as the 16-aligned cover of the active object's dims-box AABB
+// (Document::edit_bounds holds the exact box; dims stay ≤256 per axis
+// to match MagicaVoxel's max object size and keep .vox round-tripping
+// inside the format's limits) and movable — it follows the active
+// object around the world. Default anchor has x and y straddling the
+// camera target while z sits flat on the floor:
 //
 //   x ∈ [-128, 127]
 //   y ∈ [-128, 127]
@@ -33,6 +34,9 @@ struct EditVolume {
     int32_t x0 = -128, x1 = 127;
     int32_t y0 = -128, y1 = 127;
     int32_t z0 = 0,    z1 = 255;
+
+    friend constexpr bool operator==(const EditVolume&,
+                                     const EditVolume&) noexcept = default;
 
     constexpr bool Contains(int32_t x, int32_t y, int32_t z) const noexcept {
         return x >= x0 && x <= x1 &&
@@ -72,6 +76,27 @@ struct EditVolume {
         v.MoveTo(center(b.min_x, b.max_x, v.size_x()),
                  center(b.min_y, b.max_y, v.size_y()),
                  center(b.min_z, b.max_z, v.size_z()));
+        return v;
+    }
+
+    // Smallest volume covering `b` whose origin sits on the 16-cell
+    // lattice (same single-lattice invariant as CenteredOn). The max
+    // corner is exact, so only the min sides carry pad (0–15 cells);
+    // texture sizes don't need to be chunk multiples. Default box for
+    // empty bounds.
+    static EditVolume AlignedCover(const Bounds3& b) noexcept {
+        EditVolume v{};
+        if (b.empty()) return v;
+        auto lo = [](int32_t c) {
+            int32_t o = c & ~15;  // arithmetic AND floors negatives too
+            return o < -kWorldHalf ? -kWorldHalf : o;
+        };
+        auto hi = [](int32_t c) {
+            return c > kWorldHalf - 1 ? kWorldHalf - 1 : c;
+        };
+        v.x0 = lo(b.min_x); v.x1 = hi(b.max_x);
+        v.y0 = lo(b.min_y); v.y1 = hi(b.max_y);
+        v.z0 = lo(b.min_z); v.z1 = hi(b.max_z);
         return v;
     }
 };

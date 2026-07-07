@@ -239,10 +239,11 @@ bool ViewContext::PickCell(float local_x, float local_y,
         out_cell->z = hit.z;
         return true;
     }
-    // Empty-space fallback: snap to whichever wall of the edit volume
-    // the ray hits first instead of always landing on z=0.
-    return IntersectVolumeWall(doc.volume, ray_origin_grid, ray_dir_grid,
-                               out_cell, nullptr);
+    // Empty-space fallback: snap to whichever wall of the edit region
+    // the ray hits first instead of always landing on z=0. Logical
+    // bounds — the physical volume's alignment pad isn't paintable.
+    return IntersectVolumeWall(doc.LogicalVolume(), ray_origin_grid,
+                               ray_dir_grid, out_cell, nullptr);
 }
 
 bool ViewContext::GridPlaneIntersect(float local_x, float local_y,
@@ -308,7 +309,7 @@ bool ViewContext::ComputeTargetCell(
         if (mode != ToolMode::Add) return false;
         shapes::Vec3i wall_cell;
         int wall_axis = 0;
-        if (!IntersectVolumeWall(ctx->document.volume,
+        if (!IntersectVolumeWall(ctx->document.LogicalVolume(),
                                  ray_origin_grid, ray_dir_grid,
                                  &wall_cell, &wall_axis)) {
             return false;
@@ -366,15 +367,16 @@ bool ViewContext::PickFace(float local_x, float local_y,
     // voxel one.
     shapes::Vec3i wall_cell;
     int wall_axis = 0;
-    if (!IntersectVolumeWall(doc.volume, ray_origin_grid, ray_dir_grid,
+    const EditVolume lvol = doc.LogicalVolume();
+    if (!IntersectVolumeWall(lvol, ray_origin_grid, ray_dir_grid,
                              &wall_cell, &wall_axis)) {
         return false;
     }
     // Determine sign from which side of the volume the wall is on.
     int wall_sign = 0;
-    if (wall_axis == 0) wall_sign = (wall_cell.x == doc.volume.x0) ? -1 : +1;
-    else if (wall_axis == 1) wall_sign = (wall_cell.y == doc.volume.y0) ? -1 : +1;
-    else wall_sign = (wall_cell.z == doc.volume.z0) ? -1 : +1;
+    if (wall_axis == 0) wall_sign = (wall_cell.x == lvol.x0) ? -1 : +1;
+    else if (wall_axis == 1) wall_sign = (wall_cell.y == lvol.y0) ? -1 : +1;
+    else wall_sign = (wall_cell.z == lvol.z0) ? -1 : +1;
     *out_cell = wall_cell;
     *out_axis = wall_axis;
     *out_sign = -wall_sign;  // INWARD into the volume

@@ -283,11 +283,11 @@ void MutatorTool::DrawOverlay(const InteractionState& state,
         else if (face_axis == 1) { by0 = target.y; by1 = target.y; }
         else                     { bz0 = target.z; bz1 = target.z; }
     }
-    const EditVolume& vol = vc.ctx->document.volume;
-    // Clip AOE to the edit volume — faces outside the volume can't be
-    // touched by the kernel, so they're not part of the contour. After
-    // clamping, plane sweeps naturally include the volume walls when
-    // the AOE pokes into them.
+    const EditVolume vol = vc.ctx->document.LogicalVolume();
+    // Clip AOE to the edit region — faces outside it can't be touched
+    // by the kernel (EditEngine clamps the dispatch the same way), so
+    // they're not part of the contour. After clamping, plane sweeps
+    // naturally include the region walls when the AOE pokes into them.
     bx0 = std::max(bx0, vol.x0); bx1 = std::min(bx1, vol.x1);
     by0 = std::max(by0, vol.y0); by1 = std::min(by1, vol.y1);
     bz0 = std::max(bz0, vol.z0); bz1 = std::min(bz1, vol.z1);

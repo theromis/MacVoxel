@@ -172,14 +172,18 @@ namespace macvoxel {
 // MetalScene constructs one of these in init, passing the engines and
 // the doc's VolumeTexture it already owns. The returned object holds
 // strong (ARC) refs to all six; tools keep a non-owning pointer/ref.
-// `vol` is observed by reference and must outlive the EditEngine.
+// `vol` (physical volume, world↔texture translation) and `edit_bounds`
+// (logical dims-box region every write dispatch is clamped to — the
+// aligned cover's pad must never be paintable) are observed by
+// reference and must outlive the EditEngine.
 std::unique_ptr<EditEngine> MakeEditEngine(BrushEngine* brush,
                                            ShapeEngine* shape,
                                            GeneratorEngine* generator,
                                            MutatorEngine* mutator,
                                            LiftEngine* lift,
                                            VolumeTexture* texture,
-                                           const EditVolume& vol);
+                                           const EditVolume& vol,
+                                           const Bounds3& edit_bounds);
 
 }  // namespace macvoxel
 

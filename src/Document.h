@@ -40,6 +40,12 @@ struct Document {
     int32_t active_object = 0;
     Palette palette;
     EditVolume volume;
+    // Exact world AABB of the active object's dims box — the logical
+    // edit region. `volume` is its 16-aligned physical cover (pad on
+    // the min sides only); picking, walls, and kernel cell rejection
+    // use these bounds so the pad is never paintable. Empty until the
+    // first RebakeActiveObject.
+    Bounds3 edit_bounds{};
     // Dense write-through shadow of the in-volume cells of `grid`,
     // sized from `volume`. Phase A1: just a CPU cache. A2 attaches a
     // Metal 3D texture; B1 makes the GPU side authoritative. Reads
@@ -106,30 +112,50 @@ struct Document {
         volume_shadow.RebuildFromGrid(grid);
     }
 
-    // Relocate the edit volume (same 256³ size, new origin) and rebase
-    // the dense shadow onto it. `volume` mutates in place — EditEngine
-    // holds its address. The rebase leaves every chunk dirty, so the
-    // next texture sync re-uploads tex_a in full.
+    // Relocate/resize the edit volume and rebase the dense shadow onto
+    // it. `volume` mutates in place — EditEngine holds its address, and
+    // VoxelVolume::Rebase reconstructs at any size. The rebase leaves
+    // every chunk dirty, so the next texture sync re-uploads tex_a in
+    // full (MetalScene reallocates the textures first when the size
+    // changed).
     void MoveEditVolume(const EditVolume& v) {
         volume = v;
         volume_shadow.Rebase(volume, grid);
         BumpGeometry();
     }
 
-    // Bake the active object into `grid` at its world transform and make
-    // sure the edit volume covers it (moving the volume only when it has
-    // to — the default anchor wins ties so ordinary single-model docs
-    // keep the floor-anchored box). Rebuilding the shadow either way
-    // leaves every chunk dirty for a full tex_a re-upload.
+    // The exact logical edit region as an EditVolume-shaped box (walls
+    // have no lattice requirement). Falls back to the physical volume
+    // before the first rebake establishes `edit_bounds`.
+    EditVolume LogicalVolume() const {
+        if (edit_bounds.empty()) return volume;
+        EditVolume v = volume;
+        v.x0 = edit_bounds.min_x; v.x1 = edit_bounds.max_x;
+        v.y0 = edit_bounds.min_y; v.y1 = edit_bounds.max_y;
+        v.z0 = edit_bounds.min_z; v.z1 = edit_bounds.max_z;
+        return v;
+    }
+
+    // Bake the active object into `grid` at its world transform and fit
+    // the edit region to its dims-box AABB: `edit_bounds` gets the
+    // exact box, `volume` its 16-aligned cover (moved/resized only when
+    // it actually changed). Rebuilding the shadow either way leaves
+    // every chunk dirty for a full tex_a re-upload.
     void RebakeActiveObject() {
         FlattenObject(scene, active_object, &grid);
-        const Bounds3 b = grid.Bounds();
-        const bool covered =
-            b.empty() || (volume.Contains(b.min_x, b.min_y, b.min_z) &&
-                          volume.Contains(b.max_x, b.max_y, b.max_z));
-        if (!covered) {
-            MoveEditVolume(EditVolume::CenteredOn(b));
+        Bounds3 db;
+        if (ObjectDimsWorldBounds(scene, active_object, &db)) {
+            edit_bounds = db;
+            const EditVolume v = EditVolume::AlignedCover(db);
+            if (!(v == volume)) {
+                MoveEditVolume(v);
+            } else {
+                ReseedVolumeShadow();
+                BumpGeometry();
+            }
         } else {
+            // Invalid/degenerate object: keep the current box.
+            edit_bounds = Bounds3{};
             ReseedVolumeShadow();
             BumpGeometry();
         }

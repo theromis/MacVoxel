@@ -225,7 +225,8 @@ constexpr unsigned short kKeyCodeTab         = 48;
                                            _generatorEngine, _mutatorEngine,
                                            _liftEngine,
                                            _docVolumeTex,
-                                           _ctx->document.volume);
+                                           _ctx->document.volume,
+                                           _ctx->document.edit_bounds);
     // SelectionOps + bridge actions reach the GPU dispatch through
     // ctx.engine — same engine MetalScene owns.
     _ctx->engine = _editEngine.get();
@@ -771,6 +772,11 @@ constexpr unsigned short kKeyCodeTab         = 48;
         // (brush kernel) — those edits drain the shadow's dirty
         // chunks post-dispatch so this finds nothing to upload.
         if (_docVolumeTexCachedVersion != _ctx->document.geometry_version) {
+            // A rebake can resize the volume (it covers the active
+            // object's AABB now); the textures must match before the
+            // full re-upload the rebased shadow carries.
+            [_docVolumeTex
+                resizeIfNeededForVolume:_ctx->document.volume_shadow];
             [_docVolumeTex syncFromVolume:_ctx->document.volume_shadow];
             _docVolumeTexCachedVersion = _ctx->document.geometry_version;
         }

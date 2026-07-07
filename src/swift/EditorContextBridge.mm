@@ -386,7 +386,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
                 const int32_t wx = cb.origin_x + static_cast<int32_t>(x);
                 const int32_t wy = cb.origin_y + static_cast<int32_t>(y);
                 const int32_t wz = cb.origin_z + static_cast<int32_t>(z);
-                if (!doc.volume.Contains(wx, wy, wz)) continue;
+                if (!doc.LogicalVolume().Contains(wx, wy, wz)) continue;
                 const uint8_t old = doc.grid.Get(wx, wy, wz);
                 doc.SetCell(wx, wy, wz, pal);
                 if (old != pal) history.Record(wx, wy, wz, old, pal);

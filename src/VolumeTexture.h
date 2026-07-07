@@ -25,6 +25,13 @@ struct Bounds3;
 // the texture. Idempotent: a call with no dirty chunks does nothing.
 - (void)syncFromVolume:(macvoxel::VoxelVolume&)volume;
 
+// Reallocate every texture when the volume's dimensions changed (the
+// edit volume is sized to the active object's AABB cover, so
+// activation/resize can change it). Returns YES when a reallocation
+// happened; the rebased shadow arrives fully dirty, so the following
+// syncFromVolume re-uploads in full. No-op when sizes match.
+- (BOOL)resizeIfNeededForVolume:(const macvoxel::VoxelVolume&)volume;
+
 // Drains the dirty-chunk bitset and recomputes only the oracle bytes
 // for those chunks — no cell upload. For the commit path, where the
 // GPU already wrote tex_a but can't cheaply learn that an Erase left

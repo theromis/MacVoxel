@@ -22,13 +22,20 @@
     int _chunksZ;
     int _strideX;     // bytes per row in the dense buffer (= size_x)
     int _strideZ;     // bytes per slice (= size_x * size_y)
+    id<MTLDevice> _device;
 }
 
 - (nullable instancetype)initWithDevice:(id<MTLDevice>)device
                                  volume:(const macvoxel::VoxelVolume&)volume {
     self = [super init];
     if (self == nil) return nil;
+    _device = device;
+    if (![self allocateForVolume:volume]) return nil;
+    return self;
+}
 
+- (BOOL)allocateForVolume:(const macvoxel::VoxelVolume&)volume {
+    id<MTLDevice> device = _device;
     _sizeX = volume.size_x();
     _sizeY = volume.size_y();
     _sizeZ = volume.size_z();
@@ -51,7 +58,7 @@
     desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
     desc.storageMode = MTLStorageModeShared;
     _texture = [device newTextureWithDescriptor:desc];
-    if (_texture == nil) return nil;
+    if (_texture == nil) return NO;
     [_texture setLabel:@"VolumeTexture.docTex"];
 
     MTLTextureDescriptor* oracleDesc =
@@ -64,42 +71,50 @@
     oracleDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
     oracleDesc.storageMode = MTLStorageModeShared;
     _oracleTexture = [device newTextureWithDescriptor:oracleDesc];
-    if (_oracleTexture == nil) return nil;
+    if (_oracleTexture == nil) return NO;
     [_oracleTexture setLabel:@"VolumeTexture.oracle"];
 
     _previewTexture = [device newTextureWithDescriptor:desc];
-    if (_previewTexture == nil) return nil;
+    if (_previewTexture == nil) return NO;
     [_previewTexture setLabel:@"VolumeTexture.previewTex"];
 
     _previewOracleTexture = [device newTextureWithDescriptor:oracleDesc];
-    if (_previewOracleTexture == nil) return nil;
+    if (_previewOracleTexture == nil) return NO;
     [_previewOracleTexture setLabel:@"VolumeTexture.previewOracle"];
 
     _previewRemTexture = [device newTextureWithDescriptor:desc];
-    if (_previewRemTexture == nil) return nil;
+    if (_previewRemTexture == nil) return NO;
     [_previewRemTexture setLabel:@"VolumeTexture.previewRem"];
 
     _previewRemOracleTexture = [device newTextureWithDescriptor:oracleDesc];
-    if (_previewRemOracleTexture == nil) return nil;
+    if (_previewRemOracleTexture == nil) return NO;
     [_previewRemOracleTexture setLabel:@"VolumeTexture.previewRemOracle"];
 
     // tex_lift: dense R8Uint 256³, same dims as the doc. Holds palette
     // indices for the active lift's contents.
     _liftTexture = [device newTextureWithDescriptor:desc];
-    if (_liftTexture == nil) return nil;
+    if (_liftTexture == nil) return NO;
     [_liftTexture setLabel:@"VolumeTexture.liftTex"];
 
     _liftOracleTexture = [device newTextureWithDescriptor:oracleDesc];
-    if (_liftOracleTexture == nil) return nil;
+    if (_liftOracleTexture == nil) return NO;
     [_liftOracleTexture setLabel:@"VolumeTexture.liftOracle"];
 
     // Scratch snapshot for transform kernels — blit lift→snap, kernel
     // reads snap and writes live lift.
     _liftSnapshotTexture = [device newTextureWithDescriptor:desc];
-    if (_liftSnapshotTexture == nil) return nil;
+    if (_liftSnapshotTexture == nil) return NO;
     [_liftSnapshotTexture setLabel:@"VolumeTexture.liftSnap"];
 
-    return self;
+    return YES;
+}
+
+- (BOOL)resizeIfNeededForVolume:(const macvoxel::VoxelVolume&)volume {
+    if (volume.size_x() == _sizeX && volume.size_y() == _sizeY &&
+        volume.size_z() == _sizeZ) {
+        return NO;
+    }
+    return [self allocateForVolume:volume];
 }
 
 - (void)syncFromVolume:(macvoxel::VoxelVolume&)volume {

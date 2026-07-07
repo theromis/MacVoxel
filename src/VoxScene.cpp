@@ -213,6 +213,34 @@ void SetObjectWorldTransform(Scene& scene, int object_index,
     scene.RebuildObjects();
 }
 
+bool ObjectDimsWorldBounds(const Scene& scene, int object_index,
+                           Bounds3* out) {
+    if (object_index < 0 ||
+        static_cast<size_t>(object_index) >= scene.objects.size()) {
+        return false;
+    }
+    const SceneObject& o = scene.objects[static_cast<size_t>(object_index)];
+    if (o.model_id < 0 ||
+        static_cast<size_t>(o.model_id) >= scene.models.size()) {
+        return false;
+    }
+    const SceneModel& m = scene.models[static_cast<size_t>(o.model_id)];
+    if (m.dims[0] <= 0 || m.dims[1] <= 0 || m.dims[2] <= 0) return false;
+    const Vec3i32 h{m.dims[0] / 2, m.dims[1] / 2, m.dims[2] / 2};
+    const Vec3i32 a = o.world_r * (Vec3i32{} - h) + o.world_t;
+    const Vec3i32 b = o.world_r * (Vec3i32{m.dims[0] - 1, m.dims[1] - 1,
+                                           m.dims[2] - 1} -
+                                   h) +
+                      o.world_t;
+    out->min_x = std::min(a.x, b.x);
+    out->min_y = std::min(a.y, b.y);
+    out->min_z = std::min(a.z, b.z);
+    out->max_x = std::max(a.x, b.x);
+    out->max_y = std::max(a.y, b.y);
+    out->max_z = std::max(a.z, b.z);
+    return true;
+}
+
 Vec3i32 ObjectWorldExtents(const Scene& scene, int object_index) {
     if (object_index < 0 ||
         static_cast<size_t>(object_index) >= scene.objects.size()) {

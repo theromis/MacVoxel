@@ -58,6 +58,7 @@ void FaceTool::EnumerateCells(const EditorContext& ctx,
 
     const Document& doc = ctx.document;
     const VoxelVolume& shadow = doc.volume_shadow;
+    const EditVolume lvol = doc.LogicalVolume();
     const ToolSettings& tool = ctx.tool;
     const ToolMode mode = state.anchor.mode;
     int da[3] = {0, 0, 0};
@@ -82,7 +83,7 @@ void FaceTool::EnumerateCells(const EditorContext& ctx,
                 const int y = v.y + k * da[1];
                 const int z = v.z + k * da[2];
                 if (shadow.Get(x, y, z) != 0) continue;
-                if (!doc.volume.Contains(x, y, z)) continue;
+                if (!lvol.Contains(x, y, z)) continue;
                 const uint8_t color = with_geometry
                     ? shadow.Get(v.x, v.y, v.z)
                     : tool.palette_idx;
@@ -200,10 +201,11 @@ bool FaceTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
     const ToolSettings& t = ctx.tool;
     const auto t_flood = perf::Now();
     {
-        // Both flood paths bound visited to the EditVolume's in-plane
+        // Both flood paths bound visited to the edit region's in-plane
         // extent — the dense bitmap inside Shapes::FloodCoplanar*
-        // depends on this rect being finite.
-        const EditVolume& vol = ctx.document.volume;
+        // depends on this rect being finite. Logical bounds keep wall
+        // floods off the physical volume's alignment pad.
+        const EditVolume vol = ctx.document.LogicalVolume();
         const int u_axis = (axis == 0) ? 1 : 0;
         const int v_axis = (axis == 2) ? 1 : 2;
         auto axis_lo = [&](int a) {

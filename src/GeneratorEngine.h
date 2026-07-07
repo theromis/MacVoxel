@@ -28,10 +28,14 @@
 // coords — cells the previous dispatch wrote that the new one
 // doesn't cover get zeroed out by the kernel. Passing an empty
 // last_bounds (x1<x0) dispatches only over the current bounds.
+// `clip` (world cells, inclusive) bounds the dispatch region on top
+// of the texture extent — the gizmo may overhang the writable edit
+// region, whose cells must never be touched.
 - (void)dispatchInto:(nonnull VolumeTexture*)texture
                 kind:(macvoxel::generators::Kind)kind
               bounds:(macvoxel::generators::Bounds3i)bounds
           lastBounds:(macvoxel::generators::Bounds3i)last_bounds
+                clip:(macvoxel::generators::Bounds3i)clip
               params:(const macvoxel::generators::Params&)params;
 
 - (void)waitForPendingWork;

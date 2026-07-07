@@ -106,7 +106,7 @@ bool OnMouseDown(EditorContext& ctx, InteractionState& state,
     if (SelectedObject(ctx, &sel)) {
         const SceneObject& so = scene.objects[static_cast<size_t>(sel)];
         Bounds3 gb;
-        if (so.trn_id >= 0 && ObjectWorldBounds(scene, sel, &gb)) {
+        if (so.trn_id >= 0 && ObjectDimsWorldBounds(scene, sel, &gb)) {
             const int axis =
                 vc.PickObjectAxisHandle(gb, e.local.x, e.local.y);
             if (axis >= 0) {
@@ -133,7 +133,7 @@ bool OnMouseDown(EditorContext& ctx, InteractionState& state,
     // Grab plane through the entry point of the object's world AABB,
     // perpendicular to the entry face (MoveSelect's trick).
     Bounds3 b;
-    if (!ObjectWorldBounds(scene, hit, &b)) return false;
+    if (!ObjectDimsWorldBounds(scene, hit, &b)) return false;
     const simd::float3 bmin{static_cast<float>(b.min_x),
                             static_cast<float>(b.min_y),
                             static_cast<float>(b.min_z)};
@@ -203,7 +203,7 @@ void OnMouseDragged(EditorContext& ctx, InteractionState& state,
 
     // Clamp so the object's AABB stays inside the world.
     Bounds3 b;
-    if (ObjectWorldBounds(scene, i, &b)) {
+    if (ObjectDimsWorldBounds(scene, i, &b)) {
         const Vec3i32 d = target - o.world_t;
         auto clamp_axis = [](int32_t delta, int32_t lo, int32_t hi) {
             const int32_t max_up = (kWorldHalf - 1) - hi;
@@ -288,7 +288,7 @@ void DrawOverlay(const EditorContext& ctx, const InteractionState& state,
     const int active = ctx.document.active_object;
     if (active != ctx.selected_object) {
         Bounds3 b;
-        if (ObjectWorldBounds(scene, active, &b)) {
+        if (ObjectDimsWorldBounds(scene, active, &b)) {
             selection_overlay::DrawWorldAabb(
                 b, Rgba8(140, 150, 175, 160), 1.0f, vc, od);
         }
@@ -296,7 +296,7 @@ void DrawOverlay(const EditorContext& ctx, const InteractionState& state,
     int i;
     if (!SelectedObject(ctx, &i)) return;
     Bounds3 b;
-    if (!ObjectWorldBounds(scene, i, &b)) return;
+    if (!ObjectDimsWorldBounds(scene, i, &b)) return;
     selection_overlay::DrawWorldAabb(b, Rgba8(255, 220, 80, 255), 1.5f, vc,
                                      od);
 
