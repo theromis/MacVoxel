@@ -479,18 +479,21 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 }
 
 - (NSInteger)selectedObjectSizeX {
-    return macvoxel::ObjectWorldExtents(_ctx->document.scene,
-                                        _ctx->selected_object).x;
+    return macvoxel::ObjectWorldExtents(
+        _ctx->document.scene,
+        macvoxel::scene_ops::ResizeTargetObject(*_ctx)).x;
 }
 
 - (NSInteger)selectedObjectSizeY {
-    return macvoxel::ObjectWorldExtents(_ctx->document.scene,
-                                        _ctx->selected_object).y;
+    return macvoxel::ObjectWorldExtents(
+        _ctx->document.scene,
+        macvoxel::scene_ops::ResizeTargetObject(*_ctx)).y;
 }
 
 - (NSInteger)selectedObjectSizeZ {
-    return macvoxel::ObjectWorldExtents(_ctx->document.scene,
-                                        _ctx->selected_object).z;
+    return macvoxel::ObjectWorldExtents(
+        _ctx->document.scene,
+        macvoxel::scene_ops::ResizeTargetObject(*_ctx)).z;
 }
 
 - (void)requestResizeSelectedObjectX:(NSInteger)x
@@ -501,7 +504,8 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
                                       static_cast<int32_t>(y),
                                       static_cast<int32_t>(z)};
     _ctx->requested_resize = macvoxel::DimsFromWorldExtents(
-        _ctx->document.scene, _ctx->selected_object, world_ext);
+        _ctx->document.scene,
+        macvoxel::scene_ops::ResizeTargetObject(*_ctx), world_ext);
     _ctx->has_requested_resize = true;
 }
 

@@ -195,20 +195,28 @@ bool DeleteObject(EditorContext& ctx) {
     return true;
 }
 
-bool CanResizeSelectedObject(const EditorContext& ctx) {
-    const int i = ctx.selected_object;
+int ResizeTargetObject(const EditorContext& ctx) {
     const Scene& scene = ctx.document.scene;
+    int i = ctx.selected_object;
     if (i < 0 || static_cast<size_t>(i) >= scene.objects.size()) {
-        return false;
+        i = ctx.document.active_object;
+    }
+    if (i < 0 || static_cast<size_t>(i) >= scene.objects.size()) {
+        return -1;
     }
     const SceneObject& o = scene.objects[static_cast<size_t>(i)];
-    return o.trn_id >= 0 && o.model_id >= 0 &&
-           static_cast<size_t>(o.model_id) < scene.models.size();
+    const bool ok = o.trn_id >= 0 && o.model_id >= 0 &&
+                    static_cast<size_t>(o.model_id) < scene.models.size();
+    return ok ? i : -1;
+}
+
+bool CanResizeSelectedObject(const EditorContext& ctx) {
+    return ResizeTargetObject(ctx) >= 0;
 }
 
 bool ResizeSelectedObject(EditorContext& ctx, Vec3i32 new_dims) {
-    if (!CanResizeSelectedObject(ctx)) return false;
-    const int i = ctx.selected_object;
+    const int i = ResizeTargetObject(ctx);
+    if (i < 0) return false;
     Document& doc = ctx.document;
     Scene& scene = doc.scene;
     new_dims.x = std::clamp(new_dims.x, 1, 256);

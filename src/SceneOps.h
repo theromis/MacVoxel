@@ -30,8 +30,12 @@ int DuplicateObject(EditorContext& ctx);
 // object or the selection is invalid.
 bool DeleteObject(EditorContext& ctx);
 
-// True when the selected object can take a dims-box resize (leaf nTRN
-// and model both present).
+// The object the size fields address: the scene-mode selection when
+// one exists, else the active object (so the fields work in Model
+// mode too). -1 when neither is a resizable leaf.
+int ResizeTargetObject(const EditorContext& ctx);
+
+// True when ResizeTargetObject finds a target.
 bool CanResizeSelectedObject(const EditorContext& ctx);
 
 // Resize the selected object's dims box (clamped 1..256 per axis;
