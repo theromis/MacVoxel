@@ -2,6 +2,7 @@
 
 #include "EditVolume.h"
 #include "Palette.h"
+#include "VoxScene.h"
 #include "VoxelGrid.h"
 #include "VoxelVolume.h"
 
@@ -32,6 +33,11 @@ namespace macvoxel {
 // counters advances. There is no separate `lights_version`.
 struct Document {
     VoxelGrid grid;
+    // The resident .vox scene graph: per-model local grids + node tree.
+    // For now `grid` still holds flatten(all objects); the object-mode
+    // pivot narrows it to the active object baked at its world transform.
+    Scene scene;
+    int32_t active_object = 0;
     Palette palette;
     EditVolume volume;
     // Dense write-through shadow of the in-volume cells of `grid`,
@@ -44,10 +50,13 @@ struct Document {
     uint64_t geometry_version = 0;
     uint64_t palette_version = 0;
     uint64_t material_version = 0;
+    // Scene-graph structure / transforms (not cell contents) changed.
+    uint64_t scene_version = 0;
 
     void BumpGeometry()  { ++geometry_version; ++version; }
     void BumpPalette()   { ++palette_version;  ++version; }
     void BumpMaterials() { ++material_version; ++version; }
+    void BumpScene()     { ++scene_version;    ++version; }
     // Single flip-point for routing voxel writes through future
     // GPU-authoritative storage (Phase A1: write-through to VoxelVolume
     // shadow; A2: ping-pong texture upload). All in-process edit paths
@@ -94,18 +103,18 @@ struct Document {
         volume_shadow.RebuildFromGrid(grid);
     }
 
-    // Translate `grid` so the model fits inside `volume`: centered in
-    // X/Y, resting on the floor (volume.z0) in Z — the editor's
-    // ground-plane convention. Loaded .vox coords are authored
-    // arbitrarily (corner-at-origin, or origin-centered scene-graph
-    // transforms), so without this a model can land partly outside the
-    // fixed edit volume: the path tracer (reads `grid`) shows it whole
-    // while the dense shadow / tex_a (which drop out-of-volume cells)
-    // show only a truncated corner. Uniform translation preserves
-    // relative placement in multi-object scenes; idempotent once fitted;
-    // no-op when empty. Call before ReseedVolumeShadow on load.
-    void FitGridToVolume() {
-        const Bounds3 b = grid.Bounds();
+    // Translate the scene so it fits inside `volume`: centered in X/Y,
+    // resting on the floor (volume.z0) in Z — the editor's ground-plane
+    // convention. Loaded .vox coords are authored arbitrarily
+    // (corner-at-origin, or origin-centered scene-graph transforms), so
+    // without this a model can land partly outside the fixed edit
+    // volume: the path tracer (reads `grid`) shows it whole while the
+    // dense shadow / tex_a (which drop out-of-volume cells) show only a
+    // truncated corner. Uniform translation preserves relative placement
+    // in multi-object scenes; idempotent once fitted; no-op when empty.
+    // Callers re-flatten into `grid` afterwards, then ReseedVolumeShadow.
+    void FitSceneToVolume() {
+        const Bounds3 b = scene.WorldBounds();
         if (b.empty()) return;
         const int32_t ox =
             volume.x0 + (volume.size_x() - b.size_x()) / 2 - b.min_x;
@@ -113,20 +122,7 @@ struct Document {
             volume.y0 + (volume.size_y() - b.size_y()) / 2 - b.min_y;
         const int32_t oz = volume.z0 - b.min_z;
         if (ox == 0 && oy == 0 && oz == 0) return;
-        constexpr int32_t cs = static_cast<int32_t>(VoxelGrid::kChunkSize);
-        VoxelGrid moved;
-        for (const auto& [coord, chunk] : grid.chunks()) {
-            for (int32_t lz = 0; lz < cs; ++lz)
-            for (int32_t ly = 0; ly < cs; ++ly)
-            for (int32_t lx = 0; lx < cs; ++lx) {
-                const uint8_t v = chunk->cells[VoxelGrid::LocalIndex(lx, ly, lz)];
-                if (v == 0) continue;
-                moved.Set(coord.x * cs + lx + ox,
-                          coord.y * cs + ly + oy,
-                          coord.z * cs + lz + oz, v);
-            }
-        }
-        grid = std::move(moved);
+        scene.TranslateAll(Vec3i32{ox, oy, oz});
     }
     // Whole-document replacement (load / new / open). Bumps every
     // typed counter so renderers invalidate all categories at once.

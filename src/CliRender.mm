@@ -202,10 +202,12 @@ int RunCliRender(int argc, const char* argv[]) {
         EditorContext ctx;
         Document& doc = ctx.document;
         std::string err;
-        if (!LoadVox(args.input, &doc.grid, &doc.palette, &err)) {
+        if (!LoadVoxScene(args.input, &doc.scene, &doc.palette, &err)) {
             std::fprintf(stderr, "load failed: %s\n", err.c_str());
             return 1;
         }
+        // No volume fit — headless renders authored coordinates as-is.
+        FlattenScene(doc.scene, -1, &doc.grid);
         doc.ReseedVolumeShadow();
         doc.path = args.input;
         doc.BumpAll();

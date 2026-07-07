@@ -63,8 +63,9 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     if (path != nil) {
         const std::string p = [path UTF8String];
         std::string err;
-        if (macvoxel::LoadVox(p, &doc.grid, &doc.palette, &err)) {
-            doc.FitGridToVolume();
+        if (macvoxel::LoadVoxScene(p, &doc.scene, &doc.palette, &err)) {
+            doc.FitSceneToVolume();
+            macvoxel::FlattenScene(doc.scene, -1, &doc.grid);
             doc.ReseedVolumeShadow();
             return;
         }
@@ -76,6 +77,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     doc.ClearCells();
     doc.SetCell(0, 0, 0, 1);
     doc.palette.ResetToDefault();
+    doc.scene = macvoxel::Scene::FromSingleGrid(doc.grid);
 }
 
 - (macvoxel::EditorContext *)context {
@@ -130,7 +132,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     const std::string path = [[url path] UTF8String];
     macvoxel::Document fresh;
     std::string err;
-    if (!macvoxel::LoadVox(path, &fresh.grid, &fresh.palette, &err)) {
+    if (!macvoxel::LoadVoxScene(path, &fresh.scene, &fresh.palette, &err)) {
         if (error) {
             NSString *msg = [NSString stringWithUTF8String:err.c_str()];
             *error = [NSError errorWithDomain:@"MacVoxel" code:2
@@ -140,7 +142,8 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     }
     fresh.path = path;
     _ctx->document = std::move(fresh);
-    _ctx->document.FitGridToVolume();
+    _ctx->document.FitSceneToVolume();
+    macvoxel::FlattenScene(_ctx->document.scene, -1, &_ctx->document.grid);
     _ctx->document.ReseedVolumeShadow();
     _ctx->document.BumpAll();
     _ctx->history.Clear();
