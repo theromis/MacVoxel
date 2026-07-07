@@ -281,7 +281,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 }
 
 - (BOOL)canDuplicateObject {
-    return [self inSceneMode] && [self hasSelectedObject];
+    return [self hasSelectedObject];
 }
 
 - (BOOL)canTransformSelection {
@@ -289,9 +289,7 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
 }
 
 - (void)duplicateObject {
-    if ([self inSceneMode]) {
-        macvoxel::scene_ops::DuplicateObject(*_ctx);
-    }
+    macvoxel::scene_ops::DuplicateObject(*_ctx);
 }
 
 - (void)copy {
@@ -414,6 +412,85 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
         macvoxel::lift::CommitLift(*_ctx);
     }
     _ctx->selection.Clear();
+}
+
+// ---------------------------------------------------------------------------
+// Scene graph / outliner
+// ---------------------------------------------------------------------------
+
+- (BridgeEditorMode)editorMode {
+    return _ctx->editor_mode == macvoxel::EditorMode::Scene
+               ? BridgeEditorModeScene
+               : BridgeEditorModeModel;
+}
+
+- (NSInteger)objectCount {
+    return static_cast<NSInteger>(_ctx->document.scene.objects.size());
+}
+
+- (NSArray<NSString *> *)objectNames {
+    const auto& objects = _ctx->document.scene.objects;
+    NSMutableArray<NSString *> *names =
+        [NSMutableArray arrayWithCapacity:objects.size()];
+    for (size_t i = 0; i < objects.size(); ++i) {
+        const std::string& n = objects[i].name;
+        if (!n.empty()) {
+            [names addObject:[NSString stringWithUTF8String:n.c_str()]];
+        } else {
+            [names addObject:[NSString stringWithFormat:@"Object %zu", i + 1]];
+        }
+    }
+    return names;
+}
+
+- (NSInteger)selectedObjectIndex {
+    return _ctx->selected_object;
+}
+
+- (void)setSelectedObjectIndex:(NSInteger)index {
+    const auto count = _ctx->document.scene.objects.size();
+    _ctx->selected_object =
+        (index >= 0 && static_cast<size_t>(index) < count)
+            ? static_cast<int32_t>(index)
+            : -1;
+}
+
+- (NSInteger)activeObjectIndex {
+    return _ctx->document.active_object;
+}
+
+- (BOOL)canDeleteSelectedObject {
+    return [self hasSelectedObject] &&
+           _ctx->document.scene.objects.size() > 1;
+}
+
+- (void)requestActivateObjectAtIndex:(NSInteger)index {
+    const auto count = _ctx->document.scene.objects.size();
+    if (index < 0 || static_cast<size_t>(index) >= count) return;
+    _ctx->requested_active_object = static_cast<int32_t>(index);
+}
+
+- (void)deleteSelectedObject {
+    macvoxel::scene_ops::DeleteObject(*_ctx);
+}
+
+- (void)renameObjectAtIndex:(NSInteger)index name:(NSString *)name {
+    macvoxel::Scene& scene = _ctx->document.scene;
+    if (index < 0 || static_cast<size_t>(index) >= scene.objects.size()) {
+        return;
+    }
+    const int32_t trn_id =
+        scene.objects[static_cast<size_t>(index)].trn_id;
+    auto it = scene.nodes.find(trn_id);
+    if (it == scene.nodes.end()) return;
+    const std::string n = [name UTF8String];
+    if (n.empty()) {
+        it->second.attrs.erase("_name");
+    } else {
+        it->second.attrs["_name"] = n;
+    }
+    scene.RebuildObjects();
+    _ctx->document.BumpScene();
 }
 
 // ---------------------------------------------------------------------------

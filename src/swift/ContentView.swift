@@ -28,12 +28,27 @@ struct ContentView: View {
                             .frame(width: 150)
                             .hudPanel()
                         }
+                        .corner(.topLeading) {
+                            if state.renderMode == .edit {
+                                Picker("Editor", selection: $state.editorMode) {
+                                    Text("Model").tag(BridgeEditorMode.model)
+                                    Text("Object").tag(BridgeEditorMode.scene)
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.segmented)
+                                .frame(width: 150)
+                                .hudPanel()
+                                .help("Tab toggles between modes")
+                            }
+                        }
                 }
                 .frame(minWidth: 500, idealWidth: 900)
                 .layoutPriority(1)
 
             ScrollView {
                 VStack(spacing: 0) {
+                    OutlinerPanel(state: state)
+                    Divider()
                     ModelPanel()
                     Divider()
                     RenderPanel(state: state)

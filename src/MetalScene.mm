@@ -306,6 +306,15 @@ constexpr unsigned short kKeyCodeTab         = 48;
     }
 }
 
+- (void)requestEditorMode:(BOOL)sceneMode {
+    const bool is_scene =
+        _ctx->editor_mode == macvoxel::EditorMode::Scene;
+    if (sceneMode == is_scene) return;
+    if (_ctx->render_settings.mode != macvoxel::RenderMode::Edit) return;
+    if (_interaction.drag_mode != DragMode::None) return;
+    [self toggleEditorMode];
+}
+
 - (void)invalidateRenderers {
     [_raycastRenderer invalidate];
     [_pathTraceRenderer invalidate];
@@ -635,6 +644,22 @@ constexpr unsigned short kKeyCodeTab         = 48;
     if (!scene_mode) {
         _toolRegistry->TickAll(*_ctx, _interaction, [self viewContext],
                                 _ctx->tool.tool, escape_now, *_editEngine);
+    }
+
+    // Bridge-initiated activation (outliner double-click) lands here so
+    // the lift/gizmo commit preconditions run on the frame loop, never
+    // from the bridge.
+    if (_ctx->requested_active_object >= 0) {
+        const int32_t req = _ctx->requested_active_object;
+        _ctx->requested_active_object = -1;
+        if (_interaction.drag_mode == DragMode::None) {
+            [self autoCommitLift];
+            if (_toolRegistry->generator()->HasActiveGizmo()) {
+                _toolRegistry->generator()->Commit(*_ctx, _interaction,
+                                                    *_editEngine);
+            }
+            macvoxel::scene_ops::ActivateObject(*_ctx, req);
+        }
     }
 
     // Auto-commit the active lift on "user moved on" gestures

@@ -25,6 +25,10 @@
 // which would visually yank the camera out from under the user.
 - (void)frameCameraToDocument;
 
+// UI-initiated Model/Scene mode change; runs the Tab toggle sequence
+// when legal (Edit renderer, no drag in flight), no-ops otherwise.
+- (void)requestEditorMode:(BOOL)sceneMode;
+
 // Drop both renderers' caches. Call when the document object is
 // replaced wholesale (load, new). The raycast renderer's incremental
 // dirty-chunk path can't tell when a chunk has been removed from the

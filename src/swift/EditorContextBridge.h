@@ -78,6 +78,14 @@ typedef NS_ENUM(NSInteger, BridgeRenderMode) {
     BridgeRenderModeRender NS_SWIFT_NAME(render) = 1,
 };
 
+// Mirror of macvoxel::EditorMode (EditorMode.h). .model edits voxels
+// inside the active object; .scene ("object mode") transforms whole
+// objects. Toggled with Tab in the 3D view or the HUD picker.
+typedef NS_ENUM(NSInteger, BridgeEditorMode) {
+    BridgeEditorModeModel NS_SWIFT_NAME(model) = 0,
+    BridgeEditorModeScene NS_SWIFT_NAME(scene) = 1,
+};
+
 typedef NS_ENUM(NSInteger, BridgeMaterialType) {
     BridgeMaterialTypeDiffuse  NS_SWIFT_NAME(diffuse)  = 0,
     BridgeMaterialTypeMetal    NS_SWIFT_NAME(metal)    = 1,
@@ -159,6 +167,24 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 - (void)deleteSelection;
 - (void)deselect;
 - (void)duplicateObject;
+
+// ---------------------------------------------------------------------------
+// Scene graph / outliner. Object indices are DFS order over the node
+// tree (stable across transform edits; structural ops re-derive them).
+// Mode changes and activation go through MetalScene's per-frame loop —
+// the bridge never touches GPU-resident tool state directly.
+// ---------------------------------------------------------------------------
+
+@property (nonatomic, readonly) BridgeEditorMode editorMode;
+@property (nonatomic, readonly) NSInteger objectCount;
+- (nonnull NSArray<NSString *> *)objectNames;
+@property (nonatomic) NSInteger selectedObjectIndex;   // -1 = none
+@property (nonatomic, readonly) NSInteger activeObjectIndex;
+@property (nonatomic, readonly) BOOL canDeleteSelectedObject;
+// Deferred to the next frame (lift/gizmo commit preconditions).
+- (void)requestActivateObjectAtIndex:(NSInteger)index;
+- (void)deleteSelectedObject;
+- (void)renameObjectAtIndex:(NSInteger)index name:(nonnull NSString *)name;
 
 // ---------------------------------------------------------------------------
 // Document read-only stats. Read each frame (or each tick) by panels;

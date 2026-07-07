@@ -161,6 +161,60 @@ final class EditorState {
         return bridge.canDuplicateObject
     }
 
+    // ---- Scene graph / outliner ----
+
+    var editorMode: BridgeEditorMode {
+        get {
+            _ = tick
+            return bridge.editorMode
+        }
+        set {
+            scene?.requestEditorMode(newValue == .scene)
+            tick &+= 1
+        }
+    }
+
+    var objectNames: [String] {
+        _ = tick
+        return bridge.objectNames()
+    }
+
+    var selectedObjectIndex: Int {
+        get {
+            _ = tick
+            return bridge.selectedObjectIndex
+        }
+        set {
+            bridge.selectedObjectIndex = newValue
+            tick &+= 1
+        }
+    }
+
+    var activeObjectIndex: Int {
+        _ = tick
+        return bridge.activeObjectIndex
+    }
+
+    var canDeleteSelectedObject: Bool {
+        _ = tick
+        return bridge.canDeleteSelectedObject
+    }
+
+    func activateObject(at index: Int) {
+        bridge.requestActivateObject(at: index)
+        tick &+= 1
+    }
+
+    func deleteSelectedObject() {
+        bridge.deleteSelectedObject()
+        afterMutation(reframeCamera: false)
+    }
+
+    func renameObject(at index: Int, name: String) {
+        bridge.renameObject(at: index, name: name)
+        tick &+= 1
+    }
+
     func cut()             { bridge.cut();             afterMutation(reframeCamera: false) }
     func copy()            { bridge.copy();            afterMutation(reframeCamera: false) }
     func paste()           { bridge.paste();           afterMutation(reframeCamera: false) }

@@ -69,6 +69,9 @@ struct EditorContext {
     // Scene-mode selection: index into document.scene.objects, -1 = none.
     // v1 is single-select; widen to a set later.
     int32_t selected_object = -1;
+    // Bridge-initiated activation, serviced by MetalScene's per-frame
+    // loop (which owns the lift/gizmo commit preconditions). -1 = none.
+    int32_t requested_active_object = -1;
     // Non-owning back-ref so non-Tool paths (SelectionOps, bridge
     // actions) can reach the GPU dispatch façade. MetalScene sets
     // this in its init right after MakeEditEngine; clears in dealloc.

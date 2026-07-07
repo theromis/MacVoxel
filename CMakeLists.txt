@@ -97,6 +97,7 @@ set(APP_SWIFT_SOURCES
     src/swift/panels/LightPanel.swift
     src/swift/panels/MutatorControls.swift
     src/swift/panels/ModelPanel.swift
+    src/swift/panels/OutlinerPanel.swift
     src/swift/panels/PalettePanel.swift
     src/swift/panels/RenderPanel.swift
     src/swift/panels/SelectionPanel.swift
