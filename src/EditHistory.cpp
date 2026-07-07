@@ -98,6 +98,42 @@ void ApplySceneChange(Document& doc, const EditOp::SceneChange& sc,
             }
             return;
         }
+        case Kind::ModelResize: {
+            if (sc.model_id < 0 ||
+                static_cast<size_t>(sc.model_id) >= scene.models.size()) {
+                return;
+            }
+            SceneModel& model =
+                scene.models[static_cast<size_t>(sc.model_id)];
+            if (undo) {
+                model.dims[0] = sc.old_dims.x;
+                model.dims[1] = sc.old_dims.y;
+                model.dims[2] = sc.old_dims.z;
+                for (const auto& c : sc.clipped) {
+                    model.grid.Set(c.l.x, c.l.y, c.l.z, c.v);
+                }
+            } else {
+                for (const auto& c : sc.clipped) {
+                    model.grid.Set(c.l.x, c.l.y, c.l.z, 0);
+                }
+                model.dims[0] = sc.new_dims.x;
+                model.dims[1] = sc.new_dims.y;
+                model.dims[2] = sc.new_dims.z;
+            }
+            auto it = scene.nodes.find(sc.trn_id);
+            if (it != scene.nodes.end()) {
+                it->second.t = undo ? sc.old_t : sc.new_t;
+            }
+            scene.RebuildObjects();
+            const int active = doc.active_object;
+            if (active >= 0 &&
+                static_cast<size_t>(active) < scene.objects.size() &&
+                scene.objects[static_cast<size_t>(active)].trn_id ==
+                    sc.trn_id) {
+                doc.RebakeActiveObject();
+            }
+            return;
+        }
         case Kind::ActiveSwitch: {
             const int32_t target = undo ? sc.old_active : sc.new_active;
             if (target < 0 ||

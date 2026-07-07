@@ -146,6 +146,15 @@ void SyncModelFromWorldGrid(Scene& scene, int object_index,
 // is invalid or empty.
 bool ObjectWorldBounds(const Scene& scene, int object_index, Bounds3* out);
 
+// The object's dims box as extents along the WORLD axes (rotations are
+// signed permutations, so this is |R|·dims). Zero when invalid.
+Vec3i32 ObjectWorldExtents(const Scene& scene, int object_index);
+
+// Inverse of ObjectWorldExtents: map user-facing world-axis extents
+// back to model-local dims through the object's rotation.
+Vec3i32 DimsFromWorldExtents(const Scene& scene, int object_index,
+                             const Vec3i32& world_ext);
+
 // Write a new world transform back through the object's ancestor
 // inverse into its leaf nTRN (t + rotation byte), refresh the derived
 // object cache. No voxel data moves — this IS the object-mode

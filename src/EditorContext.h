@@ -72,6 +72,11 @@ struct EditorContext {
     // Bridge-initiated activation, serviced by MetalScene's per-frame
     // loop (which owns the lift/gizmo commit preconditions). -1 = none.
     int32_t requested_active_object = -1;
+    // Bridge-initiated dims-box resize of the selected object (MODEL-
+    // LOCAL dims), serviced the same way — resizing the active object
+    // moves the edit volume, so it must never fire from the bridge.
+    Vec3i32 requested_resize{};
+    bool has_requested_resize = false;
     // Non-owning back-ref so non-Tool paths (SelectionOps, bridge
     // actions) can reach the GPU dispatch façade. MetalScene sets
     // this in its init right after MakeEditEngine; clears in dealloc.

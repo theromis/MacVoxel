@@ -213,6 +213,46 @@ void SetObjectWorldTransform(Scene& scene, int object_index,
     scene.RebuildObjects();
 }
 
+Vec3i32 ObjectWorldExtents(const Scene& scene, int object_index) {
+    if (object_index < 0 ||
+        static_cast<size_t>(object_index) >= scene.objects.size()) {
+        return {};
+    }
+    const SceneObject& o = scene.objects[static_cast<size_t>(object_index)];
+    if (o.model_id < 0 ||
+        static_cast<size_t>(o.model_id) >= scene.models.size()) {
+        return {};
+    }
+    const SceneModel& model = scene.models[static_cast<size_t>(o.model_id)];
+    // world_i = Σ_j m[i][j]·local_j, so |m[i][j]| = 1 maps local extent
+    // j onto world axis i.
+    Vec3i32 out{};
+    int32_t* w[3] = {&out.x, &out.y, &out.z};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            if (o.world_r.m[i][j] != 0) *w[i] = model.dims[j];
+        }
+    }
+    return out;
+}
+
+Vec3i32 DimsFromWorldExtents(const Scene& scene, int object_index,
+                             const Vec3i32& world_ext) {
+    if (object_index < 0 ||
+        static_cast<size_t>(object_index) >= scene.objects.size()) {
+        return world_ext;
+    }
+    const SceneObject& o = scene.objects[static_cast<size_t>(object_index)];
+    const int32_t we[3] = {world_ext.x, world_ext.y, world_ext.z};
+    int32_t d[3] = {world_ext.x, world_ext.y, world_ext.z};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            if (o.world_r.m[i][j] != 0) d[j] = we[i];
+        }
+    }
+    return Vec3i32{d[0], d[1], d[2]};
+}
+
 int FindObjectByTrn(const Scene& scene, int32_t trn_id) {
     for (size_t i = 0; i < scene.objects.size(); ++i) {
         if (scene.objects[i].trn_id == trn_id) return static_cast<int>(i);
@@ -450,9 +490,17 @@ void SyncModelFromWorldGrid(Scene& scene, int object_index,
         }
     }
 
-    // Renormalize to a tight [0, dims) box and re-solve the translation so
-    // world placement is bit-identical: w = R(l − h) + T = R(l + s − h') + T'
+    // Renormalize GROW-ONLY and re-solve the translation so world
+    // placement is bit-identical: w = R(l − h) + T = R(l + s − h') + T'
     // ⇒ T' = T + R(h' − h − s), with s shifting the local min to zero.
+    // Dims are user-controlled (the size fields), so a sync widens the
+    // box to cover out-of-box growth but never shrinks it back to the
+    // tight voxel bounds.
+    lmin = Vec3i32{std::min(lmin.x, 0), std::min(lmin.y, 0),
+                   std::min(lmin.z, 0)};
+    lmax = Vec3i32{std::max(lmax.x, model.dims[0] - 1),
+                   std::max(lmax.y, model.dims[1] - 1),
+                   std::max(lmax.z, model.dims[2] - 1)};
     const Vec3i32 s{-lmin.x, -lmin.y, -lmin.z};
     model.dims[0] = lmax.x - lmin.x + 1;
     model.dims[1] = lmax.y - lmin.y + 1;

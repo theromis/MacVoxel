@@ -205,6 +205,44 @@ final class EditorState {
         tick &+= 1
     }
 
+    var canResizeSelectedObject: Bool {
+        _ = tick
+        return bridge.canResizeSelectedObject
+    }
+
+    // Size fields show world-axis extents; the actual mutation runs on
+    // the frame loop (the bridge only posts a request), so a bare tick
+    // bump is right here — geometry/scene version bumps follow there.
+    var selectedObjectSizeX: Int {
+        get { _ = tick; return bridge.selectedObjectSizeX }
+        set {
+            bridge.requestResizeSelectedObject(
+                x: newValue, y: bridge.selectedObjectSizeY,
+                z: bridge.selectedObjectSizeZ)
+            tick &+= 1
+        }
+    }
+
+    var selectedObjectSizeY: Int {
+        get { _ = tick; return bridge.selectedObjectSizeY }
+        set {
+            bridge.requestResizeSelectedObject(
+                x: bridge.selectedObjectSizeX, y: newValue,
+                z: bridge.selectedObjectSizeZ)
+            tick &+= 1
+        }
+    }
+
+    var selectedObjectSizeZ: Int {
+        get { _ = tick; return bridge.selectedObjectSizeZ }
+        set {
+            bridge.requestResizeSelectedObject(
+                x: bridge.selectedObjectSizeX,
+                y: bridge.selectedObjectSizeY, z: newValue)
+            tick &+= 1
+        }
+    }
+
     func deleteSelectedObject() {
         bridge.deleteSelectedObject()
         afterMutation(reframeCamera: false)

@@ -662,6 +662,21 @@ constexpr unsigned short kKeyCodeTab         = 48;
         }
     }
 
+    // Bridge-initiated resize, same preconditions: resizing the active
+    // object rebakes and can move the edit volume.
+    if (_ctx->has_requested_resize) {
+        _ctx->has_requested_resize = false;
+        if (_interaction.drag_mode == DragMode::None) {
+            [self autoCommitLift];
+            if (_toolRegistry->generator()->HasActiveGizmo()) {
+                _toolRegistry->generator()->Commit(*_ctx, _interaction,
+                                                    *_editEngine);
+            }
+            macvoxel::scene_ops::ResizeSelectedObject(
+                *_ctx, _ctx->requested_resize);
+        }
+    }
+
     // Auto-commit the active lift on "user moved on" gestures
     // detectable from the per-frame loop: tool switch and render-mode
     // toggle. (Other paths — save / open / new / deselect — handle

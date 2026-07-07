@@ -34,6 +34,17 @@ struct OutlinerPanel: View {
                     .disabled(!state.canDeleteSelectedObject)
             }
             .font(.system(size: 11))
+
+            // Selected object's box size, shown as world-axis extents.
+            HStack(spacing: 4) {
+                Text("Size")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                sizeField(value: $state.selectedObjectSizeX)
+                sizeField(value: $state.selectedObjectSizeY)
+                sizeField(value: $state.selectedObjectSizeZ)
+            }
+            .disabled(!state.canResizeSelectedObject)
         }
         .padding(12)
         .alert("Rename Object", isPresented: renameBinding) {
@@ -46,6 +57,16 @@ struct OutlinerPanel: View {
             }
             Button("Cancel", role: .cancel) { renameIndex = nil }
         }
+    }
+
+    private func sizeField(value: Binding<Int>) -> some View {
+        TextField("", value: Binding(
+            get: { value.wrappedValue },
+            set: { value.wrappedValue = max(1, min($0, 256)) }
+        ), formatter: NumberFormatter())
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 46)
+            .font(.system(size: 11, design: .monospaced))
     }
 
     private var renameBinding: Binding<Bool> {

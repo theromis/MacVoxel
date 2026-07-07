@@ -474,6 +474,37 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     macvoxel::scene_ops::DeleteObject(*_ctx);
 }
 
+- (BOOL)canResizeSelectedObject {
+    return macvoxel::scene_ops::CanResizeSelectedObject(*_ctx);
+}
+
+- (NSInteger)selectedObjectSizeX {
+    return macvoxel::ObjectWorldExtents(_ctx->document.scene,
+                                        _ctx->selected_object).x;
+}
+
+- (NSInteger)selectedObjectSizeY {
+    return macvoxel::ObjectWorldExtents(_ctx->document.scene,
+                                        _ctx->selected_object).y;
+}
+
+- (NSInteger)selectedObjectSizeZ {
+    return macvoxel::ObjectWorldExtents(_ctx->document.scene,
+                                        _ctx->selected_object).z;
+}
+
+- (void)requestResizeSelectedObjectX:(NSInteger)x
+                                   y:(NSInteger)y
+                                   z:(NSInteger)z {
+    if (![self canResizeSelectedObject]) return;
+    const macvoxel::Vec3i32 world_ext{static_cast<int32_t>(x),
+                                      static_cast<int32_t>(y),
+                                      static_cast<int32_t>(z)};
+    _ctx->requested_resize = macvoxel::DimsFromWorldExtents(
+        _ctx->document.scene, _ctx->selected_object, world_ext);
+    _ctx->has_requested_resize = true;
+}
+
 - (void)renameObjectAtIndex:(NSInteger)index name:(NSString *)name {
     macvoxel::Scene& scene = _ctx->document.scene;
     if (index < 0 || static_cast<size_t>(index) >= scene.objects.size()) {

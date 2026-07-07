@@ -1,5 +1,7 @@
 #pragma once
 
+#include "VoxScene.h"
+
 #include <cstdint>
 
 namespace macvoxel {
@@ -27,6 +29,19 @@ int DuplicateObject(EditorContext& ctx);
 // to a survivor first — both land in ONE op. False when it's the last
 // object or the selection is invalid.
 bool DeleteObject(EditorContext& ctx);
+
+// True when the selected object can take a dims-box resize (leaf nTRN
+// and model both present).
+bool CanResizeSelectedObject(const EditorContext& ctx);
+
+// Resize the selected object's dims box (clamped 1..256 per axis;
+// `new_dims` are MODEL-LOCAL — map user input through
+// DimsFromWorldExtents first). Local voxel coords stay fixed — content
+// anchors at the local min corner, so world growth runs toward the
+// +axes — and the leaf translation re-solves so surviving voxels never
+// move in world space. Voxels outside the new box are clipped; one
+// undo restores size and cells together.
+bool ResizeSelectedObject(EditorContext& ctx, Vec3i32 new_dims);
 
 // Selected object → the whole-object clipboard.
 bool CopyObject(EditorContext& ctx);

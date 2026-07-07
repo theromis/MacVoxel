@@ -185,6 +185,17 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 - (void)requestActivateObjectAtIndex:(NSInteger)index;
 - (void)deleteSelectedObject;
 - (void)renameObjectAtIndex:(NSInteger)index name:(nonnull NSString *)name;
+// Selected object's dims box as WORLD-axis extents (what the size
+// fields show for a rotated object). Zero when there's no resizable
+// selection. The resize is deferred to the frame loop like activation.
+@property (nonatomic, readonly) BOOL canResizeSelectedObject;
+@property (nonatomic, readonly) NSInteger selectedObjectSizeX;
+@property (nonatomic, readonly) NSInteger selectedObjectSizeY;
+@property (nonatomic, readonly) NSInteger selectedObjectSizeZ;
+- (void)requestResizeSelectedObjectX:(NSInteger)x
+                                   y:(NSInteger)y
+                                   z:(NSInteger)z
+    NS_SWIFT_NAME(requestResizeSelectedObject(x:y:z:));
 
 // ---------------------------------------------------------------------------
 // Document read-only stats. Read each frame (or each tick) by panels;

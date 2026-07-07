@@ -56,15 +56,23 @@ struct EditOp {
     //                 activation — undoing past a switch re-activates
     //                 the prior object before its cell ops replay, which
     //                 is what keeps cross-object undo correct.
+    //   ModelResize:  dims-box edit, addressed by model_id. Carries the
+    //                 voxels the shrink clipped as MODEL-LOCAL cells
+    //                 (the model may be inactive, so its voxels aren't
+    //                 in doc.grid, and cell records replay before scene
+    //                 changes on undo — world-cell records can't
+    //                 represent the clip either way). old_t/new_t hold
+    //                 the pivot-compensating leaf translation.
     struct SceneChange {
         enum class Kind : uint8_t {
             Transform,
             AddObject,
             RemoveObject,
             ActiveSwitch,
+            ModelResize,
         };
         Kind kind = Kind::Transform;
-        // Transform:
+        // Transform (+ ModelResize's leaf translation):
         int32_t trn_id = -1;
         Vec3i32 old_t{}, new_t{};
         uint8_t old_r = 4, new_r = 4;
@@ -74,6 +82,14 @@ struct EditOp {
         int32_t child_trn = -1;
         // ActiveSwitch (object indices at op time):
         int32_t old_active = -1, new_active = -1;
+        // ModelResize:
+        int32_t model_id = -1;
+        Vec3i32 old_dims{}, new_dims{};
+        struct ClippedCell {
+            Vec3i32 l;
+            uint8_t v = 0;
+        };
+        std::vector<ClippedCell> clipped;
     };
     std::vector<Change> changes;
     std::vector<PaletteChange> palette_changes;

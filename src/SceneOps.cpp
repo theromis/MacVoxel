@@ -195,6 +195,109 @@ bool DeleteObject(EditorContext& ctx) {
     return true;
 }
 
+bool CanResizeSelectedObject(const EditorContext& ctx) {
+    const int i = ctx.selected_object;
+    const Scene& scene = ctx.document.scene;
+    if (i < 0 || static_cast<size_t>(i) >= scene.objects.size()) {
+        return false;
+    }
+    const SceneObject& o = scene.objects[static_cast<size_t>(i)];
+    return o.trn_id >= 0 && o.model_id >= 0 &&
+           static_cast<size_t>(o.model_id) < scene.models.size();
+}
+
+bool ResizeSelectedObject(EditorContext& ctx, Vec3i32 new_dims) {
+    if (!CanResizeSelectedObject(ctx)) return false;
+    const int i = ctx.selected_object;
+    Document& doc = ctx.document;
+    Scene& scene = doc.scene;
+    new_dims.x = std::clamp(new_dims.x, 1, 256);
+    new_dims.y = std::clamp(new_dims.y, 1, 256);
+    new_dims.z = std::clamp(new_dims.z, 1, 256);
+
+    // Pending grid edits must land in the model before it's read.
+    doc.SyncActiveModel();
+
+    const SceneObject obj = scene.objects[static_cast<size_t>(i)];
+    SceneModel& model = scene.models[static_cast<size_t>(obj.model_id)];
+    const Vec3i32 old_dims{model.dims[0], model.dims[1], model.dims[2]};
+    if (new_dims == old_dims) return false;
+
+    // Voxels falling outside the new box get clipped (recorded below so
+    // the resize undoes as one step).
+    std::vector<EditOp::SceneChange::ClippedCell> clipped;
+    constexpr int32_t cs = static_cast<int32_t>(VoxelGrid::kChunkSize);
+    for (const auto& [coord, chunk] : model.grid.chunks()) {
+        if (chunk->filled_count == 0) continue;
+        for (int32_t lz = 0; lz < cs; ++lz)
+        for (int32_t ly = 0; ly < cs; ++ly)
+        for (int32_t lx = 0; lx < cs; ++lx) {
+            const uint8_t v =
+                chunk->cells[VoxelGrid::LocalIndex(lx, ly, lz)];
+            if (v == 0) continue;
+            const Vec3i32 l{coord.x * cs + lx, coord.y * cs + ly,
+                            coord.z * cs + lz};
+            if (l.x >= 0 && l.x < new_dims.x && l.y >= 0 &&
+                l.y < new_dims.y && l.z >= 0 && l.z < new_dims.z) {
+                continue;
+            }
+            clipped.push_back({l, v});
+        }
+    }
+    for (const auto& c : clipped) {
+        model.grid.Set(c.l.x, c.l.y, c.l.z, 0);
+    }
+    model.dims[0] = new_dims.x;
+    model.dims[1] = new_dims.y;
+    model.dims[2] = new_dims.z;
+
+    // Local coords stay fixed across the resize, so the pivot shift
+    // must be absorbed by the translation to keep surviving voxels in
+    // place: w = R(l − h) + T ⇒ T' = T + R(h2 − h).
+    const Vec3i32 h{old_dims.x / 2, old_dims.y / 2, old_dims.z / 2};
+    const Vec3i32 h2{new_dims.x / 2, new_dims.y / 2, new_dims.z / 2};
+    Vec3i32 world_t2 = obj.world_t + obj.world_r * (h2 - h);
+
+    // Keep the grown dims box inside the world.
+    {
+        const Vec3i32 a = obj.world_r * (Vec3i32{} - h2) + world_t2;
+        const Vec3i32 b =
+            obj.world_r * (Vec3i32{new_dims.x - 1, new_dims.y - 1,
+                                   new_dims.z - 1} -
+                           h2) +
+            world_t2;
+        auto nudge = [](int32_t lo, int32_t hi) {
+            if (lo < -kWorldHalf) return -kWorldHalf - lo;
+            if (hi > kWorldHalf - 1) return (kWorldHalf - 1) - hi;
+            return 0;
+        };
+        world_t2 = world_t2 +
+                   Vec3i32{nudge(std::min(a.x, b.x), std::max(a.x, b.x)),
+                           nudge(std::min(a.y, b.y), std::max(a.y, b.y)),
+                           nudge(std::min(a.z, b.z), std::max(a.z, b.z))};
+    }
+
+    const Vec3i32 old_leaf_t = scene.nodes.at(obj.trn_id).t;
+    SetObjectWorldTransform(scene, i, obj.world_r, world_t2);
+
+    EditOp::SceneChange sc;
+    sc.kind = EditOp::SceneChange::Kind::ModelResize;
+    sc.trn_id = obj.trn_id;
+    sc.model_id = obj.model_id;
+    sc.old_t = old_leaf_t;
+    sc.new_t = scene.nodes.at(obj.trn_id).t;
+    sc.old_dims = old_dims;
+    sc.new_dims = new_dims;
+    sc.clipped = std::move(clipped);
+    ctx.history.BeginOp();
+    ctx.history.RecordSceneChange(sc);
+    ctx.history.CommitOp();
+
+    doc.BumpScene();
+    if (i == doc.active_object) doc.RebakeActiveObject();
+    return true;
+}
+
 bool CopyObject(EditorContext& ctx) {
     int i;
     if (!ValidSelection(ctx, &i)) return false;
