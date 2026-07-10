@@ -255,7 +255,15 @@ fragment float4 raycast_fragment(
     t_delta.y = step_dir.y != 0 ? 1.0 / abs(ray_dir.y) : INFINITY;
     t_delta.z = step_dir.z != 0 ? 1.0 / abs(ray_dir.z) : INFINITY;
 
+    // Seed the shading normal from the box entry face: the volume hugs
+    // the active object, so a ray's FIRST cell is routinely solid
+    // (surface == box face) and would otherwise shade with no normal.
     int last_axis = -1;
+    if (t_enter > 0.0) {
+        if (t_lo.x >= t_lo.y && t_lo.x >= t_lo.z) last_axis = 0;
+        else if (t_lo.y >= t_lo.z) last_axis = 1;
+        else last_axis = 2;
+    }
 
     bool ghost_active = (u.preview_active != 0) && (u.preview_alpha < 0.999);
     bool ghost_seen = false;
