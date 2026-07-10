@@ -74,12 +74,26 @@ public:
     }
 
     void ClearPreviewBbox(const Bbox3& world_bbox) override {
-        [shape_ clearPreviewBbox:(world_bbox.x0 - vol_->x0)
-                              y0:(world_bbox.y0 - vol_->y0)
-                              z0:(world_bbox.z0 - vol_->z0)
-                              x1:(world_bbox.x1 - vol_->x0)
-                              y1:(world_bbox.y1 - vol_->y0)
-                              z1:(world_bbox.z1 - vol_->z0)
+        // Clamp to the texture: the volume hugs the model now, so
+        // hover footprints routinely overhang it, and shape_clear has
+        // no per-thread bounds check (out-of-range texel writes are
+        // undefined in Metal).
+        const int32_t x0 = std::max(world_bbox.x0 - vol_->x0, 0);
+        const int32_t y0 = std::max(world_bbox.y0 - vol_->y0, 0);
+        const int32_t z0 = std::max(world_bbox.z0 - vol_->z0, 0);
+        const int32_t x1 =
+            std::min(world_bbox.x1 - vol_->x0, vol_->size_x() - 1);
+        const int32_t y1 =
+            std::min(world_bbox.y1 - vol_->y0, vol_->size_y() - 1);
+        const int32_t z1 =
+            std::min(world_bbox.z1 - vol_->z0, vol_->size_z() - 1);
+        if (x0 > x1 || y0 > y1 || z0 > z1) return;
+        [shape_ clearPreviewBbox:x0
+                              y0:y0
+                              z0:z0
+                              x1:x1
+                              y1:y1
+                              z1:z1
                           target:texture_];
     }
 
