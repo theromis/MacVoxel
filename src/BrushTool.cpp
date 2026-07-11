@@ -198,6 +198,10 @@ bool BrushTool::OnMouseDown(EditorContext& ctx, InteractionState& state,
     ctx.preview_alpha = 1.0f;  // committed-looking during the actual drag
     ctx.history.BeginOp();
     StampAtCursor(ctx, vc, e, mode, engine);
+    // Same hover-transition drain as Tick: the ghost clear + first
+    // stamp must not straddle a frame or the stroke start blinks.
+    // Mid-drag stamps stay async — that's the latency-critical path.
+    engine.WaitForPendingWork();
     return true;
 }
 
@@ -322,6 +326,15 @@ void BrushTool::Tick(EditorContext& ctx, InteractionState& state,
     hover_bbox_x1_ = target.x + hi;
     hover_bbox_y1_ = target.y + hi;
     hover_bbox_z1_ = target.z + hi;
+    // The clear + stamp above run on the brush queue while the frame
+    // renders from its own — an unsynchronized frame can sample the
+    // gap between them and show one ghost-less frame per cursor cell
+    // (visible strobing in Remove mode, where the mask hides doc
+    // cells). Hover updates are a footprint-sized dispatch at most
+    // once per cell crossing, so draining here — before the frame's
+    // command buffer encodes — costs microseconds and makes the
+    // transition atomic as far as the rasterizer can observe.
+    engine.WaitForPendingWork();
     ctx.preview_active = true;
     ctx.preview_alpha = 0.55f;
 }

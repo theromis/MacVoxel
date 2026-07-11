@@ -548,6 +548,10 @@ void MutatorTool::Tick(EditorContext& ctx, InteractionState& state,
     hover_bbox_x1_ = p.aoe_x1;
     hover_bbox_y1_ = p.aoe_y1;
     hover_bbox_z1_ = p.aoe_z1;
+    // Drain the clear + dispatch before the frame encodes — same
+    // hover-transition race as BrushTool::Tick (an unsynchronized
+    // frame can catch the gap and drop the ghost for one frame).
+    engine.WaitForPendingWork();
     ctx.preview_active = true;
     ctx.preview_alpha = 0.55f;
 }
