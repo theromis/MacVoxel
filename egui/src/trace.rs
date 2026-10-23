@@ -1,10 +1,8 @@
 //! CPU path tracer for Render mode.
 //!
-//! The Metal tracer stays in the Mac app. This one runs in the egui shell on
-//! every desktop: voxel DDA, diffuse / metal / glass / emissive materials,
-//! a sun, and a sky. Samples accumulate a few rows at a time so a debug
-//! build still answers the window. Open Image Denoise is not linked; the
-//! denoise checkbox is a small edge-aware filter.
+//! The window prefers the wgpu compute tracer. This CPU path is the fallback
+//! when a scene does not fit in one grid, and it is what the tests run.
+//! The Metal shader stays in the Mac app. Open Image Denoise is not linked.
 
 use std::collections::HashMap;
 
@@ -112,11 +110,120 @@ pub fn frame_key(session: &Session, size: [u32; 2]) -> u64 {
     hash
 }
 
+/// Voxels, materials, and palette. The camera is not part of it, so an orbit
+/// does not rebuild the grid.
+pub fn scene_key(session: &Session) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    let mix = |hash: &mut u64, bits: u64| {
+        *hash ^= bits;
+        *hash = hash.wrapping_mul(0x100000001b3);
+    };
+    mix(&mut hash, session.mesh_epoch);
+    for (slot, material) in session.materials.iter().enumerate() {
+        mix(&mut hash, slot as u64);
+        mix(
+            &mut hash,
+            match material.ty {
+                MaterialType::Diffuse => 0,
+                MaterialType::Metal => 1,
+                MaterialType::Emissive => 2,
+                MaterialType::Glass => 3,
+            },
+        );
+        mix(&mut hash, material.roughness.to_bits() as u64);
+        mix(&mut hash, material.metallic.to_bits() as u64);
+        mix(&mut hash, material.emission.to_bits() as u64);
+        mix(&mut hash, material.emission_power as u64);
+        mix(&mut hash, material.transparency.to_bits() as u64);
+        mix(&mut hash, material.ior.to_bits() as u64);
+    }
+    for rgba in &session.palette {
+        mix(&mut hash, u32::from_le_bytes(*rgba) as u64);
+    }
+    hash
+}
+
 struct World {
-    voxels: HashMap<(i32, i32, i32), u8>,
+    grid: Grid,
     lights: Vec<Light>,
     min: [i32; 3],
     max: [i32; 3],
+    count: usize,
+}
+
+enum Grid {
+    /// Packed occupancy. Index 0 in the palette is empty, so a zero byte is air.
+    Dense {
+        origin: [i32; 3],
+        dims: [usize; 3],
+        cells: Vec<u8>,
+    },
+    Sparse(HashMap<(i32, i32, i32), u8>),
+}
+
+/// Everything a sample needs, owned so a worker thread can keep tracing
+/// after the window has moved on to the next input.
+struct Shade {
+    materials: [Material; 256],
+    palette: [[u8; 4]; 256],
+    max_bounces: i32,
+    stochastic_gi: bool,
+    glass_mode: GlassMode,
+    aperture: f32,
+    focus_distance: f32,
+    power_weighted_nee: bool,
+    nee_ris: i32,
+    indirect_clamp: f32,
+    ema_floor: f32,
+    atmospheric_sky: bool,
+    sky_intensity: f32,
+    horizon_softness: f32,
+    sun_elevation: f32,
+    sun_azimuth: f32,
+    sun_disc: f32,
+    sun_intensity: f32,
+    sun_color: [f32; 3],
+    eye: Vec3,
+    target: Vec3,
+}
+
+impl Shade {
+    fn from_session(session: &Session) -> Self {
+        Self {
+            materials: session.materials,
+            palette: session.palette,
+            max_bounces: session.max_bounces,
+            stochastic_gi: session.stochastic_gi,
+            glass_mode: session.glass_mode,
+            aperture: session.aperture,
+            focus_distance: session.focus_distance,
+            power_weighted_nee: session.power_weighted_nee,
+            nee_ris: session.nee_ris,
+            indirect_clamp: session.indirect_clamp,
+            ema_floor: session.ema_floor,
+            atmospheric_sky: session.atmospheric_sky,
+            sky_intensity: session.sky_intensity,
+            horizon_softness: session.horizon_softness,
+            sun_elevation: session.sun_elevation,
+            sun_azimuth: session.sun_azimuth,
+            sun_disc: session.sun_disc,
+            sun_intensity: session.sun_intensity,
+            sun_color: session.sun_color,
+            eye: session.eye(),
+            target: session.target,
+        }
+    }
+
+    fn sun_dir(&self) -> Vec3 {
+        let e = self.sun_elevation.to_radians();
+        let a = self.sun_azimuth.to_radians();
+        let dir = Vec3::new(a.cos() * e.cos(), a.sin() * e.cos(), e.sin()).normalize_or_zero();
+        if dir.length_squared() < 1.0e-6 {
+            Vec3::new(0.3, 0.2, 0.9).normalize()
+        } else {
+            dir
+        }
+    }
 }
 
 struct Light {
@@ -149,45 +256,16 @@ pub fn trace_rows(image: &mut Image, session: &Session, rows: u32) -> bool {
         return false;
     }
     let world = build_world(session);
-    let eye = session.eye();
-    let target = session.target;
+    let shade = Shade::from_session(session);
     let finished_before = image.samples;
     let mut left = rows;
     while left > 0 {
         let y = image.row;
         let sample = image.samples;
         for x in 0..image.width {
-            let mut rng = Rng(hash(x, y, sample));
-            let center = primary_dir(
-                session,
-                image.width,
-                image.height,
-                x,
-                y,
-                eye,
-                target,
-                &mut rng,
-            );
-            let (origin, dir) = lens_ray(session, eye, target, center, &mut rng);
-            let color = radiance(&world, session, origin, dir, 0, &mut rng);
-            let i = (y as usize) * (image.width as usize) + x as usize;
-            if sample == 0 {
-                image.albedo[i] = first_albedo(&world, session, origin, dir);
-            }
-            image.sum[i] = add(image.sum[i], color);
-            let n = (sample + 1) as f32;
-            let average = scale(image.sum[i], 1.0 / n);
-            let weight = (1.0 / n).max(session.ema_floor.clamp(0.0, 1.0));
-            image.shown[i] = if sample == 0 {
-                color
-            } else {
-                lerp(image.shown[i], color, weight)
-            };
-            // Keep the unbiased average when the floor is zero. A positive
-            // floor matches the Metal display blend and stays noisier.
-            if session.ema_floor <= 0.0 {
-                image.shown[i] = average;
-            }
+            let (color, albedo) =
+                shade_pixel(&world, &shade, image.width, image.height, x, y, sample);
+            store_pixel(image, &shade, x, y, sample, color, albedo);
         }
         image.row += 1;
         if image.row >= image.height {
@@ -199,7 +277,78 @@ pub fn trace_rows(image: &mut Image, session: &Session, rows: u32) -> bool {
     image.samples > finished_before
 }
 
+fn shade_pixel(
+    world: &World,
+    shade: &Shade,
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    sample: u32,
+) -> ([f32; 3], [f32; 3]) {
+    let mut rng = Rng(hash(x, y, sample));
+    let center = primary_dir(width, height, x, y, shade.eye, shade.target, &mut rng);
+    let (origin, dir) = lens_ray(shade, shade.eye, shade.target, center, &mut rng);
+    let color = radiance(world, shade, origin, dir, 0, &mut rng);
+    let albedo = if sample == 0 {
+        first_albedo(world, shade, origin, dir)
+    } else {
+        [0.0; 3]
+    };
+    (color, albedo)
+}
+
+fn store_pixel(
+    image: &mut Image,
+    shade: &Shade,
+    x: u32,
+    y: u32,
+    sample: u32,
+    color: [f32; 3],
+    albedo: [f32; 3],
+) {
+    let i = (y as usize) * (image.width as usize) + x as usize;
+    if sample == 0 {
+        image.albedo[i] = albedo;
+    }
+    image.sum[i] = add(image.sum[i], color);
+    image.shown[i] = display_color(shade, image.sum[i], image.shown[i], color, sample);
+}
+
+fn display_color(
+    shade: &Shade,
+    sum: [f32; 3],
+    shown: [f32; 3],
+    color: [f32; 3],
+    sample: u32,
+) -> [f32; 3] {
+    let n = (sample + 1) as f32;
+    let weight = (1.0 / n).max(shade.ema_floor.clamp(0.0, 1.0));
+    let blended = if sample == 0 {
+        color
+    } else {
+        lerp(shown, color, weight)
+    };
+    // Keep the unbiased average when the floor is zero. A positive floor
+    // matches the Metal display blend and stays noisier.
+    if shade.ema_floor <= 0.0 {
+        scale(sum, 1.0 / n)
+    } else {
+        blended
+    }
+}
+
 pub fn preview_size(session: &Session, viewport: [u32; 2]) -> [u32; 2] {
+    preview_capped(session, viewport, 192)
+}
+
+/// GPU frames can be larger. The long side still stays under the panel's 1024
+/// unless Match window is on, and then it stops at 1280.
+pub fn gpu_preview_size(session: &Session, viewport: [u32; 2]) -> [u32; 2] {
+    preview_capped(session, viewport, 1280)
+}
+
+fn preview_capped(session: &Session, viewport: [u32; 2], cap: u32) -> [u32; 2] {
     let (mut w, mut h) = if session.resolution_match_window {
         (viewport[0].max(1), viewport[1].max(1))
     } else {
@@ -209,7 +358,6 @@ pub fn preview_size(session: &Session, viewport: [u32; 2]) -> [u32; 2] {
         )
     };
     let long = w.max(h).max(1);
-    let cap = 192u32;
     if long > cap {
         let scale = cap as f32 / long as f32;
         w = ((w as f32) * scale).round().max(1.0) as u32;
@@ -332,16 +480,128 @@ fn build_world(session: &Session) -> World {
             });
         }
     }
+    let count = voxels.len();
     if voxels.is_empty() {
         min = [0; 3];
         max = [0; 3];
     }
     World {
-        voxels,
+        grid: pack_grid(&voxels, min, max),
         lights,
         min,
         max,
+        count,
     }
+}
+
+fn pack_grid(voxels: &HashMap<(i32, i32, i32), u8>, min: [i32; 3], max: [i32; 3]) -> Grid {
+    let mut dims = [0usize; 3];
+    let mut volume = 1usize;
+    for axis in 0..3 {
+        let n = (max[axis] as i64 - min[axis] as i64 + 1).max(0) as usize;
+        if n > 4096 {
+            return Grid::Sparse(voxels.clone());
+        }
+        volume = volume.saturating_mul(n);
+        dims[axis] = n;
+    }
+    if volume == 0 || volume > 32_000_000 {
+        return Grid::Sparse(voxels.clone());
+    }
+    let mut cells = vec![0u8; volume];
+    for (cell, slot) in voxels {
+        let x = (cell.0 - min[0]) as usize;
+        let y = (cell.1 - min[1]) as usize;
+        let z = (cell.2 - min[2]) as usize;
+        cells[x + dims[0] * (y + dims[1] * z)] = *slot;
+    }
+    Grid::Dense {
+        origin: min,
+        dims,
+        cells,
+    }
+}
+
+impl World {
+    fn slot(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        let slot = match &self.grid {
+            Grid::Dense {
+                origin,
+                dims,
+                cells,
+            } => {
+                let ix = x - origin[0];
+                let iy = y - origin[1];
+                let iz = z - origin[2];
+                if ix < 0
+                    || iy < 0
+                    || iz < 0
+                    || ix >= dims[0] as i32
+                    || iy >= dims[1] as i32
+                    || iz >= dims[2] as i32
+                {
+                    return None;
+                }
+                cells[ix as usize + dims[0] * (iy as usize + dims[1] * iz as usize)]
+            }
+            Grid::Sparse(map) => return map.get(&(x, y, z)).copied(),
+        };
+        if slot == 0 {
+            None
+        } else {
+            Some(slot)
+        }
+    }
+}
+
+/// One grid the GPU can index. `None` when the scene is too spread out to pack.
+pub struct GpuScene {
+    pub origin: [i32; 4],
+    pub dims: [u32; 4],
+    pub cells: Vec<u32>,
+    pub lights: Vec<GpuLight>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuLight {
+    pub point: [f32; 4],
+    pub normal: [f32; 4],
+    /// xyz radiance, w power.
+    pub radiance: [f32; 4],
+}
+
+pub fn gpu_scene(session: &Session) -> Option<GpuScene> {
+    let world = build_world(session);
+    let Grid::Dense {
+        origin,
+        dims,
+        cells,
+    } = &world.grid
+    else {
+        return None;
+    };
+    let lights = world
+        .lights
+        .iter()
+        .take(4096)
+        .map(|light| GpuLight {
+            point: [light.point.x, light.point.y, light.point.z, 1.0],
+            normal: [light.normal.x, light.normal.y, light.normal.z, 0.0],
+            radiance: [
+                light.radiance[0],
+                light.radiance[1],
+                light.radiance[2],
+                light.power,
+            ],
+        })
+        .collect();
+    Some(GpuScene {
+        origin: [origin[0], origin[1], origin[2], 0],
+        dims: [dims[0] as u32, dims[1] as u32, dims[2] as u32, 0],
+        cells: cells.iter().map(|slot| u32::from(*slot)).collect(),
+        lights,
+    })
 }
 
 fn emission_gain(material: &Material) -> f32 {
@@ -350,7 +610,7 @@ fn emission_gain(material: &Material) -> f32 {
 
 fn radiance(
     world: &World,
-    session: &Session,
+    session: &Shade,
     origin: Vec3,
     dir: Vec3,
     bounce: i32,
@@ -402,7 +662,7 @@ fn radiance(
 
 fn diffuse(
     world: &World,
-    session: &Session,
+    session: &Shade,
     hit: &Hit,
     albedo: [f32; 3],
     _dir: Vec3,
@@ -410,8 +670,8 @@ fn diffuse(
     rng: &mut Rng,
 ) -> [f32; 3] {
     let sun = sun_radiance(session);
-    let ndotl = hit.normal.dot(sun_dir(session)).max(0.0);
-    let mut color = if ndotl > 0.0 && !occluded(world, hit.point, sun_dir(session), f32::MAX) {
+    let ndotl = hit.normal.dot(session.sun_dir()).max(0.0);
+    let mut color = if ndotl > 0.0 && !occluded(world, hit.point, session.sun_dir(), f32::MAX) {
         scale(mul(albedo, sun), ndotl)
     } else {
         [0.0; 3]
@@ -432,7 +692,7 @@ fn diffuse(
 
 fn glass(
     world: &World,
-    session: &Session,
+    session: &Shade,
     hit: &Hit,
     albedo: [f32; 3],
     material: &Material,
@@ -498,7 +758,7 @@ fn glass(
 
 fn nee(
     world: &World,
-    session: &Session,
+    session: &Shade,
     hit: &Hit,
     albedo: [f32; 3],
     bounce: i32,
@@ -561,7 +821,7 @@ fn pick_light<'a>(world: &'a World, power_weighted: bool, rng: &mut Rng) -> &'a 
 }
 
 fn march(world: &World, origin: Vec3, dir: Vec3) -> Option<Hit> {
-    if world.voxels.is_empty() || dir.length_squared() < 1.0e-8 {
+    if world.count == 0 || dir.length_squared() < 1.0e-8 {
         return None;
     }
     let Some(entry) = ray_box_entry(origin, dir, world.min, world.max) else {
@@ -611,8 +871,8 @@ fn march(world: &World, origin: Vec3, dir: Vec3) -> Option<Hit> {
         };
     }
     let mut normal = -dir.normalize_or_zero();
-    if let Some(slot) = world.voxels.get(&(cell[0], cell[1], cell[2])) {
-        return Some(hit_at(cell, normal, *slot));
+    if let Some(slot) = world.slot(cell[0], cell[1], cell[2]) {
+        return Some(hit_at(cell, normal, slot));
     }
     for _ in 0..MAX_STEPS {
         let axis = if tmax[0] <= tmax[1] && tmax[0] <= tmax[2] {
@@ -633,8 +893,8 @@ fn march(world: &World, origin: Vec3, dir: Vec3) -> Option<Hit> {
         if cell[axis] < world.min[axis] - 1 || cell[axis] > world.max[axis] + 1 {
             return None;
         }
-        if let Some(slot) = world.voxels.get(&(cell[0], cell[1], cell[2])) {
-            return Some(hit_at(cell, normal, *slot));
+        if let Some(slot) = world.slot(cell[0], cell[1], cell[2]) {
+            return Some(hit_at(cell, normal, slot));
         }
     }
     None
@@ -695,7 +955,6 @@ fn ray_box_entry(origin: Vec3, dir: Vec3, min: [i32; 3], max: [i32; 3]) -> Optio
 }
 
 fn primary_dir(
-    _session: &Session,
     width: u32,
     height: u32,
     x: u32,
@@ -721,7 +980,7 @@ fn primary_dir(
     (forward + right * (u * aspect * tan) + up * (v * tan)).normalize_or_zero()
 }
 
-fn lens_ray(session: &Session, eye: Vec3, target: Vec3, dir: Vec3, rng: &mut Rng) -> (Vec3, Vec3) {
+fn lens_ray(session: &Shade, eye: Vec3, target: Vec3, dir: Vec3, rng: &mut Rng) -> (Vec3, Vec3) {
     if session.aperture <= 0.0 {
         return (eye, dir);
     }
@@ -740,20 +999,11 @@ fn lens_ray(session: &Session, eye: Vec3, target: Vec3, dir: Vec3, rng: &mut Rng
     (lens, (focus - lens).normalize_or_zero())
 }
 
-fn sun_dir(session: &Session) -> Vec3 {
-    let dir = session.sun_dir();
-    if dir.length_squared() < 1.0e-6 {
-        Vec3::new(0.3, 0.2, 0.9).normalize()
-    } else {
-        dir
-    }
-}
-
-fn sun_radiance(session: &Session) -> [f32; 3] {
+fn sun_radiance(session: &Shade) -> [f32; 3] {
     scale(session.sun_color, session.sun_intensity.max(0.0))
 }
 
-fn sky(session: &Session, dir: Vec3, include_sun: bool) -> [f32; 3] {
+fn sky(session: &Shade, dir: Vec3, include_sun: bool) -> [f32; 3] {
     let up = dir.z.clamp(-1.0, 1.0);
     let horizon = (-up.abs() * session.horizon_softness.max(0.0)).exp();
     let zenith = if session.atmospheric_sky {
@@ -771,7 +1021,7 @@ fn sky(session: &Session, dir: Vec3, include_sun: bool) -> [f32; 3] {
     if include_sun {
         let cos = dir
             .normalize_or_zero()
-            .dot(sun_dir(session))
+            .dot(session.sun_dir())
             .clamp(-1.0, 1.0);
         let radius = (session.sun_disc.max(0.1).to_radians() * 0.5).cos();
         if cos >= radius {
@@ -781,7 +1031,7 @@ fn sky(session: &Session, dir: Vec3, include_sun: bool) -> [f32; 3] {
     color
 }
 
-fn first_albedo(world: &World, session: &Session, origin: Vec3, dir: Vec3) -> [f32; 3] {
+fn first_albedo(world: &World, session: &Shade, origin: Vec3, dir: Vec3) -> [f32; 3] {
     march(world, origin, dir)
         .map(|hit| linear_rgb(session.palette[hit.slot as usize]))
         .unwrap_or([0.0; 3])
@@ -881,7 +1131,7 @@ fn linear_channel(channel: u8) -> f32 {
     }
 }
 
-fn linear_rgb(rgba: [u8; 4]) -> [f32; 3] {
+pub(crate) fn linear_rgb(rgba: [u8; 4]) -> [f32; 3] {
     [
         linear_channel(rgba[0]),
         linear_channel(rgba[1]),

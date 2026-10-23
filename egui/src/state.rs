@@ -476,9 +476,13 @@ pub struct Session {
     pub sun_disc: f32,
     pub sun_intensity: f32,
     pub sun_color: [f32; 3],
-    /// Latest path-traced frame. Render mode fills it; Save render writes it.
+    /// Latest CPU frame. The GPU path leaves this empty and saves from the texture.
     pub(crate) render_preview: Option<crate::trace::Image>,
     pub(crate) render_key: u64,
+    /// Set while the viewport is showing the compute shader, so Save render
+    /// reads that texture instead of the CPU frame.
+    pub(crate) trace_on_gpu: bool,
+    pub(crate) render_save_path: Option<PathBuf>,
 
     pub yaw: f32,
     pub pitch: f32,
@@ -600,6 +604,8 @@ impl Session {
             sun_color: [1.0, 0.95, 0.85],
             render_preview: None,
             render_key: 0,
+            trace_on_gpu: false,
+            render_save_path: None,
             yaw: -0.8,
             pitch: 0.55,
             distance: 28.0,
@@ -1313,6 +1319,13 @@ impl Session {
 
     /// Write the current Render-mode frame. The picture is the one on screen.
     pub fn save_render(&mut self) {
+        let Some(path) = self.pick_render_path() else {
+            return;
+        };
+        if self.trace_on_gpu {
+            self.render_save_path = Some(path);
+            return;
+        }
         let Some(image) = self.render_preview.clone() else {
             self.status = "Switch to Render and wait for a sample.".into();
             return;
@@ -1321,19 +1334,6 @@ impl Session {
             self.status = "Switch to Render and wait for a sample.".into();
             return;
         }
-        let name = format!("{}.png", self.active().name);
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
-            .set_file_name(name)
-            .save_file()
-        else {
-            return;
-        };
-        let path = if path.extension().is_some() {
-            path
-        } else {
-            path.with_extension("png")
-        };
         match crate::trace::write_png(&path, &image, self) {
             Ok(()) => {
                 let file = path
@@ -1344,6 +1344,19 @@ impl Session {
             }
             Err(err) => self.status = err,
         }
+    }
+
+    fn pick_render_path(&self) -> Option<PathBuf> {
+        let name = format!("{}.png", self.active().name);
+        let path = rfd::FileDialog::new()
+            .add_filter("PNG", &["png"])
+            .set_file_name(name)
+            .save_file()?;
+        Some(if path.extension().is_some() {
+            path
+        } else {
+            path.with_extension("png")
+        })
     }
 
     pub fn recent_paths(&self) -> Vec<PathBuf> {

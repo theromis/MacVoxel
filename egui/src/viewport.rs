@@ -16,6 +16,9 @@ pub struct ViewCache {
     gpu: Option<SharedGpu>,
     texture: Option<egui::TextureId>,
     anchor: Option<egui::Pos2>,
+    trace: Option<crate::trace_gpu::Tracer>,
+    trace_texture: Option<egui::TextureId>,
+    trace_epoch: u64,
 }
 
 impl ViewCache {
@@ -24,6 +27,9 @@ impl ViewCache {
             gpu: None,
             texture: None,
             anchor: None,
+            trace: None,
+            trace_texture: None,
+            trace_epoch: 0,
         }
     }
 
@@ -115,7 +121,11 @@ pub fn show(
     }
 
     let painter = ui.painter().with_clip_rect(rect);
-    if session.render_mode == RenderMode::Render {
+    if session.render_mode == RenderMode::Render
+        && paint_gpu(ctx, render_state, session, cache, rect, &painter)
+    {
+    } else if session.render_mode == RenderMode::Render {
+        session.trace_on_gpu = false;
         advance_trace(ctx, session, rect);
         if let Some(image) = &session.render_preview {
             let rgba = crate::trace::pixels(image, session);
@@ -145,6 +155,7 @@ pub fn show(
             );
         }
     } else if let Some(rs) = render_state {
+        session.trace_on_gpu = false;
         cache.ensure(rs);
         if let (Some(gpu), Some(texture)) = (&cache.gpu, cache.texture) {
             let ppp = ctx.pixels_per_point();
@@ -177,6 +188,7 @@ pub fn show(
             painter.add(gpu::paint_callback(rect));
         }
     } else {
+        session.trace_on_gpu = false;
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(22, 24, 28));
     }
 
@@ -286,6 +298,102 @@ fn hud_frame(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
             ui.spacing_mut().item_spacing.x = 2.0;
             ui.horizontal(|ui| body(ui));
         });
+}
+
+fn paint_gpu(
+    ctx: &egui::Context,
+    render_state: Option<&eframe::egui_wgpu::RenderState>,
+    session: &mut Session,
+    cache: &mut ViewCache,
+    rect: egui::Rect,
+    painter: &egui::Painter,
+) -> bool {
+    let Some(rs) = render_state else {
+        return false;
+    };
+    let ppp = ctx.pixels_per_point();
+    let viewport = [
+        (rect.width() * ppp).round().max(1.0) as u32,
+        (rect.height() * ppp).round().max(1.0) as u32,
+    ];
+    let size = crate::trace::gpu_preview_size(session, viewport);
+    if cache.trace.is_none() {
+        cache.trace = Some(crate::trace_gpu::Tracer::new(&rs.device));
+    }
+    let frame = cache
+        .trace
+        .as_mut()
+        .expect("tracer")
+        .advance(&rs.device, &rs.queue, session, size);
+    if !frame.gpu {
+        return false;
+    }
+    session.trace_on_gpu = true;
+    if cache.trace_epoch != frame.epoch || cache.trace_texture.is_none() {
+        let existing = cache.trace_texture;
+        let id = {
+            let view = cache.trace.as_ref().expect("tracer").color_view();
+            if let Some(id) = existing {
+                rs.renderer.write().update_egui_texture_from_wgpu_texture(
+                    &rs.device,
+                    view,
+                    eframe::wgpu::FilterMode::Linear,
+                    id,
+                );
+                id
+            } else {
+                rs.renderer.write().register_native_texture(
+                    &rs.device,
+                    view,
+                    eframe::wgpu::FilterMode::Linear,
+                )
+            }
+        };
+        cache.trace_texture = Some(id);
+        cache.trace_epoch = frame.epoch;
+    }
+    if let Some(id) = cache.trace_texture {
+        painter.image(
+            id,
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        painter.text(
+            rect.left_bottom() + egui::vec2(12.0, -18.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!(
+                "{} / {}   {}×{}",
+                frame.samples,
+                session.max_samples.max(1),
+                frame.size[0],
+                frame.size[1]
+            ),
+            egui::FontId::proportional(13.0),
+            egui::Color32::from_rgb(244, 246, 250),
+        );
+    }
+    if frame.repaint {
+        ctx.request_repaint();
+    }
+    if let Some(path) = session.render_save_path.take() {
+        match cache
+            .trace
+            .as_ref()
+            .expect("tracer")
+            .save_png(&rs.device, &rs.queue, &path)
+        {
+            Ok(()) => {
+                let file = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                session.status = format!("Saved render to {file}.");
+            }
+            Err(err) => session.status = err,
+        }
+    }
+    true
 }
 
 /// OpenGL-style projection. The ray caster unprojects with this matrix.
