@@ -98,11 +98,14 @@ fn tools(ui: &mut Ui, session: &mut Session) {
                     format!("{label} ({key})")
                 };
                 let on = session.tool == *tool;
-                if ui
+                let resp = ui
                     .add_sized([86.0, 26.0], egui::Button::new(*label).selected(on))
-                    .on_hover_text(tip)
-                    .clicked()
-                {
+                    .on_hover_text(tip);
+                let rect = resp.rect;
+                let clicked = resp.clicked();
+                let id = format!("tool.{}", label.to_ascii_lowercase().replace(' ', "-"));
+                session.note_ui(&id, label, rect, UiAction::Tool(*tool));
+                if clicked {
                     session.tool = *tool;
                 }
                 if i % 2 == 1 {
@@ -112,15 +115,23 @@ fn tools(ui: &mut Ui, session: &mut Session) {
         });
 
     section(ui, "Mode");
-    segment(
-        ui,
-        &mut session.tool_mode,
-        &[
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (name, mode) in [
             ("Add", ToolMode::Add),
             ("Remove", ToolMode::Remove),
             ("Paint", ToolMode::Paint),
-        ],
-    );
+        ] {
+            let resp = ui.selectable_value(&mut session.tool_mode, mode, name);
+            let rect = resp.rect;
+            session.note_ui(
+                &format!("mode.{}", name.to_ascii_lowercase()),
+                name,
+                rect,
+                UiAction::Mode(mode),
+            );
+        }
+    });
 
     if session.tool != Tool::Face && session.tool != Tool::Generator {
         section(ui, "Brush");
@@ -552,14 +563,36 @@ fn outliner(ui: &mut Ui, session: &mut Session) {
     }
 
     ui.horizontal(|ui| {
-        if ui.button("New").clicked() {
+        let new = ui.button("New");
+        let new_rect = new.rect;
+        let new_clicked = new.clicked();
+        session.note_ui("object.new", "New", new_rect, UiAction::NewObject);
+        if new_clicked {
             session.new_object();
         }
-        if ui.button("Duplicate").clicked() {
+        let duplicate = ui.button("Duplicate");
+        let duplicate_rect = duplicate.rect;
+        let duplicate_clicked = duplicate.clicked();
+        session.note_ui(
+            "object.duplicate",
+            "Duplicate",
+            duplicate_rect,
+            UiAction::Duplicate,
+        );
+        if duplicate_clicked {
             session.duplicate_object();
         }
         ui.add_enabled_ui(session.objects.len() > 1, |ui| {
-            if ui.button("Delete").clicked() {
+            let delete = ui.button("Delete");
+            let delete_rect = delete.rect;
+            let delete_clicked = delete.clicked();
+            session.note_ui(
+                "object.delete",
+                "Delete",
+                delete_rect,
+                UiAction::DeleteObject,
+            );
+            if delete_clicked {
                 session.delete_object();
             }
         });

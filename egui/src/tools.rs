@@ -195,6 +195,55 @@ pub fn flood_face(
     out
 }
 
+/// Empty cells on the wall plane through `seed`, inside the inclusive
+/// in-plane bounds. The seed must be empty. Stops at occupied cells.
+pub fn flood_empty(
+    cells: &HashMap<Cell, u8>,
+    seed: Cell,
+    axis: i32,
+    u_min: i32,
+    u_max: i32,
+    v_min: i32,
+    v_max: i32,
+    eight: bool,
+) -> Vec<Cell> {
+    if cells.contains_key(&seed) {
+        return Vec::new();
+    }
+    let (u_axis, v_axis) = plane_axes(axis);
+    let u = coord(seed, u_axis);
+    let v = coord(seed, v_axis);
+    if u < u_min || u > u_max || v < v_min || v > v_max {
+        return Vec::new();
+    }
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::new();
+    let mut out = Vec::new();
+    queue.push_back(seed);
+    seen.insert(seed);
+    while let Some(cell) = queue.pop_front() {
+        if cells.contains_key(&cell) {
+            continue;
+        }
+        out.push(cell);
+        if out.len() >= 100_000 {
+            break;
+        }
+        for (du, dv) in neighbors(eight) {
+            let next = set_plane(cell, axis, u_axis, v_axis, du, dv);
+            let u = coord(next, u_axis);
+            let v = coord(next, v_axis);
+            if u < u_min || u > u_max || v < v_min || v > v_max {
+                continue;
+            }
+            if seen.insert(next) {
+                queue.push_back(next);
+            }
+        }
+    }
+    out
+}
+
 pub fn extrude(seeds: &[Cell], axis: i32, sign: i32, steps: i32, outward: bool) -> Vec<Cell> {
     if steps == 0 || seeds.is_empty() {
         return Vec::new();
@@ -242,8 +291,45 @@ pub struct Gen {
     pub conifer_seed: u32,
 }
 
+impl Default for Gen {
+    fn default() -> Self {
+        Self {
+            kind: GeneratorKind::Ellipsoid,
+            axis: Axis::Y,
+            apex_at_max: true,
+            palette: 1,
+            torus_tube: 0.3,
+            helix_turns: 2.0,
+            helix_radius: 0.75,
+            helix_tube: 0.16,
+            helix_cw: false,
+            noise_scale: 8.0,
+            noise_threshold: 0.5,
+            noise_octaves: 4,
+            noise_seed: 1,
+            perlin_lo: 1,
+            perlin_hi: 8,
+            tree_depth: 3,
+            tree_wildness: 0.35,
+            tree_trunk: 0.45,
+            tree_leaf: 1,
+            tree_seed: 1,
+            conifer_tiers: 3,
+            conifer_ragged: 0.25,
+            conifer_clump: 6.0,
+            conifer_trunk: 0.4,
+            conifer_crown: 0.5,
+            conifer_needle: 1,
+            conifer_seed: 1,
+        }
+    }
+}
+
+/// Largest generator box filled in one drag. Matches `fill_box`.
+pub const MAX_GENERATOR_CELLS: i64 = 2_000_000;
+
 /// Cells a generator would write inside the inclusive box. Empty when the
-/// box is larger than this preview can fill in one drag.
+/// box is larger than [`MAX_GENERATOR_CELLS`].
 pub fn generate(min: Cell, max: Cell, gen: &Gen) -> Vec<(Cell, u8)> {
     let nx = max.0 - min.0 + 1;
     let ny = max.1 - min.1 + 1;
@@ -251,7 +337,7 @@ pub fn generate(min: Cell, max: Cell, gen: &Gen) -> Vec<(Cell, u8)> {
     if nx <= 0 || ny <= 0 || nz <= 0 {
         return Vec::new();
     }
-    if nx as i64 * ny as i64 * nz as i64 > 200_000 {
+    if nx as i64 * ny as i64 * nz as i64 > MAX_GENERATOR_CELLS {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -786,7 +872,7 @@ fn offset(axis: i32, anchor: Cell, i: i32, j: i32) -> Cell {
     }
 }
 
-fn plane_axes(axis: i32) -> (usize, usize) {
+pub(crate) fn plane_axes(axis: i32) -> (usize, usize) {
     if axis == 0 {
         (1, 2)
     } else if axis == 2 {
@@ -796,7 +882,7 @@ fn plane_axes(axis: i32) -> (usize, usize) {
     }
 }
 
-fn coord(cell: Cell, axis: usize) -> i32 {
+pub(crate) fn coord(cell: Cell, axis: usize) -> i32 {
     match axis {
         0 => cell.0,
         1 => cell.1,
@@ -804,7 +890,7 @@ fn coord(cell: Cell, axis: usize) -> i32 {
     }
 }
 
-fn axis_delta(axis: i32, steps: i32) -> Cell {
+pub(crate) fn axis_delta(axis: i32, steps: i32) -> Cell {
     match axis {
         0 => (steps, 0, 0),
         1 => (0, steps, 0),
@@ -946,5 +1032,35 @@ mod tests {
         cells.insert((2, 0, 0), 2);
         let face = flood_face(&cells, (0, 0, 0), 2, 1, 1, false);
         assert_eq!(face.len(), 2);
+    }
+
+    #[test]
+    fn flood_empty_stays_on_the_plane_and_skips_solid_cells() {
+        let mut cells = HashMap::new();
+        cells.insert((0, 0, 0), 1);
+        cells.insert((1, 0, 0), 1);
+        let got = flood_empty(&cells, (0, 1, 0), 2, 0, 1, 0, 1, false);
+        assert!(got.contains(&(0, 1, 0)));
+        assert!(got.contains(&(1, 1, 0)));
+        assert!(!got.contains(&(0, 0, 0)));
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn generator_fills_past_two_hundred_thousand_cells() {
+        let mut gen = Gen::default();
+        gen.palette = 4;
+        // 60 × 60 × 56 = 201600, above the old cap and under 2_000_000.
+        let cells = generate((0, 0, 0), (59, 59, 55), &gen);
+        assert!(cells
+            .iter()
+            .any(|(cell, slot)| *cell == (30, 30, 28) && *slot == 4));
+    }
+
+    #[test]
+    fn generator_refuses_more_than_two_million_cells() {
+        let gen = Gen::default();
+        // 126³ = 2_000_376.
+        assert!(generate((0, 0, 0), (125, 125, 125), &gen).is_empty());
     }
 }

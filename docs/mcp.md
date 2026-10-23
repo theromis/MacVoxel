@@ -5,7 +5,7 @@ on stdin/stdout. They do not share a document.
 
 | Server | Binary | Window | What an agent can do |
 |---|---|---|---|
-| egui editor | `macvoxel-egui` | optional | Edit voxels. Screenshot the live window when connected. No path tracer, no mesh export. |
+| egui editor | `macvoxel-egui` | optional | Edit voxels. Screenshot, inspect, and click the live window when connected. No path tracer, no mesh export. |
 | C++ editor | `MacVoxel mcp` | never | Edit voxels, path-trace a PNG, export glTF. An already open MacVoxel window does not see these edits. |
 
 ## egui editor
@@ -27,7 +27,8 @@ macvoxel-egui mcp
 
 The session lives in this process. It starts empty: one object, the default
 palette, no file path. No window opens. `screenshot`, `screenshot_viewport`,
-and `screenshot_region` fail and say how to connect. `macvoxel-egui mcp --help`
+`screenshot_region`, `ui_inspect`, and `ui_click` fail and say how to connect.
+`macvoxel-egui mcp --help`
 prints usage and exits. Any other argument is an error, so a client that meant
 to reach the window does not silently edit a private document.
 
@@ -126,6 +127,8 @@ transforms are not applied.
 | `screenshot` | — | PNG of the whole editor window. Connected mode only |
 | `screenshot_viewport` | — | PNG of the 3D viewport, including its mode chips. Connected mode only |
 | `screenshot_region` | `x`, `y`, `width`, `height` | PNG of a rectangle in window points. Connected mode only |
+| `ui_inspect` | — | Previous frame's controls, tool, mode, active object, voxel count, and status. Connected mode only |
+| `ui_click` | `x`, `y` | Click the topmost registered control. A viewport hit stamps the active tool. Connected mode only |
 
 `set_voxels` accepts each cell as `{"x","y","z","palette"}` or as
 `[x, y, z, palette]`. A later duplicate of the same coordinate wins. Cells
@@ -154,12 +157,26 @@ points from the top-left of the client area, not the title bar. On a retina
 display the PNG is larger than the point size. A rectangle outside the window
 is an error.
 
+`ui_inspect` describes the previous frame. `window` is the client area.
+`regions` lists the tool buttons, Add/Remove/Paint, the outliner New,
+Duplicate, and Delete buttons, the Model/Object and Edit/Render chips, and
+the viewport. Each region is `id`, `label`, `x`, `y`, `width`, `height` in
+window points from the top-left of the client area. The reply also includes
+`tool`, `toolMode`, `editorMode`, `renderMode`, `activeObject`, `voxels`, and
+`status`.
+
+`ui_click` takes `x` and `y` in those same points and activates the topmost
+region that contains the point. A hit on the viewport is a press and release
+of the active tool. A point on no region is an error. Both tools need the
+connected window; headless they fail like the screenshots.
+
 ### What this server does not do
 
-It does not path-trace, save a render, or export a mesh. It does not drive the
-mouse tools (brush, shapes, generators, selection). It does not click widgets.
-Voxel changes go through `set_voxel`, `set_voxels`, and `fill_box` on the
-active object. Screenshots need the connected window.
+It does not path-trace, save a render, or export a mesh. It does not drive
+every mouse tool by name. `ui_click` only hits the controls `ui_inspect`
+lists, plus a stamp in the viewport. Voxel changes also go through
+`set_voxel`, `set_voxels`, and `fill_box` on the active object. Screenshots
+need the connected window.
 
 ## C++ editor
 

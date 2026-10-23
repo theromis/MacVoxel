@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use glam::{Mat4, Vec3, Vec4};
 
 use crate::gpu::{self, SceneGpu, SharedGpu};
-use crate::state::{Cell, EditorMode, LineMode, RenderMode, Session, Tool, ToolDrag};
+use crate::state::{Cell, EditorMode, LineMode, RenderMode, Session, Tool, ToolDrag, UiAction};
 
 pub struct ViewCache {
     gpu: Option<SharedGpu>,
@@ -54,6 +54,7 @@ pub fn show(
 ) -> egui::Rect {
     let rect = ui.available_rect_before_wrap();
     ui.allocate_rect(rect, egui::Sense::click_and_drag());
+    session.note_ui("viewport", "Viewport", rect, UiAction::Viewport);
 
     let left =
         egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 10.0), egui::vec2(168.0, 32.0));
@@ -169,14 +170,44 @@ pub fn show(
 
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left), |ui| {
         hud_frame(ui, |ui| {
-            ui.selectable_value(&mut session.editor_mode, EditorMode::Model, "Model");
-            ui.selectable_value(&mut session.editor_mode, EditorMode::Object, "Object");
+            let model = ui.selectable_value(&mut session.editor_mode, EditorMode::Model, "Model");
+            let model_rect = model.rect;
+            session.note_ui(
+                "editor.model",
+                "Model",
+                model_rect,
+                UiAction::Editor(EditorMode::Model),
+            );
+            let object =
+                ui.selectable_value(&mut session.editor_mode, EditorMode::Object, "Object");
+            let object_rect = object.rect;
+            session.note_ui(
+                "editor.object",
+                "Object",
+                object_rect,
+                UiAction::Editor(EditorMode::Object),
+            );
         });
     });
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right), |ui| {
         hud_frame(ui, |ui| {
-            ui.selectable_value(&mut session.render_mode, RenderMode::Edit, "Edit");
-            ui.selectable_value(&mut session.render_mode, RenderMode::Render, "Render");
+            let edit = ui.selectable_value(&mut session.render_mode, RenderMode::Edit, "Edit");
+            let edit_rect = edit.rect;
+            session.note_ui(
+                "render.edit",
+                "Edit",
+                edit_rect,
+                UiAction::Render(RenderMode::Edit),
+            );
+            let render =
+                ui.selectable_value(&mut session.render_mode, RenderMode::Render, "Render");
+            let render_rect = render.rect;
+            session.note_ui(
+                "render.render",
+                "Render",
+                render_rect,
+                UiAction::Render(RenderMode::Render),
+            );
         });
     });
 
@@ -364,7 +395,7 @@ fn to_ndc(vp: Mat4, p: Vec3) -> Option<glam::Vec2> {
     Some(glam::Vec2::new(c.x / c.w, c.y / c.w))
 }
 
-fn ray_through(session: &Session, rect: egui::Rect, pos: egui::Pos2) -> (Vec3, Vec3) {
+pub(crate) fn ray_through(session: &Session, rect: egui::Rect, pos: egui::Pos2) -> (Vec3, Vec3) {
     let aspect = rect.width() / rect.height().max(1.0);
     let inv = (projection(aspect) * view_matrix(session)).inverse();
     let ndc_x = (pos.x - rect.min.x) / rect.width() * 2.0 - 1.0;

@@ -216,6 +216,36 @@ struct Stroke {
     key: Option<(Cell, i32, u64)>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum UiAction {
+    None,
+    Tool(Tool),
+    Mode(ToolMode),
+    Editor(EditorMode),
+    Render(RenderMode),
+    NewObject,
+    Duplicate,
+    DeleteObject,
+    Viewport,
+}
+
+#[derive(Clone)]
+pub struct UiRegion {
+    pub id: String,
+    pub label: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub action: UiAction,
+}
+
+impl UiRegion {
+    fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
+    }
+}
+
 pub struct Session {
     pub tool: Tool,
     pub tool_mode: ToolMode,
@@ -324,6 +354,9 @@ pub struct Session {
     pending: Option<Snapshot>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    /// Controls drawn last frame, in paint order. A click hits the last match.
+    pub ui_regions: Vec<UiRegion>,
+    recent: Vec<PathBuf>,
 }
 
 const IDLE: &str = "Right-drag orbits, scroll zooms, left-drag edits with the active tool. Path tracing stays in the Metal app.";
@@ -429,6 +462,8 @@ impl Session {
             pending: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            ui_regions: Vec::new(),
+            recent: load_recent(),
         };
         session.objects.push(Volume {
             name: "Tree".into(),
@@ -825,6 +860,8 @@ impl Session {
     pub fn load_path(&mut self, path: &Path) {
         if let Err(e) = self.open_vox(path) {
             self.status = e;
+            self.recent.retain(|stored| stored != path);
+            store_recent(&self.recent);
         }
     }
 
@@ -865,6 +902,7 @@ impl Session {
                 path.file_name().unwrap_or_default().to_string_lossy()
             )
         };
+        self.remember_path(path);
         Ok(())
     }
 
@@ -1022,7 +1060,155 @@ impl Session {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
         self.status = format!("Saved {count} voxels{which} to {file}.");
+        self.remember_path(path);
         Ok(())
+    }
+
+    pub fn export_mesh_dialog(&mut self) {
+        let name = format!("{}.glb", self.active().name);
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("glTF", &["glb"])
+            .set_file_name(name)
+            .save_file()
+        else {
+            return;
+        };
+        let path = ensure_glb(path);
+        match crate::export::export_glb(self, &path) {
+            Ok(quads) => {
+                let file = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                self.status = format!("Exported {quads} quads to {file}.");
+            }
+            Err(err) => self.status = err,
+        }
+    }
+
+    pub fn recent_paths(&self) -> Vec<PathBuf> {
+        self.recent.clone()
+    }
+
+    fn remember_path(&mut self, path: &Path) {
+        remember(&mut self.recent, path);
+        store_recent(&self.recent);
+    }
+
+    pub fn clear_ui(&mut self) {
+        self.ui_regions.clear();
+    }
+
+    pub fn note_ui(&mut self, id: &str, label: &str, rect: egui::Rect, action: UiAction) {
+        self.ui_regions.push(UiRegion {
+            id: id.to_string(),
+            label: label.to_string(),
+            x: rect.min.x,
+            y: rect.min.y,
+            w: rect.width(),
+            h: rect.height(),
+            action,
+        });
+    }
+
+    /// Topmost registered control under a window point. `None` actions,
+    /// such as the window rectangle, are not click targets.
+    pub fn ui_target(&self, x: f32, y: f32) -> Option<UiRegion> {
+        self.ui_regions
+            .iter()
+            .rev()
+            .find(|region| region.action != UiAction::None && region.contains(x, y))
+            .cloned()
+    }
+
+    pub fn activate_ui(&mut self, region: &UiRegion) -> Result<(), String> {
+        match region.action {
+            UiAction::None | UiAction::Viewport => {}
+            UiAction::Tool(tool) => self.tool = tool,
+            UiAction::Mode(mode) => self.tool_mode = mode,
+            UiAction::Editor(mode) => self.editor_mode = mode,
+            UiAction::Render(mode) => self.render_mode = mode,
+            UiAction::NewObject => self.new_object(),
+            UiAction::Duplicate => self.duplicate_object(),
+            UiAction::DeleteObject => {
+                if self.objects.len() < 2 {
+                    return Err("the only object cannot be deleted".into());
+                }
+                self.delete_object();
+            }
+        }
+        Ok(())
+    }
+
+    /// Press and release at one world ray, so a connected click can stamp
+    /// the active tool without a second frame.
+    pub(crate) fn click_viewport(&mut self, ray: (Vec3, Vec3)) {
+        let drag = ToolDrag {
+            rays: vec![ray],
+            face_steps: 1,
+            marquee: None,
+        };
+        self.pointer(
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            glam::Vec2::ZERO,
+            0.0,
+            Some(ray),
+            &drag,
+            false,
+        );
+    }
+
+    pub fn describe_ui(&self) -> serde_json::Value {
+        let window = self.ui_regions.iter().find(|region| region.id == "window");
+        let regions: Vec<serde_json::Value> = self
+            .ui_regions
+            .iter()
+            .filter(|region| region.action != UiAction::None)
+            .map(|region| {
+                serde_json::json!({
+                    "id": region.id,
+                    "label": region.label,
+                    "x": region.x,
+                    "y": region.y,
+                    "width": region.w,
+                    "height": region.h,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "tool": self.tool.name(),
+            "toolMode": match self.tool_mode {
+                ToolMode::Add => "Add",
+                ToolMode::Remove => "Remove",
+                ToolMode::Paint => "Paint",
+            },
+            "editorMode": match self.editor_mode {
+                EditorMode::Model => "Model",
+                EditorMode::Object => "Object",
+            },
+            "renderMode": match self.render_mode {
+                RenderMode::Edit => "Edit",
+                RenderMode::Render => "Render",
+            },
+            "activeObject": self.active().name,
+            "voxels": self.voxel_count(),
+            "status": self.status,
+            "window": window.map(|region| serde_json::json!({
+                "x": region.x,
+                "y": region.y,
+                "width": region.w,
+                "height": region.h,
+            })),
+            "regions": regions,
+        })
     }
 
     pub fn take_drops(&mut self, ctx: &egui::Context) {
@@ -1429,9 +1615,9 @@ impl Session {
                     && (max.0 - min.0 + 1) as i64
                         * (max.1 - min.1 + 1) as i64
                         * (max.2 - min.2 + 1) as i64
-                        > 200_000
+                        > crate::tools::MAX_GENERATOR_CELLS
                 {
-                    self.status = "That box is too large to fill in this preview.".into();
+                    self.status = "That box is too large to fill.".into();
                 }
                 filled
             }
@@ -1487,12 +1673,33 @@ impl Session {
         let (axis, sign) = face_axis(hit.normal);
         let base = self.active().cells.clone();
         let seeds = if self.tool == Tool::Face {
-            let match_color = if self.face_extrude == FaceExtrude::Color {
-                base.get(&hit.cell).copied().unwrap_or(0)
+            if base.contains_key(&hit.cell) {
+                let match_color = if self.face_extrude == FaceExtrude::Color {
+                    base.get(&hit.cell).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                crate::tools::flood_face(&base, hit.cell, axis, sign, match_color, self.face_eight)
+            } else if let Some((min, max)) = cell_bounds(base.keys().copied()) {
+                let (u_axis, v_axis) = crate::tools::plane_axes(axis);
+                let flooded = crate::tools::flood_empty(
+                    &base,
+                    hit.cell,
+                    axis,
+                    crate::tools::coord(min, u_axis),
+                    crate::tools::coord(max, u_axis),
+                    crate::tools::coord(min, v_axis),
+                    crate::tools::coord(max, v_axis),
+                    self.face_eight,
+                );
+                let back = crate::tools::axis_delta(axis, -sign);
+                flooded
+                    .into_iter()
+                    .map(|cell| crate::tools::add(cell, back))
+                    .collect()
             } else {
-                0
-            };
-            crate::tools::flood_face(&base, hit.cell, axis, sign, match_color, self.face_eight)
+                Vec::new()
+            }
         } else {
             Vec::new()
         };
@@ -1509,16 +1716,21 @@ impl Session {
     }
 
     fn pick_for_stroke(&self, origin: Vec3, dir: Vec3) -> Option<Hit> {
-        let hit = if let Some(stroke) = &self.stroke {
-            raycast(&stroke.base, origin, dir)
+        let cells = if let Some(stroke) = &self.stroke {
+            &stroke.base
         } else {
-            raycast(&self.active().cells, origin, dir)
+            &self.active().cells
         };
-        if hit.is_some() {
-            return hit;
+        if let Some(hit) = raycast(cells, origin, dir) {
+            return Some(hit);
         }
-        let anchor = self.stroke.as_ref().map(|stroke| stroke.anchor)?;
-        plane_hit(origin, dir, anchor)
+        if let Some(stroke) = &self.stroke {
+            return plane_hit(origin, dir, stroke.anchor);
+        }
+        if self.tool == Tool::Face {
+            return wall_hit(cells, origin, dir);
+        }
+        None
     }
 
     fn project_line(&self, base: &HashMap<Cell, u8>, rays: &[(Vec3, Vec3)]) -> Vec<Cell> {
@@ -1957,6 +2169,16 @@ impl Session {
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
                 egui::Key::D,
             );
+            let new_object = egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::N,
+            );
+            let duplicate = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::D);
+            let export_mesh = egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::E,
+            );
+            let close = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::W);
             let command = i.modifiers.command;
             if !native_owns_shortcuts && i.consume_shortcut(&redo) {
                 cmd = Some(Cmd::Redo);
@@ -1968,8 +2190,14 @@ impl Session {
                 cmd = Some(Cmd::Save);
             } else if !native_owns_shortcuts && i.consume_shortcut(&open) {
                 cmd = Some(Cmd::Open);
+            } else if !native_owns_shortcuts && i.consume_shortcut(&new_object) {
+                cmd = Some(Cmd::NewObject);
             } else if !native_owns_shortcuts && i.consume_shortcut(&new) {
                 cmd = Some(Cmd::New);
+            } else if !native_owns_shortcuts && i.consume_shortcut(&export_mesh) {
+                cmd = Some(Cmd::ExportMesh);
+            } else if !native_owns_shortcuts && i.consume_shortcut(&close) {
+                cmd = Some(Cmd::Close);
             } else if !native_owns_shortcuts && i.consume_shortcut(&cut) {
                 cmd = Some(Cmd::Cut);
             } else if !native_owns_shortcuts && i.consume_shortcut(&copy) {
@@ -1978,6 +2206,8 @@ impl Session {
                 cmd = Some(Cmd::Paste);
             } else if !native_owns_shortcuts && i.consume_shortcut(&deselect) {
                 cmd = Some(Cmd::Deselect);
+            } else if !native_owns_shortcuts && i.consume_shortcut(&duplicate) {
+                cmd = Some(Cmd::DuplicateObject);
             } else if i.key_pressed(egui::Key::Tab) {
                 cmd = Some(Cmd::Tab);
             } else if i.key_pressed(egui::Key::V) && !command {
@@ -2018,6 +2248,10 @@ impl Session {
             Some(Cmd::Copy) => self.copy_picked(),
             Some(Cmd::Paste) => self.paste_clipboard(),
             Some(Cmd::Deselect) => self.deselect(),
+            Some(Cmd::NewObject) => self.new_object(),
+            Some(Cmd::DuplicateObject) => self.duplicate_object(),
+            Some(Cmd::ExportMesh) => self.export_mesh_dialog(),
+            Some(Cmd::Close) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             None => {}
         }
     }
@@ -2189,6 +2423,10 @@ enum Cmd {
     Copy,
     Paste,
     Deselect,
+    NewObject,
+    DuplicateObject,
+    ExportMesh,
+    Close,
 }
 
 #[derive(Clone, PartialEq)]
@@ -2493,6 +2731,75 @@ fn plane_hit(origin: Vec3, dir: Vec3, anchor: Hit) -> Option<Hit> {
     Some(Hit {
         cell,
         normal: anchor.normal,
+    })
+}
+
+/// Closest forward hit on the six walls of the occupied AABB. The returned
+/// normal points into the volume, and the cell is the empty (or occupied)
+/// cell on the inside of that wall.
+fn wall_hit(cells: &HashMap<Cell, u8>, origin: Vec3, dir: Vec3) -> Option<Hit> {
+    let (min, max) = cell_bounds(cells.keys().copied())?;
+    let walls = [
+        [min.0 as f32, max.0 as f32 + 1.0],
+        [min.1 as f32, max.1 as f32 + 1.0],
+        [min.2 as f32, max.2 as f32 + 1.0],
+    ];
+    let ro = [origin.x, origin.y, origin.z];
+    let rd = [dir.x, dir.y, dir.z];
+    let mut best_t = f32::INFINITY;
+    let mut best_axis = -1i32;
+    let mut best_sign = 0i32;
+    let mut best_h = [0.0f32; 3];
+    for axis in 0..3 {
+        if rd[axis].abs() < 1e-6 {
+            continue;
+        }
+        for side in 0..2 {
+            let plane = walls[axis][side];
+            if side == 0 && ro[axis] < plane {
+                continue;
+            }
+            if side == 1 && ro[axis] > plane {
+                continue;
+            }
+            let t = (plane - ro[axis]) / rd[axis];
+            if t < 0.0 || t > 4096.0 || t >= best_t {
+                continue;
+            }
+            let hit = [ro[0] + t * rd[0], ro[1] + t * rd[1], ro[2] + t * rd[2]];
+            let mut inside = true;
+            for other in 0..3 {
+                if other == axis {
+                    continue;
+                }
+                if hit[other] < walls[other][0] || hit[other] > walls[other][1] {
+                    inside = false;
+                }
+            }
+            if !inside {
+                continue;
+            }
+            best_t = t;
+            best_axis = axis as i32;
+            best_sign = if side == 0 { -1 } else { 1 };
+            best_h = hit;
+        }
+    }
+    if best_axis < 0 {
+        return None;
+    }
+    let lo = [min.0, min.1, min.2];
+    let hi = [max.0, max.1, max.2];
+    let mut cell = [0i32; 3];
+    for axis in 0..3 {
+        cell[axis] = (best_h[axis].floor() as i32).clamp(lo[axis], hi[axis]);
+    }
+    let axis = best_axis as usize;
+    cell[axis] = if best_sign < 0 { lo[axis] } else { hi[axis] };
+    let wall_sign = if cell[axis] == lo[axis] { -1 } else { 1 };
+    Some(Hit {
+        cell: (cell[0], cell[1], cell[2]),
+        normal: crate::tools::axis_delta(best_axis, -wall_sign),
     })
 }
 
@@ -3062,6 +3369,69 @@ const DEFAULT_PALETTE: [u32; 256] = [
     0xffbbbbbb, 0xffaaaaaa, 0xff888888, 0xff777777, 0xff555555, 0xff444444, 0xff222222, 0xff111111,
 ];
 
+fn ensure_glb(mut path: PathBuf) -> PathBuf {
+    let ok = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("glb"));
+    if !ok {
+        path.set_extension("glb");
+    }
+    path
+}
+
+fn remember(list: &mut Vec<PathBuf>, path: &Path) {
+    let path = path.to_path_buf();
+    list.retain(|stored| stored != &path);
+    list.insert(0, path);
+    list.truncate(10);
+}
+
+fn recent_store_path() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let dir = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/MacVoxel")
+    } else if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        PathBuf::from(xdg).join("macvoxel")
+    } else {
+        home.join(".local/share/macvoxel")
+    };
+    Some(dir.join("egui-recent.txt"))
+}
+
+fn load_recent() -> Vec<PathBuf> {
+    let Some(file) = recent_store_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .take(10)
+        .collect()
+}
+
+fn store_recent(paths: &[PathBuf]) {
+    let Some(file) = recent_store_path() else {
+        return;
+    };
+    if let Some(parent) = file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let text = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = std::fs::write(file, text);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3565,5 +3935,67 @@ mod tests {
         assert_eq!(loaded.materials[36], materials[36]);
         assert_eq!(loaded.materials[10], materials[10]);
         assert_eq!(loaded.materials[20], materials[20]);
+    }
+
+    #[test]
+    fn face_click_on_an_empty_wall_paints_empty_cells() {
+        let mut session = Session::new();
+        session.objects[0].cells.clear();
+        for x in 0..4 {
+            for y in 0..4 {
+                session.objects[0].cells.insert((x, y, 0), 1);
+            }
+        }
+        session.objects[0].cells.insert((0, 0, 4), 2);
+        session.tool = Tool::Face;
+        session.tool_mode = ToolMode::Add;
+        session.active_slot = 9;
+        session.editor_mode = EditorMode::Model;
+        session.render_mode = RenderMode::Edit;
+        let ray = (Vec3::new(1.5, -5.0, 2.5), Vec3::new(0.0, 1.0, 0.0));
+        session.click_viewport(ray);
+        assert_eq!(session.active().cells.get(&(1, 3, 2)), Some(&9));
+        assert_eq!(session.active().cells.get(&(1, 0, 0)), Some(&1));
+        assert_eq!(session.active().cells.get(&(0, 0, 4)), Some(&2));
+    }
+
+    #[test]
+    fn recent_paths_keep_the_newest_ten() {
+        let mut list = Vec::new();
+        for i in 0..12 {
+            remember(&mut list, Path::new(&format!("/tmp/m{i}.vox")));
+        }
+        assert_eq!(list.len(), 10);
+        assert_eq!(list[0], PathBuf::from("/tmp/m11.vox"));
+        remember(&mut list, Path::new("/tmp/m5.vox"));
+        assert_eq!(list[0], PathBuf::from("/tmp/m5.vox"));
+        assert_eq!(
+            list.iter().filter(|path| path.ends_with("m5.vox")).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn ui_click_selects_the_registered_tool() {
+        let mut session = Session::new();
+        session.note_ui(
+            "viewport",
+            "Viewport",
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0)),
+            UiAction::Viewport,
+        );
+        session.note_ui(
+            "tool.line",
+            "Line",
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(20.0, 20.0)),
+            UiAction::Tool(Tool::Line),
+        );
+        let hit = session.ui_target(5.0, 5.0).unwrap();
+        assert_eq!(hit.id, "tool.line");
+        session.activate_ui(&hit).unwrap();
+        assert!(session.tool == Tool::Line);
+        let described = session.describe_ui();
+        assert_eq!(described["tool"], "Line");
+        assert_eq!(described["regions"][1]["id"], "tool.line");
     }
 }

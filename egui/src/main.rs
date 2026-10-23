@@ -18,6 +18,7 @@
 //! edit an in-memory volume so the panels can be tried against a viewport.
 
 mod control;
+mod export;
 mod gpu;
 mod mcp;
 mod mesh;
@@ -38,7 +39,7 @@ use serde_json::Value;
 
 use control::ControlServer;
 use mcp::ShotRegion;
-use state::Session;
+use state::{Session, UiAction};
 use viewport::ViewCache;
 
 fn main() -> eframe::Result {
@@ -130,12 +131,16 @@ impl eframe::App for Shell {
         }
         self.take_screenshot(ctx);
         self.take_control();
+        self.session.clear_ui();
+        let screen = ctx.input(|input| input.screen_rect());
+        self.session
+            .note_ui("window", "Window", screen, UiAction::None);
         #[cfg(target_os = "macos")]
         {
             if self.native_menu.is_none() && std::env::var_os("MACVOXEL_NO_NATIVE_MENU").is_none() {
                 self.native_menu = Some(native_menu::NativeMenu::install());
             }
-            if let Some(menu) = &self.native_menu {
+            if let Some(menu) = &mut self.native_menu {
                 menu.poll(&mut self.session, ctx);
             }
         }
@@ -209,11 +214,40 @@ impl Shell {
                         let _ = job.reply.send(Err(err));
                     }
                 }
+            } else if job.method == "ui.inspect" {
+                let _ = job.reply.send(Ok(self.session.describe_ui()));
+            } else if job.method == "ui.click" {
+                let _ = job.reply.send(self.click_ui(&job.params));
             } else {
                 let result = remote::apply(&mut self.session, &job.method, &job.params);
                 let _ = job.reply.send(result);
             }
         }
+    }
+
+    fn click_ui(&mut self, params: &Value) -> Result<Value, String> {
+        let x = params
+            .get("x")
+            .and_then(Value::as_f64)
+            .ok_or("missing number x")? as f32;
+        let y = params
+            .get("y")
+            .and_then(Value::as_f64)
+            .ok_or("missing number y")? as f32;
+        let Some(region) = self.session.ui_target(x, y) else {
+            return Err(format!("no control at {x}, {y}"));
+        };
+        if region.action == UiAction::Viewport {
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(region.x, region.y),
+                egui::vec2(region.w, region.h),
+            );
+            let ray = viewport::ray_through(&self.session, rect, egui::pos2(x, y));
+            self.session.click_viewport(ray);
+        } else {
+            self.session.activate_ui(&region)?;
+        }
+        Ok(serde_json::json!({"id": region.id, "label": region.label}))
     }
 
     fn take_screenshot(&mut self, ctx: &egui::Context) {

@@ -112,9 +112,10 @@ The `-G Ninja` flag is optional but produces faster, cleaner builds.
 Two MCP servers, documented in [docs/mcp.md](docs/mcp.md).
 
 `macvoxel-egui mcp` edits the egui preview. Without `--connect` it is headless
-and cannot take screenshots. `--connect 127.0.0.1:PORT` drives an editor
-started with `--control PORT` and can screenshot the window, the viewport, or
-any rectangle. There is no path tracer.
+and cannot take screenshots or click the window. `--connect 127.0.0.1:PORT`
+drives an editor started with `--control PORT` and can screenshot the window,
+the viewport, or any rectangle, and can inspect and click the registered
+controls. There is no path tracer.
 
 ```sh
 cargo build --manifest-path egui/Cargo.toml

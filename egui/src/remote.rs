@@ -136,7 +136,7 @@ pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Valu
             session.redo();
             Ok(json!({"canUndo": session.can_undo(), "canRedo": session.can_redo()}))
         }
-        "ui.screenshot" => Err(NO_WINDOW.into()),
+        "ui.screenshot" | "ui.inspect" | "ui.click" => Err(NO_WINDOW.into()),
         "control.methods" => Ok(Value::Array(
             METHODS
                 .iter()
@@ -170,6 +170,16 @@ const METHODS: &[(&str, &str, &str)] = &[
         "ui.screenshot",
         "region?, x?, y?, width?, height?, path?",
         "PNG of the window, the viewport, or a rectangle in window points. Requires the open editor.",
+    ),
+    (
+        "ui.inspect",
+        "",
+        "Controls from the previous frame, plus tool, mode, and status. Requires the open editor.",
+    ),
+    (
+        "ui.click",
+        "x, y",
+        "Click a registered control or stamp the viewport. Requires the open editor.",
     ),
     ("control.methods", "", "Methods this server answers"),
     ("ping", "", "Replies \"pong\""),

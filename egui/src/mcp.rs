@@ -278,7 +278,7 @@ fn dispatch(
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": "MacVoxel", "version": "0.1.0"},
-                "instructions": "Edits apply to the active object, in that object's local cells. screenshot, screenshot_viewport, and screenshot_region need an editor started with --control and this server started with --connect. There is no path tracer."
+                "instructions": "Edits apply to the active object, in that object's local cells. screenshot, screenshot_viewport, screenshot_region, ui_inspect, and ui_click need an editor started with --control and this server started with --connect. There is no path tracer."
             }),
         ));
     }
@@ -340,6 +340,8 @@ fn map_tool(name: &str, args: &Value) -> Result<(String, Value), String> {
         "screenshot" => "ui.screenshot",
         "screenshot_viewport" => "ui.screenshot",
         "screenshot_region" => "ui.screenshot",
+        "ui_inspect" => "ui.inspect",
+        "ui_click" => "ui.click",
         other => return Err(format!("unknown tool `{other}`")),
     };
     let params = match name {
@@ -447,6 +449,11 @@ fn tools() -> Vec<Value> {
             "height": num_prop("Height in window points"),
             "path": str_prop("Optional file to write")
         }), &["x", "y", "width", "height"]),
+        tool("ui_inspect", "Controls from the previous frame: tool buttons, mode, outliner, viewport chips, and the viewport rectangle, in window points. Only when connected to a window.", json!({}), &[]),
+        tool("ui_click", "Click the topmost registered control at a window point. A viewport hit stamps the active tool. Only when connected to a window.", json!({
+            "x": num_prop("X in window points, origin at the top-left of the client area"),
+            "y": num_prop("Y in window points, origin at the top-left of the client area")
+        }), &["x", "y"]),
     ]
 }
 
@@ -529,6 +536,22 @@ mod tests {
             &mut session,
             None,
             &json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "screenshot_viewport", "arguments": {}}}),
+        )
+        .unwrap();
+        assert_eq!(reply["result"]["isError"], true);
+        let reply = dispatch(
+            &mut state,
+            &mut session,
+            None,
+            &json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "ui_inspect", "arguments": {}}}),
+        )
+        .unwrap();
+        assert_eq!(reply["result"]["isError"], true);
+        let reply = dispatch(
+            &mut state,
+            &mut session,
+            None,
+            &json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "ui_click", "arguments": {"x": 1, "y": 1}}}),
         )
         .unwrap();
         assert_eq!(reply["result"]["isError"], true);
