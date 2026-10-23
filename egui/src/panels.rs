@@ -912,7 +912,7 @@ fn format_count(n: usize) -> String {
 fn render(ui: &mut Ui, session: &mut Session) {
     section(ui, "Render");
     ui.checkbox(&mut session.stochastic_gi, "Stochastic Sampling GI")
-        .on_hover_text("On: area-light sampling at every bounce. Off: emissives are found only by the random walk.");
+        .on_hover_text("On: bounce light and sample emissive faces. Off: sun and sky only.");
     ui.horizontal(|ui| {
         ui.add_sized(
             [64.0, 16.0],
@@ -950,7 +950,9 @@ fn render(ui: &mut Ui, session: &mut Session) {
     slider_i32(ui, session, "Samples", SliderTarget::MaxSamples, 16..=8192);
     section(ui, "Camera");
     ui.checkbox(&mut session.aces, "ACES tonemap");
-    ui.checkbox(&mut session.denoise, "Denoise (OIDN)");
+    ui.checkbox(&mut session.denoise, "Denoise").on_hover_text(
+        "Edge-aware filter on the finished frame. Open Image Denoise stays in the Metal app.",
+    );
     slider_f32(
         ui,
         session,
@@ -970,9 +972,7 @@ fn render(ui: &mut Ui, session: &mut Session) {
         );
     });
     if ui.button("Save render…").clicked() {
-        session.status =
-            "Saving a path-traced frame stays in the Metal app. This preview only shades the mesh."
-                .into();
+        session.save_render();
     }
 
     ui.separator();

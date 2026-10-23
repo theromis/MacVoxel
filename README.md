@@ -115,7 +115,7 @@ Two MCP servers, documented in [docs/mcp.md](docs/mcp.md).
 and cannot take screenshots or click the window. `--connect 127.0.0.1:PORT`
 drives an editor started with `--control PORT` and can screenshot the window,
 the viewport, or any rectangle, and can inspect and click the registered
-controls. There is no path tracer.
+controls. Render mode path-traces in the window. MCP has no render tool.
 
 ```sh
 cargo build --manifest-path egui/Cargo.toml

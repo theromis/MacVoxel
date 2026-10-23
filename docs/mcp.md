@@ -5,7 +5,7 @@ on stdin/stdout. They do not share a document.
 
 | Server | Binary | Window | What an agent can do |
 |---|---|---|---|
-| egui editor | `macvoxel-egui` | optional | Edit voxels, export glTF. Screenshot, inspect, and click the live window when connected. No path tracer. |
+| egui editor | `macvoxel-egui` | optional | Edit voxels, export glTF. The window path-traces in Render mode. Screenshot, inspect, and click the live window when connected. MCP has no render tool. |
 | C++ editor | `MacVoxel mcp` | never | Edit voxels, path-trace a PNG, export glTF. An already open MacVoxel window does not see these edits. |
 
 ## egui editor

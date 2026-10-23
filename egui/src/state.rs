@@ -476,6 +476,9 @@ pub struct Session {
     pub sun_disc: f32,
     pub sun_intensity: f32,
     pub sun_color: [f32; 3],
+    /// Latest path-traced frame. Render mode fills it; Save render writes it.
+    pub(crate) render_preview: Option<crate::trace::Image>,
+    pub(crate) render_key: u64,
 
     pub yaw: f32,
     pub pitch: f32,
@@ -515,7 +518,7 @@ pub struct Session {
     recent: Vec<PathBuf>,
 }
 
-const IDLE: &str = "Right-drag orbits, scroll zooms, left-drag edits with the active tool. Path tracing stays in the Metal app.";
+const IDLE: &str = "Right-drag orbits, scroll zooms, left-drag edits with the active tool. Render mode path-traces the scene.";
 
 impl Session {
     pub fn new() -> Self {
@@ -595,6 +598,8 @@ impl Session {
             sun_disc: 30.0,
             sun_intensity: 0.0,
             sun_color: [1.0, 0.95, 0.85],
+            render_preview: None,
+            render_key: 0,
             yaw: -0.8,
             pitch: 0.55,
             distance: 28.0,
@@ -1306,6 +1311,41 @@ impl Session {
         }
     }
 
+    /// Write the current Render-mode frame. The picture is the one on screen.
+    pub fn save_render(&mut self) {
+        let Some(image) = self.render_preview.clone() else {
+            self.status = "Switch to Render and wait for a sample.".into();
+            return;
+        };
+        if image.samples == 0 && image.row_progress() == 0 {
+            self.status = "Switch to Render and wait for a sample.".into();
+            return;
+        }
+        let name = format!("{}.png", self.active().name);
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PNG", &["png"])
+            .set_file_name(name)
+            .save_file()
+        else {
+            return;
+        };
+        let path = if path.extension().is_some() {
+            path
+        } else {
+            path.with_extension("png")
+        };
+        match crate::trace::write_png(&path, &image, self) {
+            Ok(()) => {
+                let file = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                self.status = format!("Saved render to {file}.");
+            }
+            Err(err) => self.status = err,
+        }
+    }
+
     pub fn recent_paths(&self) -> Vec<PathBuf> {
         self.recent.clone()
     }
@@ -1892,12 +1932,12 @@ impl Session {
     }
 
     fn status_is_blocked(&self) -> bool {
-        self.status.contains("does not edit") || self.status.contains("Path tracing stays")
+        self.status.contains("does not edit") || self.status.contains("Switch to Edit")
     }
 
     fn blocked_reason(&self) -> String {
         if self.render_mode == RenderMode::Render {
-            "Render mode keeps the shaded voxels. Path tracing stays in the Metal app.".into()
+            "Render mode shows the path-traced frame. Switch to Edit to change voxels.".into()
         } else {
             format!(
                 "{} does not edit voxels in this preview yet.",

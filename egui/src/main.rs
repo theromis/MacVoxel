@@ -11,7 +11,8 @@
 //! `mcp` speaks Model Context Protocol on stdin/stdout. Without `--connect`
 //! the session is in-process and has no window. `--connect` drives an editor
 //! that was started with `--control`, which is where screenshots come from.
-//! `--launch` opens that editor. There is no path tracer.
+//! `--launch` opens that editor. Render mode path-traces on the CPU.
+//! MCP has no render tool.
 //!
 //! The window is independent of the SwiftUI/Metal editor. On macOS the
 //! File and Edit commands live on the application menu bar. Brush strokes
@@ -28,6 +29,7 @@ mod panels;
 mod remote;
 mod state;
 mod tools;
+mod trace;
 mod viewport;
 
 use std::collections::VecDeque;

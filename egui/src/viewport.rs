@@ -115,7 +115,36 @@ pub fn show(
     }
 
     let painter = ui.painter().with_clip_rect(rect);
-    if let Some(rs) = render_state {
+    if session.render_mode == RenderMode::Render {
+        advance_trace(ctx, session, rect);
+        if let Some(image) = &session.render_preview {
+            let rgba = crate::trace::pixels(image, session);
+            let color = egui::ColorImage::from_rgba_unmultiplied(
+                [image.width as usize, image.height as usize],
+                &rgba,
+            );
+            let handle = ctx.load_texture("macvoxel-trace", color, egui::TextureOptions::LINEAR);
+            painter.image(
+                handle.id(),
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+            painter.text(
+                rect.left_bottom() + egui::vec2(12.0, -18.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!(
+                    "{} / {}   {}×{}",
+                    image.samples,
+                    session.max_samples.max(1),
+                    image.width,
+                    image.height
+                ),
+                egui::FontId::proportional(13.0),
+                egui::Color32::from_rgb(244, 246, 250),
+            );
+        }
+    } else if let Some(rs) = render_state {
         cache.ensure(rs);
         if let (Some(gpu), Some(texture)) = (&cache.gpu, cache.texture) {
             let ppp = ctx.pixels_per_point();
@@ -260,6 +289,32 @@ fn hud_frame(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// OpenGL-style projection. The ray caster unprojects with this matrix.
+fn advance_trace(ctx: &egui::Context, session: &mut Session, rect: egui::Rect) {
+    let ppp = ctx.pixels_per_point();
+    let viewport = [
+        (rect.width() * ppp).round().max(1.0) as u32,
+        (rect.height() * ppp).round().max(1.0) as u32,
+    ];
+    let size = crate::trace::preview_size(session, viewport);
+    let key = crate::trace::frame_key(session, size);
+    let size_mismatch = session
+        .render_preview
+        .as_ref()
+        .is_none_or(|image| !image.matches(size[0], size[1]));
+    let fresh = size_mismatch || session.render_key != key;
+    if fresh {
+        session.render_preview = Some(crate::trace::Image::new(size[0], size[1]));
+        session.render_key = key;
+    }
+    let cap = session.max_samples.clamp(1, 8192) as u32;
+    let mut image = session.render_preview.take().expect("preview");
+    if image.samples < cap {
+        crate::trace::trace_rows(&mut image, session, 6);
+        ctx.request_repaint();
+    }
+    session.render_preview = Some(image);
+}
+
 fn projection(aspect: f32) -> Mat4 {
     Mat4::perspective_rh(50_f32.to_radians(), aspect.max(0.05), 0.08, 4000.0)
 }

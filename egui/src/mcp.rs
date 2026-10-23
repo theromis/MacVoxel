@@ -3,7 +3,8 @@
 //! `macvoxel-egui mcp` edits an in-process document and has no window.
 //! `macvoxel-egui mcp --connect 127.0.0.1:PORT` drives an editor started with
 //! `--control PORT`. `--launch` opens that editor when the port is closed.
-//! Screenshots exist only on the connected window. There is no path tracer.
+//! Screenshots exist only on the connected window. The window path-traces in
+//! Render mode. This server has no render tool.
 
 use std::io::{self, BufRead, Write};
 use std::process::{Command, Stdio};
@@ -278,7 +279,7 @@ fn dispatch(
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": "MacVoxel", "version": "0.1.0"},
-                "instructions": "Edits apply to the active object, in that object's local cells. screenshot, screenshot_viewport, screenshot_region, ui_inspect, and ui_click need an editor started with --control and this server started with --connect. There is no path tracer."
+                "instructions": "Edits apply to the active object, in that object's local cells. screenshot, screenshot_viewport, screenshot_region, ui_inspect, and ui_click need an editor started with --control and this server started with --connect. The window path-traces in Render mode. This server has no render tool."
             }),
         ));
     }
@@ -509,7 +510,7 @@ Screenshots need the editor:
   macvoxel-egui mcp --connect 127.0.0.1:7979
 
 --launch opens the editor with that control port when nothing is listening.
-There is no path tracer."
+The window path-traces in Render mode. This server has no render tool."
     );
 }
 
