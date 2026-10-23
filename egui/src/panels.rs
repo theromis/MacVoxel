@@ -600,7 +600,13 @@ fn outliner(ui: &mut Ui, session: &mut Session) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Size").small().color(DIM));
         if let Some((x, y, z)) = session.size_xyz() {
-            ui.monospace(format!("{x} × {y} × {z}"));
+            for (axis, value) in [(0usize, x), (1, y), (2, z)] {
+                let mut next = value;
+                ui.add(egui::DragValue::new(&mut next).range(1..=256).speed(0.2));
+                if next != value {
+                    session.resize_active(axis, next);
+                }
+            }
         } else {
             ui.monospace("—");
         }

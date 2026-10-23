@@ -83,6 +83,12 @@ pub fn show(
     if pointer.button_pressed(egui::PointerButton::Primary) && hover.is_some() {
         cache.anchor = hover;
     }
+    session.hover_gizmo =
+        if session.editor_mode == EditorMode::Object && session.render_mode == RenderMode::Edit {
+            hover.and_then(|pos| gizmo_under(session, rect, pos))
+        } else {
+            None
+        };
     let drag = tool_drag(session, rect, cache.anchor, aim);
     session.pointer(
         hover.is_some(),
@@ -156,6 +162,10 @@ pub fn show(
                 egui::StrokeKind::Inside,
             );
         }
+    }
+
+    if session.editor_mode == EditorMode::Object && session.render_mode == RenderMode::Edit {
+        paint_gizmo(ui.painter().with_clip_rect(rect), session, rect);
     }
 
     if session.active().cells.is_empty() {
@@ -385,6 +395,79 @@ fn face_drag_steps(
         -(aim.y - anchor.y) / rect.height().max(1.0) * 2.0,
     );
     ((drag.x * dir.x + drag.y * dir.y) / len2).round() as i32
+}
+
+fn paint_gizmo(painter: egui::Painter, session: &Session, rect: egui::Rect) {
+    let Some(center) = object_center(session) else {
+        return;
+    };
+    let Some(origin) = project_point(session, rect, center) else {
+        return;
+    };
+    let colors = [
+        egui::Color32::from_rgb(220, 70, 70),
+        egui::Color32::from_rgb(70, 190, 90),
+        egui::Color32::from_rgb(70, 140, 230),
+    ];
+    for axis in 0..3i32 {
+        let mut tip = center;
+        tip[axis as usize] += 4.0;
+        let Some(end) = project_point(session, rect, tip) else {
+            continue;
+        };
+        let hovered = session.hover_gizmo == Some(axis);
+        painter.line_segment(
+            [origin, end],
+            egui::Stroke::new(if hovered { 4.0 } else { 2.5_f32 }, colors[axis as usize]),
+        );
+    }
+}
+
+fn gizmo_under(session: &Session, rect: egui::Rect, pos: egui::Pos2) -> Option<i32> {
+    let center = object_center(session)?;
+    let origin = project_point(session, rect, center)?;
+    let mut best: Option<(f32, i32)> = None;
+    for axis in 0..3i32 {
+        let mut tip = center;
+        tip[axis as usize] += 4.0;
+        let Some(end) = project_point(session, rect, tip) else {
+            continue;
+        };
+        let distance = distance_to_segment(pos, origin, end);
+        if distance <= 10.0 && best.is_none_or(|(so_far, _)| distance < so_far) {
+            best = Some((distance, axis));
+        }
+    }
+    best.map(|(_, axis)| axis)
+}
+
+fn object_center(session: &Session) -> Option<Vec3> {
+    let (min, max) = session.bounds()?;
+    let translation = session.active().translation;
+    Some(Vec3::new(
+        (min.0 + max.0) as f32 * 0.5 + 0.5 + translation.0 as f32,
+        (min.1 + max.1) as f32 * 0.5 + 0.5 + translation.1 as f32,
+        (min.2 + max.2) as f32 * 0.5 + 0.5 + translation.2 as f32,
+    ))
+}
+
+fn project_point(session: &Session, rect: egui::Rect, point: Vec3) -> Option<egui::Pos2> {
+    let aspect = rect.width() / rect.height().max(1.0);
+    let ndc = to_ndc(projection(aspect) * view_matrix(session), point)?;
+    Some(egui::pos2(
+        rect.min.x + (ndc.x * 0.5 + 0.5) * rect.width(),
+        rect.min.y + (1.0 - (ndc.y * 0.5 + 0.5)) * rect.height(),
+    ))
+}
+
+fn distance_to_segment(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    let ab = b - a;
+    let length = ab.length_sq();
+    if length < 1e-4 {
+        return (point - a).length();
+    }
+    let t = ((point - a).dot(ab) / length).clamp(0.0, 1.0);
+    (point - (a + ab * t)).length()
 }
 
 fn to_ndc(vp: Mat4, p: Vec3) -> Option<glam::Vec2> {

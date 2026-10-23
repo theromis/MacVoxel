@@ -190,6 +190,7 @@ pub enum Grab {
     Paint,
     Select,
     Move,
+    Object,
 }
 
 #[derive(Clone, Copy)]
@@ -341,6 +342,10 @@ pub struct Session {
     select_anchor: Option<Cell>,
     clipboard: Option<VoxelClipboard>,
     move_drag: Option<MoveDrag>,
+    object_drag: Option<ObjectDrag>,
+    /// Axis under the cursor in Object mode. The viewport sets this before
+    /// the pointer handler, so a press on an arrow locks that axis.
+    pub hover_gizmo: Option<i32>,
     stroke: Option<Stroke>,
     stroke_serial: u32,
     grab: Grab,
@@ -450,6 +455,8 @@ impl Session {
             select_anchor: None,
             clipboard: None,
             move_drag: None,
+            object_drag: None,
+            hover_gizmo: None,
             stroke: None,
             stroke_serial: 1,
             grab: Grab::None,
@@ -1400,6 +1407,15 @@ impl Session {
         } else if primary_pressed && inside {
             if space {
                 self.grab = Grab::Pan;
+            } else if self.editor_mode == EditorMode::Object {
+                if self.render_mode == RenderMode::Edit && self.begin_object_move(world_ray) {
+                    self.grab = Grab::Object;
+                } else if self.render_mode != RenderMode::Edit {
+                    self.grab = Grab::None;
+                    self.status = self.blocked_reason();
+                } else {
+                    self.grab = Grab::None;
+                }
             } else if let Some((index, _)) = aimed.filter(|(index, _)| *index != self.selected) {
                 self.select_object(index);
                 self.grab = Grab::None;
@@ -1426,6 +1442,7 @@ impl Session {
             Grab::Paint if primary_down => self.apply_stroke(ray, drag),
             Grab::Select if primary_down => self.drag_select(ray),
             Grab::Move if primary_down => self.drag_move(ray),
+            Grab::Object if primary_down => self.drag_object(world_ray),
             _ => {}
         }
 
@@ -1444,6 +1461,15 @@ impl Session {
             self.drag_move(ray);
             self.move_drag = None;
             self.commit();
+            self.grab = Grab::None;
+        }
+        if primary_released && self.grab == Grab::Object {
+            self.drag_object(world_ray);
+            let changed = self.object_drag.as_ref().is_some_and(|drag| drag.changed);
+            self.object_drag = None;
+            if changed {
+                self.commit();
+            }
             self.grab = Grab::None;
         }
         if !secondary_down && self.grab == Grab::Orbit {
@@ -1490,16 +1516,12 @@ impl Session {
     }
 
     fn status_is_blocked(&self) -> bool {
-        self.status.contains("does not edit")
-            || self.status.contains("Path tracing stays")
-            || self.status.contains("Object-mode")
+        self.status.contains("does not edit") || self.status.contains("Path tracing stays")
     }
 
     fn blocked_reason(&self) -> String {
         if self.render_mode == RenderMode::Render {
             "Render mode keeps the shaded voxels. Path tracing stays in the Metal app.".into()
-        } else if self.editor_mode == EditorMode::Object {
-            "Object-mode gizmos are not in this preview.".into()
         } else {
             format!(
                 "{} does not edit voxels in this preview yet.",
@@ -2141,6 +2163,166 @@ impl Session {
         self.selection_epoch = self.selection_epoch.wrapping_add(1);
     }
 
+    /// Object mode. A hit selects that object and slides it on the clicked
+    /// face. An arrow under the cursor locks the slide to that axis. Voxels
+    /// stay in local cells; only the translation changes.
+    fn begin_object_move(&mut self, ray: Option<(Vec3, Vec3)>) -> bool {
+        let Some((origin, dir)) = ray else {
+            return false;
+        };
+        let aimed = self.pick_object(origin, dir);
+        let locked = self.hover_gizmo.filter(|axis| (0..3).contains(axis));
+        let Some((index, hit)) = aimed.or_else(|| {
+            if locked.is_some() {
+                Some((
+                    self.selected,
+                    Hit {
+                        cell: (0, 0, 0),
+                        normal: (0, 0, 1),
+                    },
+                ))
+            } else {
+                None
+            }
+        }) else {
+            return false;
+        };
+        if index >= self.objects.len() {
+            return false;
+        }
+        self.select_object(index);
+        let translation = self.active().translation;
+        let (plane_axis, sign) = face_axis(hit.normal);
+        let local_plane = match plane_axis {
+            0 => hit.cell.0 as f32 + if sign > 0 { 1.0 } else { 0.0 },
+            1 => hit.cell.1 as f32 + if sign > 0 { 1.0 } else { 0.0 },
+            _ => hit.cell.2 as f32 + if sign > 0 { 1.0 } else { 0.0 },
+        };
+        let plane = local_plane
+            + match plane_axis {
+                0 => translation.0 as f32,
+                1 => translation.1 as f32,
+                _ => translation.2 as f32,
+            };
+        let anchor = if locked.is_some() {
+            self.object_center().unwrap_or(Vec3::ZERO)
+        } else {
+            let Some(point) = intersect_axis_plane(origin, dir, plane_axis, plane) else {
+                return false;
+            };
+            point
+        };
+        let forward = (self.target - self.eye()).normalize_or_zero();
+        let normal = if forward.length_squared() < 1e-8 {
+            Vec3::Z
+        } else {
+            forward
+        };
+        self.object_drag = Some(ObjectDrag {
+            index,
+            locked,
+            plane_axis,
+            plane,
+            anchor,
+            normal,
+            base: translation,
+            changed: false,
+        });
+        true
+    }
+
+    fn drag_object(&mut self, ray: Option<(Vec3, Vec3)>) {
+        let Some(drag) = self.object_drag.clone() else {
+            return;
+        };
+        let Some((origin, dir)) = ray else {
+            return;
+        };
+        let next = if let Some(axis) = drag.locked {
+            let Some(hit) = intersect_plane(origin, dir, drag.anchor, drag.normal) else {
+                return;
+            };
+            let along = match axis {
+                0 => hit.x - drag.anchor.x,
+                1 => hit.y - drag.anchor.y,
+                _ => hit.z - drag.anchor.z,
+            };
+            let steps = along.round() as i32;
+            match axis {
+                0 => (drag.base.0 + steps, drag.base.1, drag.base.2),
+                1 => (drag.base.0, drag.base.1 + steps, drag.base.2),
+                _ => (drag.base.0, drag.base.1, drag.base.2 + steps),
+            }
+        } else {
+            let Some(hit) = intersect_axis_plane(origin, dir, drag.plane_axis, drag.plane) else {
+                return;
+            };
+            let delta = plane_delta(drag.plane_axis, drag.anchor, hit);
+            (
+                drag.base.0 + delta.0,
+                drag.base.1 + delta.1,
+                drag.base.2 + delta.2,
+            )
+        };
+        if self.objects.get(drag.index).is_none() {
+            return;
+        }
+        if self.objects[drag.index].translation == next {
+            return;
+        }
+        if !drag.changed {
+            self.checkpoint();
+        }
+        self.objects[drag.index].translation = next;
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.object_drag = Some(ObjectDrag {
+            changed: true,
+            ..drag
+        });
+    }
+
+    fn object_center(&self) -> Option<Vec3> {
+        let (min, max) = self.bounds()?;
+        let translation = self.active().translation;
+        Some(Vec3::new(
+            (min.0 + max.0) as f32 * 0.5 + 0.5 + translation.0 as f32,
+            (min.1 + max.1) as f32 * 0.5 + 0.5 + translation.1 as f32,
+            (min.2 + max.2) as f32 * 0.5 + 0.5 + translation.2 as f32,
+        ))
+    }
+
+    /// Shrink one axis of the active object, clipping voxels past the new
+    /// size. The minimum corner stays put. A larger value leaves the voxels
+    /// alone: the size is the occupied span, not an empty margin.
+    pub fn resize_active(&mut self, axis: usize, new_size: i32) {
+        if axis > 2 {
+            return;
+        }
+        let new_size = new_size.clamp(1, 256);
+        let Some((min, max)) = self.bounds() else {
+            return;
+        };
+        let min_axis = [min.0, min.1, min.2];
+        let max_axis = [max.0, max.1, max.2];
+        let current = max_axis[axis] - min_axis[axis] + 1;
+        if new_size >= current {
+            return;
+        }
+        self.checkpoint();
+        let limit = min_axis[axis] + new_size;
+        let cells = std::mem::take(&mut self.active_mut().cells);
+        self.active_mut().cells = cells
+            .into_iter()
+            .filter(|(cell, _)| {
+                let coord = [cell.0, cell.1, cell.2][axis];
+                coord < limit
+            })
+            .collect();
+        self.clear_picked();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.commit();
+    }
+
     pub fn deselect(&mut self) {
         if self.picked.is_empty() {
             return;
@@ -2464,6 +2646,18 @@ struct MoveDrag {
     applied: Cell,
 }
 
+#[derive(Clone)]
+struct ObjectDrag {
+    index: usize,
+    locked: Option<i32>,
+    plane_axis: i32,
+    plane: f32,
+    anchor: Vec3,
+    normal: Vec3,
+    base: Cell,
+    changed: bool,
+}
+
 fn ensure_vox_extension(path: PathBuf) -> PathBuf {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some(ext) if ext.eq_ignore_ascii_case("vox") => path,
@@ -2622,6 +2816,19 @@ fn flood_same(cells: &HashMap<Cell, u8>, seed: Cell, slot: u8) -> HashSet<Cell> 
         }
     }
     out
+}
+
+fn intersect_plane(origin: Vec3, dir: Vec3, point: Vec3, normal: Vec3) -> Option<Vec3> {
+    let dir = dir.normalize_or_zero();
+    let denom = normal.dot(dir);
+    if denom.abs() < 1e-6 {
+        return None;
+    }
+    let t = normal.dot(point - origin) / denom;
+    if t < 0.0 {
+        return None;
+    }
+    Some(origin + dir * t)
 }
 
 fn intersect_axis_plane(origin: Vec3, dir: Vec3, axis: i32, plane: f32) -> Option<Vec3> {
@@ -4072,6 +4279,63 @@ mod tests {
         assert_eq!(session.objects[1].translation, (4, 0, 0));
         assert_eq!(session.selected, 1);
         assert_eq!(session.objects[1].cells.len(), 2);
+    }
+
+    fn point(session: &mut Session, down: bool, pressed: bool, released: bool, ray: (Vec3, Vec3)) {
+        session.pointer(
+            true,
+            down,
+            pressed,
+            released,
+            false,
+            false,
+            false,
+            false,
+            false,
+            glam::Vec2::ZERO,
+            0.0,
+            Some(ray),
+            &ToolDrag {
+                rays: Vec::new(),
+                face_steps: 1,
+                marquee: None,
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn object_drag_slides_the_translation_and_undoes() {
+        let mut session = Session::new();
+        session.editor_mode = EditorMode::Object;
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 1);
+        session.active_mut().translation = (0, 0, 0);
+        let down = (Vec3::new(0.5, 0.5, 5.0), Vec3::new(0.0, 0.0, -1.0));
+        let over = (Vec3::new(2.5, 0.5, 5.0), Vec3::new(0.0, 0.0, -1.0));
+        point(&mut session, true, true, false, down);
+        point(&mut session, false, false, true, over);
+        assert_eq!(session.active().translation, (2, 0, 0));
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&1));
+        session.undo();
+        assert_eq!(session.active().translation, (0, 0, 0));
+    }
+
+    #[test]
+    fn resize_clips_voxels_past_the_new_size() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 1);
+        session.active_mut().cells.insert((2, 0, 0), 2);
+        assert_eq!(session.size_xyz(), Some((3, 1, 1)));
+        session.resize_active(0, 2);
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&1));
+        assert!(session.active().cells.get(&(2, 0, 0)).is_none());
+        assert_eq!(session.size_xyz(), Some((1, 1, 1)));
+        session.resize_active(0, 8);
+        assert_eq!(session.size_xyz(), Some((1, 1, 1)));
+        session.undo();
+        assert_eq!(session.active().cells.get(&(2, 0, 0)), Some(&2));
     }
 
     #[test]
