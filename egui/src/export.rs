@@ -78,17 +78,6 @@ struct Built {
     max: [f32; 3],
 }
 
-/// glTF Y-up positions of every exposed corner. Used by the export test.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn scene_positions(session: &Session) -> Vec<[f32; 3]> {
-    let built = build(session);
-    let mut out = Vec::with_capacity(built.positions.len() / 3);
-    for chunk in built.positions.chunks(3) {
-        out.push([chunk[0], chunk[1], chunk[2]]);
-    }
-    out
-}
-
 fn encode(session: &Session) -> Result<Vec<u8>, String> {
     let built = build(session);
     let quads = (built.indices.len() / 6) as u32;
@@ -288,7 +277,12 @@ mod tests {
         session.objects[0].cells.clear();
         session.objects[0].cells.insert((0, 0, 0), 1);
         session.objects[0].translation = (2, 0, 0);
-        let positions = scene_positions(&session);
+        let built = build(&session);
+        let positions: Vec<[f32; 3]> = built
+            .positions
+            .chunks(3)
+            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+            .collect();
         assert!(positions.iter().all(|p| p[0] == 2.0 || p[0] == 3.0));
         assert!(positions.iter().any(|p| p[0] == 2.0));
         let path = std::env::temp_dir().join("macvoxel-egui-export.glb");

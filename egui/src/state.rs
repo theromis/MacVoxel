@@ -3632,20 +3632,14 @@ struct LoadedObject {
 }
 
 struct Loaded {
-    // Read by the .vox tests. The editor applies `objects` instead.
-    #[cfg_attr(not(test), allow(dead_code))]
-    cells: HashMap<Cell, u8>,
     objects: Vec<LoadedObject>,
     palette: Option<[[u8; 4]; 256]>,
     materials: [Material; 256],
-    #[cfg_attr(not(test), allow(dead_code))]
-    model_count: usize,
 }
 
-/// Single-volume MagicaVoxel file, version 150. The grid is shifted so its
-/// minimum corner is the origin. Empty volumes and any axis longer than 256
-/// are refused. Voxels are sorted so two saves of the same volume match.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Graphless single-model writer. The editor saves a scene; these tests
+/// check palette and material bytes without a node graph.
+#[cfg(test)]
 fn save_vox(
     cells: &HashMap<Cell, u8>,
     palette: &[[u8; 4]; 256],
@@ -4099,18 +4093,11 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
     if models.is_empty() {
         return Err("file has no models".into());
     }
-    let model_count = models.len();
     let objects = place_models(&models, &nodes);
-    let cells = objects
-        .first()
-        .map(|object| object.cells.clone())
-        .unwrap_or_default();
     Ok(Loaded {
-        cells,
         objects,
         palette,
         materials,
-        model_count,
     })
 }
 
@@ -4824,8 +4811,8 @@ mod tests {
         file.extend(children);
 
         let loaded = load_vox(&file).expect("vox");
-        assert_eq!(loaded.model_count, 1);
-        assert_eq!(loaded.cells.get(&(0, 0, 0)), Some(&36));
+        assert_eq!(loaded.objects.len(), 1);
+        assert_eq!(loaded.objects[0].cells.get(&(0, 0, 0)), Some(&36));
     }
 
     #[test]
@@ -5429,7 +5416,7 @@ mod tests {
         assert!(bytes.windows(4).any(|w| w == b"MATL"));
 
         let loaded = load_vox(&bytes).expect("load");
-        assert_eq!(at_origin(&loaded.cells), at_origin(&cells));
+        assert_eq!(at_origin(&loaded.objects[0].cells), at_origin(&cells));
         assert_eq!(loaded.palette.unwrap()[36], [11, 22, 33, 255]);
         assert_eq!(loaded.palette.unwrap()[10], [200, 10, 10, 255]);
         assert_eq!(loaded.materials[36], materials[36]);
@@ -5596,7 +5583,7 @@ mod tests {
         let (cells, palette, materials) = sample();
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         let loaded = load_vox(&bytes).expect("resave");
-        assert_eq!(at_origin(&loaded.cells), at_origin(&cells));
+        assert_eq!(at_origin(&loaded.objects[0].cells), at_origin(&cells));
         let loaded_palette = loaded.palette.expect("rgba");
         assert_eq!(loaded_palette[36], palette[36]);
         assert_eq!(loaded_palette[10], palette[10]);
