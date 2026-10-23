@@ -180,6 +180,10 @@ pub struct Volume {
     /// World offset of local cell (0, 0, 0). Copies are placed beside the
     /// source so they do not occupy the same voxels.
     pub translation: Cell,
+    /// Minimum corner of the SIZE box, in local cells. `dims` of `(0, 0, 0)`
+    /// means the box is just the occupied span.
+    pub box_min: Cell,
+    pub dims: (i32, i32, i32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -496,6 +500,8 @@ impl Session {
             name: "Tree".into(),
             cells: demo_tree(),
             translation: (0, 0, 0),
+            box_min: (0, 0, 0),
+            dims: (0, 0, 0),
         });
         session.frame_camera();
         session
@@ -555,8 +561,8 @@ impl Session {
     }
 
     pub fn size_xyz(&self) -> Option<(i32, i32, i32)> {
-        let (min, max) = self.bounds()?;
-        Some((max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1))
+        let (_, dims) = resolved_box(self.active())?;
+        Some((dims[0], dims[1], dims[2]))
     }
 
     pub fn document_label(&self) -> String {
@@ -859,6 +865,8 @@ impl Session {
             name: "Tree".into(),
             cells: demo_tree(),
             translation: (0, 0, 0),
+            box_min: (0, 0, 0),
+            dims: (0, 0, 0),
         });
         self.selected = 0;
         self.focus_object();
@@ -917,6 +925,8 @@ impl Session {
                 name,
                 cells: object.cells,
                 translation: object.translation,
+                box_min: object.box_min,
+                dims: object.dims,
             });
         }
         if self.objects.is_empty() {
@@ -924,6 +934,8 @@ impl Session {
                 name: stem,
                 cells: HashMap::new(),
                 translation: (0, 0, 0),
+                box_min: (0, 0, 0),
+                dims: (0, 0, 0),
             });
         }
         self.selected = 0;
@@ -956,6 +968,8 @@ impl Session {
             name: "Object".into(),
             cells: HashMap::new(),
             translation: (0, 0, 0),
+            box_min: (0, 0, 0),
+            dims: (0, 0, 0),
         });
         self.selected = 0;
         self.focus_object();
@@ -1280,6 +1294,8 @@ impl Session {
             name,
             cells: HashMap::new(),
             translation,
+            box_min: (0, 0, 0),
+            dims: (0, 0, 0),
         });
         self.selected = self.objects.len() - 1;
         self.focus_object();
@@ -1294,6 +1310,8 @@ impl Session {
             name: format!("{} copy", self.active().name),
             cells: self.active().cells.clone(),
             translation: beside(self.active()),
+            box_min: self.active().box_min,
+            dims: self.active().dims,
         };
         self.objects.insert(self.selected + 1, copy);
         self.selected += 1;
@@ -1449,6 +1467,8 @@ impl Session {
                 name: "Object".into(),
                 cells: HashMap::new(),
                 translation: (0, 0, 0),
+                box_min: (0, 0, 0),
+                dims: (0, 0, 0),
             });
         }
         self.selected = self.selected.min(self.objects.len() - 1);
@@ -2538,35 +2558,35 @@ impl Session {
         ))
     }
 
-    /// Shrink one axis of the active object, clipping voxels past the new
-    /// size. The minimum corner stays put. A larger value leaves the voxels
-    /// alone: the size is the occupied span, not an empty margin.
+    /// Set one axis of the active object's SIZE box. The minimum corner stays
+    /// put. Shrinking clips voxels past the new face; growing keeps an empty
+    /// margin that save writes back into the file.
     pub fn resize_active(&mut self, axis: usize, new_size: i32) {
         if axis > 2 {
             return;
         }
         let new_size = new_size.clamp(1, 256);
-        let Some((min, max)) = self.bounds() else {
+        let Some((min, mut dims)) = resolved_box(self.active()) else {
             return;
         };
-        let min_axis = [min.0, min.1, min.2];
-        let max_axis = [max.0, max.1, max.2];
-        let current = max_axis[axis] - min_axis[axis] + 1;
-        if new_size >= current {
+        if new_size == dims[axis] {
             return;
         }
         self.checkpoint();
-        let limit = min_axis[axis] + new_size;
-        let cells = std::mem::take(&mut self.active_mut().cells);
-        self.active_mut().cells = cells
-            .into_iter()
-            .filter(|(cell, _)| {
-                let coord = [cell.0, cell.1, cell.2][axis];
-                coord < limit
-            })
-            .collect();
-        self.clear_picked();
-        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        if new_size < dims[axis] {
+            let limit = [min.0, min.1, min.2][axis] + new_size;
+            let cells = std::mem::take(&mut self.active_mut().cells);
+            self.active_mut().cells = cells
+                .into_iter()
+                .filter(|(cell, _)| [cell.0, cell.1, cell.2][axis] < limit)
+                .collect();
+            self.clear_picked();
+            self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        }
+        dims[axis] = new_size;
+        let volume = self.active_mut();
+        volume.box_min = min;
+        volume.dims = (dims[0], dims[1], dims[2]);
         self.commit();
     }
 
@@ -2974,6 +2994,43 @@ fn lerp_color(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
 
 pub(crate) fn occupied_bounds(cells: &HashMap<Cell, u8>) -> Option<(Cell, Cell)> {
     cell_bounds(cells.keys().copied())
+}
+
+/// SIZE box in local cells. A zero `dims` means "tight around the voxels".
+/// An explicit box stays put when it is larger, and grows if a voxel falls
+/// outside it.
+pub(crate) fn resolved_box(volume: &Volume) -> Option<(Cell, [i32; 3])> {
+    let occupied = occupied_bounds(&volume.cells);
+    let explicit = volume.dims.0 > 0 && volume.dims.1 > 0 && volume.dims.2 > 0;
+    if !explicit {
+        let (min, max) = occupied?;
+        return Some((
+            min,
+            [max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1],
+        ));
+    }
+    let mut min = volume.box_min;
+    let mut dims = [volume.dims.0, volume.dims.1, volume.dims.2];
+    if let Some((lo, hi)) = occupied {
+        for axis in 0..3 {
+            let low = [lo.0, lo.1, lo.2][axis];
+            let high = [hi.0, hi.1, hi.2][axis];
+            let mut corner = [min.0, min.1, min.2][axis];
+            if low < corner {
+                dims[axis] += corner - low;
+                corner = low;
+            }
+            if high + 1 > corner + dims[axis] {
+                dims[axis] = high + 1 - corner;
+            }
+            match axis {
+                0 => min.0 = corner,
+                1 => min.1 = corner,
+                _ => min.2 = corner,
+            }
+        }
+    }
+    Some((min, dims))
 }
 
 fn cell_bounds(cells: impl IntoIterator<Item = Cell>) -> Option<(Cell, Cell)> {
@@ -3493,6 +3550,8 @@ struct LoadedObject {
     name: String,
     cells: HashMap<Cell, u8>,
     translation: Cell,
+    box_min: Cell,
+    dims: (i32, i32, i32),
 }
 
 struct Loaded {
@@ -3563,9 +3622,10 @@ fn save_vox(
 }
 
 /// Every non-empty object, each as its own model. Local cells are shifted
-/// so the minimum corner is the origin. The leaf translation puts that
-/// model back where the editor had it. Rotations are not stored: a loaded
-/// rotation is baked into the cells.
+/// so the SIZE box origin is zero. That box keeps an empty margin when the
+/// editor grew the object. The leaf translation puts the model back where
+/// the editor had it. Rotations are not stored: a loaded rotation is baked
+/// into the cells.
 fn save_scene(
     objects: &[Volume],
     palette: &[[u8; 4]; 256],
@@ -3588,17 +3648,9 @@ fn save_scene(
         if voxels.is_empty() {
             continue;
         }
-        let mut min = (voxels[0].0, voxels[0].1, voxels[0].2);
-        let mut max = min;
-        for voxel in &voxels {
-            min.0 = min.0.min(voxel.0);
-            min.1 = min.1.min(voxel.1);
-            min.2 = min.2.min(voxel.2);
-            max.0 = max.0.max(voxel.0);
-            max.1 = max.1.max(voxel.1);
-            max.2 = max.2.max(voxel.2);
-        }
-        let dims = [max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1];
+        let Some((min, dims)) = resolved_box(object) else {
+            continue;
+        };
         if dims[0] > 256 || dims[1] > 256 || dims[2] > 256 {
             return Err(format!(
                 "scene exceeds .vox single-model limit of 256 per axis (bounds {}x{}x{})",
@@ -4118,22 +4170,25 @@ fn place_models(
                 *color,
             );
         }
-        world.push((placement.name, cells, placement.world_t));
+        let boxed = size_box_world(*dims, half, placement.world_t, placement.world_r);
+        world.push((placement.name, cells, placement.world_t, boxed));
     }
     if world.is_empty() {
         return vec![LoadedObject {
             name: String::new(),
             cells: HashMap::new(),
             translation: (0, 0, 0),
+            box_min: (0, 0, 0),
+            dims: (0, 0, 0),
         }];
     }
     let shift0 = world
         .iter()
-        .find_map(|(_, cells, _)| display_shift(cells))
+        .find_map(|(_, cells, _, _)| display_shift(cells))
         .unwrap_or((0, 0, 0));
     world
         .into_iter()
-        .map(|(name, cells, anchor)| {
+        .map(|(name, cells, anchor, (box_min, dims))| {
             let shift = display_shift(&cells).unwrap_or((0, 0, 0));
             let local = cells
                 .into_iter()
@@ -4157,9 +4212,53 @@ fn place_models(
                 name,
                 cells: local,
                 translation,
+                box_min: (
+                    box_min.0 + shift.0,
+                    box_min.1 + shift.1,
+                    box_min.2 + shift.2,
+                ),
+                dims,
             }
         })
         .collect()
+}
+
+fn size_box_world(
+    dims: [i32; 3],
+    half: [i32; 3],
+    world_t: [i32; 3],
+    world_r: [[i32; 3]; 3],
+) -> (Cell, (i32, i32, i32)) {
+    let mut lo = [i32::MAX; 3];
+    let mut hi = [i32::MIN; 3];
+    for mask in 0..8 {
+        let corner = [
+            if mask & 1 == 0 { 0 } else { dims[0] },
+            if mask & 2 == 0 { 0 } else { dims[1] },
+            if mask & 4 == 0 { 0 } else { dims[2] },
+        ];
+        let spun = rot_apply(
+            world_r,
+            [
+                corner[0] - half[0],
+                corner[1] - half[1],
+                corner[2] - half[2],
+            ],
+        );
+        let world = [
+            spun[0] + world_t[0],
+            spun[1] + world_t[1],
+            spun[2] + world_t[2],
+        ];
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(world[axis]);
+            hi[axis] = hi[axis].max(world[axis]);
+        }
+    }
+    (
+        (lo[0], lo[1], lo[2]),
+        (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]),
+    )
 }
 
 fn local_is_empty(cells: &HashMap<Cell, u8>) -> bool {
@@ -4575,6 +4674,8 @@ mod tests {
             name: "B".into(),
             cells: HashMap::from([((0, 0, 0), 2)]),
             translation: (4, 0, 0),
+            box_min: (0, 0, 0),
+            dims: (0, 0, 0),
         });
         session.finish_object_band(
             &ObjectBand {
@@ -4605,6 +4706,8 @@ mod tests {
             name: "B".into(),
             cells: HashMap::from([((0, 0, 0), 2)]),
             translation: (5, 0, 0),
+            box_min: (0, 0, 0),
+            dims: (0, 0, 0),
         });
         session.object_selection = vec![0, 1];
         let down = (Vec3::new(0.5, 0.5, 5.0), Vec3::new(0.0, 0.0, -1.0));
@@ -4628,6 +4731,8 @@ mod tests {
             name: "B".into(),
             cells: HashMap::from([((0, 0, 0), 2)]),
             translation: (4, 0, 0),
+            box_min: (0, 0, 0),
+            dims: (0, 0, 0),
         });
         session.object_selection = vec![0, 1];
         session.rotate_object(Axis::Z, false);
@@ -4738,11 +4843,34 @@ mod tests {
         session.resize_active(0, 2);
         assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&1));
         assert!(session.active().cells.get(&(2, 0, 0)).is_none());
-        assert_eq!(session.size_xyz(), Some((1, 1, 1)));
+        assert_eq!(session.size_xyz(), Some((2, 1, 1)));
         session.resize_active(0, 8);
-        assert_eq!(session.size_xyz(), Some((1, 1, 1)));
+        assert_eq!(session.size_xyz(), Some((8, 1, 1)));
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&1));
+        session.undo();
+        assert_eq!(session.size_xyz(), Some((2, 1, 1)));
         session.undo();
         assert_eq!(session.active().cells.get(&(2, 0, 0)), Some(&2));
+        assert_eq!(session.size_xyz(), Some((3, 1, 1)));
+    }
+
+    #[test]
+    fn grown_size_survives_a_scene_save() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 4);
+        session.resize_active(0, 5);
+        let bytes = save_scene(&session.objects, &session.palette, &session.materials).unwrap();
+        let loaded = load_vox(&bytes).expect("scene");
+        assert_eq!(loaded.objects[0].dims, (5, 1, 1));
+        assert_eq!(loaded.objects[0].cells.get(&(0, 0, 0)), Some(&4));
+        let world = (
+            loaded.objects[0].cells.keys().next().copied().unwrap().0
+                + loaded.objects[0].translation.0,
+            0,
+            0,
+        );
+        assert_eq!(world.0, 0);
     }
 
     #[test]
@@ -5127,11 +5255,15 @@ mod tests {
                 name: "A".into(),
                 cells: first,
                 translation: (0, 0, 0),
+                box_min: (0, 0, 0),
+                dims: (0, 0, 0),
             },
             Volume {
                 name: "B".into(),
                 cells: second,
                 translation: (5, 0, 0),
+                box_min: (0, 0, 0),
+                dims: (0, 0, 0),
             },
         ];
         let bytes = save_scene(&objects, &default_palette(), &[Material::default(); 256]).unwrap();

@@ -369,7 +369,7 @@ fn screen_box(
     rect: egui::Rect,
     volume: &Volume,
 ) -> Option<(f32, f32, f32, f32)> {
-    let (min, max) = crate::state::occupied_bounds(&volume.cells)?;
+    let (min, dims) = crate::state::resolved_box(volume)?;
     let shift = volume.translation;
     let lo = Vec3::new(
         (min.0 + shift.0) as f32,
@@ -377,9 +377,9 @@ fn screen_box(
         (min.2 + shift.2) as f32,
     );
     let hi = Vec3::new(
-        (max.0 + shift.0 + 1) as f32,
-        (max.1 + shift.1 + 1) as f32,
-        (max.2 + shift.2 + 1) as f32,
+        (min.0 + shift.0 + dims[0]) as f32,
+        (min.1 + shift.1 + dims[1]) as f32,
+        (min.2 + shift.2 + dims[2]) as f32,
     );
     let mut sx0 = f32::MAX;
     let mut sy0 = f32::MAX;
@@ -433,7 +433,7 @@ fn paint_box(
     volume: &Volume,
     stroke: egui::Stroke,
 ) {
-    let Some((min, max)) = crate::state::occupied_bounds(&volume.cells) else {
+    let Some((min, dims)) = crate::state::resolved_box(volume) else {
         return;
     };
     let shift = volume.translation;
@@ -443,9 +443,9 @@ fn paint_box(
         (min.2 + shift.2) as f32,
     ];
     let hi = [
-        (max.0 + shift.0 + 1) as f32,
-        (max.1 + shift.1 + 1) as f32,
-        (max.2 + shift.2 + 1) as f32,
+        (min.0 + shift.0 + dims[0]) as f32,
+        (min.1 + shift.1 + dims[1]) as f32,
+        (min.2 + shift.2 + dims[2]) as f32,
     ];
     let corner = |mask: u8| {
         project_point(
