@@ -97,6 +97,7 @@ pub fn show(
         scroll,
         ray,
         &drag,
+        ctx.input(|i| i.modifiers.command),
     );
     if pointer.button_released(egui::PointerButton::Primary) {
         cache.anchor = None;

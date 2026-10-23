@@ -702,6 +702,11 @@ fn selection(ui: &mut Ui, session: &mut Session) {
                 .small()
                 .color(Color32::from_gray(120)),
         );
+        ui.label(
+            RichText::new("⌘-drag moves it. Paste lands on the hovered face.")
+                .small()
+                .color(Color32::from_gray(120)),
+        );
     });
 }
 

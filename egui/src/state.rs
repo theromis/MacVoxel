@@ -186,6 +186,7 @@ pub enum Grab {
     Pan,
     Paint,
     Select,
+    Move,
 }
 
 #[derive(Clone, Copy)]
@@ -306,6 +307,7 @@ pub struct Session {
     pub selection_epoch: u64,
     select_anchor: Option<Cell>,
     clipboard: Option<VoxelClipboard>,
+    move_drag: Option<MoveDrag>,
     stroke: Option<Stroke>,
     stroke_serial: u32,
     grab: Grab,
@@ -404,6 +406,7 @@ impl Session {
             selection_epoch: 1,
             select_anchor: None,
             clipboard: None,
+            move_drag: None,
             stroke: None,
             stroke_serial: 1,
             grab: Grab::None,
@@ -776,6 +779,7 @@ impl Session {
         scroll: f32,
         ray: Option<(Vec3, Vec3)>,
         drag: &ToolDrag,
+        command: bool,
     ) {
         if inside && scroll.abs() > 0.0 {
             self.distance = (self.distance * (1.0 - scroll * 0.0014)).clamp(2.0, 2000.0);
@@ -788,6 +792,8 @@ impl Session {
         } else if primary_pressed && inside {
             if space {
                 self.grab = Grab::Pan;
+            } else if command && self.begin_move(ray) {
+                self.grab = Grab::Move;
             } else if self.can_edit() {
                 self.grab = Grab::Paint;
                 self.checkpoint();
@@ -808,6 +814,7 @@ impl Session {
             Grab::Pan if middle_down || primary_down => self.pan(delta.x, delta.y),
             Grab::Paint if primary_down => self.apply_stroke(ray, drag),
             Grab::Select if primary_down => self.drag_select(ray),
+            Grab::Move if primary_down => self.drag_move(ray),
             _ => {}
         }
 
@@ -820,6 +827,12 @@ impl Session {
         }
         if primary_released && self.grab == Grab::Select {
             self.finish_select(ray, drag);
+            self.grab = Grab::None;
+        }
+        if primary_released && self.grab == Grab::Move {
+            self.drag_move(ray);
+            self.move_drag = None;
+            self.commit();
             self.grab = Grab::None;
         }
         if !secondary_down && self.grab == Grab::Orbit {
@@ -1378,20 +1391,23 @@ impl Session {
         }
     }
 
-    /// Writes the clipboard back at its original origin and selects those cells.
+    /// Writes the clipboard onto the hovered face, or back at its original
+    /// origin when the pointer is not on a voxel. The pasted cells become
+    /// the selection.
     pub fn paste_clipboard(&mut self) {
         let Some(clip) = self.clipboard.clone() else {
             return;
         };
+        let origin = self.paste_origin(&clip);
         self.checkpoint();
         let mut pasted = HashSet::with_capacity(clip.cells.len());
         {
             let map = &mut self.active_mut().cells;
             for (offset, slot) in &clip.cells {
                 let at = (
-                    clip.origin.0 + offset.0,
-                    clip.origin.1 + offset.1,
-                    clip.origin.2 + offset.2,
+                    origin.0 + offset.0,
+                    origin.1 + offset.1,
+                    origin.2 + offset.2,
                 );
                 map.insert(at, *slot);
                 pasted.insert(at);
@@ -1401,6 +1417,91 @@ impl Session {
         self.commit();
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
         self.note_selection();
+    }
+
+    fn paste_origin(&self, clip: &VoxelClipboard) -> Cell {
+        match self.hover {
+            Some(hit) => (
+                hit.cell.0 + hit.normal.0,
+                hit.cell.1 + hit.normal.1,
+                hit.cell.2 + hit.normal.2,
+            ),
+            None => clip.origin,
+        }
+    }
+
+    /// Cmd-drag. The clicked face's axis stays fixed; the selection slides
+    /// on that plane by whole voxels. Returns false when the click missed
+    /// the selection, so the active tool still runs.
+    fn begin_move(&mut self, ray: Option<(Vec3, Vec3)>) -> bool {
+        if self.picked.is_empty()
+            || self.editor_mode != EditorMode::Model
+            || self.render_mode != RenderMode::Edit
+        {
+            return false;
+        }
+        let Some((origin, dir)) = ray else {
+            return false;
+        };
+        let Some(hit) = raycast(&self.active().cells, origin, dir) else {
+            return false;
+        };
+        if !self.picked.contains(&hit.cell) {
+            return false;
+        }
+        let (axis, sign) = face_axis(hit.normal);
+        let plane = match axis {
+            0 => hit.cell.0 as f32 + if sign > 0 { 1.0 } else { 0.0 },
+            1 => hit.cell.1 as f32 + if sign > 0 { 1.0 } else { 0.0 },
+            _ => hit.cell.2 as f32 + if sign > 0 { 1.0 } else { 0.0 },
+        };
+        let Some(anchor) = intersect_axis_plane(origin, dir, axis, plane) else {
+            return false;
+        };
+        self.checkpoint();
+        self.move_drag = Some(MoveDrag {
+            axis,
+            plane,
+            anchor,
+            base_cells: self.active().cells.clone(),
+            base_picked: self.picked.iter().copied().collect(),
+            applied: (0, 0, 0),
+        });
+        true
+    }
+
+    fn drag_move(&mut self, ray: Option<(Vec3, Vec3)>) {
+        let Some(drag) = self.move_drag.as_ref() else {
+            return;
+        };
+        let Some((origin, dir)) = ray else {
+            return;
+        };
+        let Some(hit) = intersect_axis_plane(origin, dir, drag.axis, drag.plane) else {
+            return;
+        };
+        let delta = plane_delta(drag.axis, drag.anchor, hit);
+        if delta == drag.applied {
+            return;
+        }
+        let axis = drag.axis;
+        let plane = drag.plane;
+        let anchor = drag.anchor;
+        let base_cells = drag.base_cells.clone();
+        let base_picked = drag.base_picked.clone();
+        let (next, picked) = translate_cells(&base_cells, &base_picked, delta);
+        self.active_mut().cells = next;
+        self.picked = picked;
+        self.move_drag = Some(MoveDrag {
+            axis,
+            plane,
+            anchor,
+            base_cells,
+            base_picked,
+            applied: delta,
+        });
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.selection_epoch = self.selection_epoch.wrapping_add(1);
     }
 
     pub fn deselect(&mut self) {
@@ -1651,6 +1752,15 @@ struct VoxelClipboard {
     cells: Vec<(Cell, u8)>,
 }
 
+struct MoveDrag {
+    axis: i32,
+    plane: f32,
+    anchor: Vec3,
+    base_cells: HashMap<Cell, u8>,
+    base_picked: Vec<Cell>,
+    applied: Cell,
+}
+
 fn ensure_vox_extension(path: PathBuf) -> PathBuf {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some(ext) if ext.eq_ignore_ascii_case("vox") => path,
@@ -1745,6 +1855,70 @@ fn flood_same(cells: &HashMap<Cell, u8>, seed: Cell, slot: u8) -> HashSet<Cell> 
         }
     }
     out
+}
+
+fn intersect_axis_plane(origin: Vec3, dir: Vec3, axis: i32, plane: f32) -> Option<Vec3> {
+    let dir = dir.normalize_or_zero();
+    if dir.length_squared() < 1e-8 {
+        return None;
+    }
+    let (along, component) = match axis {
+        0 => (origin.x, dir.x),
+        1 => (origin.y, dir.y),
+        _ => (origin.z, dir.z),
+    };
+    if component.abs() < 1e-6 {
+        return None;
+    }
+    let t = (plane - along) / component;
+    if t < 0.0 {
+        return None;
+    }
+    Some(origin + dir * t)
+}
+
+fn plane_delta(axis: i32, anchor: Vec3, hit: Vec3) -> Cell {
+    (
+        if axis == 0 {
+            0
+        } else {
+            (hit.x - anchor.x).round() as i32
+        },
+        if axis == 1 {
+            0
+        } else {
+            (hit.y - anchor.y).round() as i32
+        },
+        if axis == 2 {
+            0
+        } else {
+            (hit.z - anchor.z).round() as i32
+        },
+    )
+}
+
+fn translate_cells(
+    base: &HashMap<Cell, u8>,
+    picked: &[Cell],
+    delta: Cell,
+) -> (HashMap<Cell, u8>, HashSet<Cell>) {
+    let chosen: HashSet<Cell> = picked.iter().copied().collect();
+    let mut next = HashMap::with_capacity(base.len());
+    for (cell, slot) in base {
+        if !chosen.contains(cell) {
+            next.insert(*cell, *slot);
+        }
+    }
+    let mut moved = HashSet::with_capacity(picked.len());
+    for cell in picked {
+        let Some(&slot) = base.get(cell) else {
+            continue;
+        };
+        let at = (cell.0 + delta.0, cell.1 + delta.1, cell.2 + delta.2);
+        next.insert(at, slot);
+        moved.insert(at);
+    }
+    (next, moved)
 }
 
 fn face_axis(normal: Cell) -> (i32, i32) {
@@ -2486,6 +2660,116 @@ mod tests {
         assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
         session.paste_clipboard();
         assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
+    }
+
+    #[test]
+    fn paste_lands_on_the_hovered_face() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 4);
+        session.active_mut().cells.insert((1, 0, 0), 5);
+        session.picked.insert((0, 0, 0));
+        session.picked.insert((1, 0, 0));
+        session.copy_picked();
+        session.hover = Some(Hit {
+            cell: (5, 0, 0),
+            normal: (0, 0, 1),
+        });
+        session.paste_clipboard();
+        assert_eq!(session.active().cells.get(&(5, 0, 1)), Some(&4));
+        assert_eq!(session.active().cells.get(&(6, 0, 1)), Some(&5));
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
+        assert!(session.picked.contains(&(5, 0, 1)));
+        assert!(!session.picked.contains(&(0, 0, 0)));
+    }
+
+    #[test]
+    fn paste_without_a_hover_uses_the_original_origin() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((2, 3, 4), 7);
+        session.picked.insert((2, 3, 4));
+        session.copy_picked();
+        session.active_mut().cells.insert((2, 3, 4), 1);
+        session.hover = None;
+        session.paste_clipboard();
+        assert_eq!(session.active().cells.get(&(2, 3, 4)), Some(&7));
+    }
+
+    #[test]
+    fn move_slides_on_the_clicked_plane_and_undoes() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 4);
+        session.active_mut().cells.insert((3, 0, 0), 9);
+        session.picked.insert((0, 0, 0));
+        let down = (Vec3::new(0.5, 0.5, 5.0), Vec3::new(0.0, 0.0, -1.0));
+        let empty = ToolDrag {
+            rays: Vec::new(),
+            face_steps: 1,
+            marquee: None,
+        };
+        session.pointer(
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            glam::Vec2::ZERO,
+            0.0,
+            Some(down),
+            &empty,
+            true,
+        );
+        let shifted = (Vec3::new(2.6, 0.4, 5.0), Vec3::new(0.0, 0.0, -1.0));
+        session.pointer(
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            glam::Vec2::ZERO,
+            0.0,
+            Some(shifted),
+            &empty,
+            true,
+        );
+        assert_eq!(session.active().cells.get(&(2, 0, 0)), Some(&4));
+        assert!(!session.active().cells.contains_key(&(0, 0, 0)));
+        assert_eq!(session.active().cells.get(&(3, 0, 0)), Some(&9));
+        session.pointer(
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            glam::Vec2::ZERO,
+            0.0,
+            Some(shifted),
+            &empty,
+            true,
+        );
+        session.undo();
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
+        assert!(!session.active().cells.contains_key(&(2, 0, 0)));
+    }
+
+    #[test]
+    fn plane_delta_locks_the_clicked_axis() {
+        let delta = plane_delta(2, Vec3::new(0.5, 0.5, 1.0), Vec3::new(2.4, -0.6, 1.0));
+        assert_eq!(delta, (2, -1, 0));
     }
 
     #[test]
