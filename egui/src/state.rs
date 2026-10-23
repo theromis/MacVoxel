@@ -129,7 +129,7 @@ pub enum GlassMode {
     Absorption,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterialType {
     Diffuse,
     Metal,
@@ -148,7 +148,7 @@ impl MaterialType {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
     pub ty: MaterialType,
     pub roughness: f32,
@@ -527,9 +527,8 @@ impl Session {
                     cells: loaded.cells,
                 });
                 self.selected = 0;
-                if let Some(pal) = loaded.palette {
-                    self.palette = pal;
-                }
+                self.palette = loaded.palette.unwrap_or_else(default_palette);
+                self.materials = loaded.materials;
                 self.path = Some(path.to_path_buf());
                 self.undo.clear();
                 self.redo.clear();
@@ -549,6 +548,57 @@ impl Session {
                 };
             }
             Err(e) => self.status = format!("{}: {e}", path.display()),
+        }
+    }
+
+    /// Save the active volume. An untitled document asks for a path.
+    pub fn save(&mut self) {
+        match self.path.clone() {
+            Some(path) => self.write_vox(&path),
+            None => self.save_as(),
+        }
+    }
+
+    pub fn save_as(&mut self) {
+        let name = match self.path.as_ref().and_then(|p| p.file_name()) {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => format!("{}.vox", self.active().name),
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("MagicaVoxel", &["vox"])
+            .set_file_name(name)
+            .save_file()
+        else {
+            return;
+        };
+        self.write_vox(&ensure_vox_extension(path));
+    }
+
+    fn write_vox(&mut self, path: &Path) {
+        let cells = self.active().cells.clone();
+        let name = self.active().name.clone();
+        let count = cells.len();
+        let several = self.objects.len() > 1;
+        match save_vox(&cells, &self.palette, &self.materials) {
+            Ok(bytes) => match std::fs::write(path, bytes) {
+                Ok(()) => {
+                    self.path = Some(path.to_path_buf());
+                    let which = if several {
+                        format!(" of {name}")
+                    } else {
+                        String::new()
+                    };
+                    let file = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    self.status = format!("Saved {count} voxels{which} to {file}.");
+                }
+                Err(e) => {
+                    self.status = format!("Could not write {}: {e}", path.display());
+                }
+            },
+            Err(e) => self.status = e,
         }
     }
 
@@ -885,21 +935,35 @@ impl Session {
             return;
         }
         let mut cmd: Option<Cmd> = None;
+        // On macOS the application menu owns these accelerators. Consuming
+        // them here as well would undo or save twice when AppKit also delivers
+        // the key to the window.
+        let native_owns_shortcuts = cfg!(target_os = "macos")
+            && std::env::var_os("MACVOXEL_NO_NATIVE_MENU").is_none();
         ctx.input_mut(|i| {
             let redo = egui::KeyboardShortcut::new(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
                 egui::Key::Z,
             );
             let undo = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z);
+            let save_as = egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::S,
+            );
+            let save = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
             let open = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
             let new = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N);
-            if i.consume_shortcut(&redo) {
+            if !native_owns_shortcuts && i.consume_shortcut(&redo) {
                 cmd = Some(Cmd::Redo);
-            } else if i.consume_shortcut(&undo) {
+            } else if !native_owns_shortcuts && i.consume_shortcut(&undo) {
                 cmd = Some(Cmd::Undo);
-            } else if i.consume_shortcut(&open) {
+            } else if !native_owns_shortcuts && i.consume_shortcut(&save_as) {
+                cmd = Some(Cmd::SaveAs);
+            } else if !native_owns_shortcuts && i.consume_shortcut(&save) {
+                cmd = Some(Cmd::Save);
+            } else if !native_owns_shortcuts && i.consume_shortcut(&open) {
                 cmd = Some(Cmd::Open);
-            } else if i.consume_shortcut(&new) {
+            } else if !native_owns_shortcuts && i.consume_shortcut(&new) {
                 cmd = Some(Cmd::New);
             } else if i.key_pressed(egui::Key::Tab) {
                 cmd = Some(Cmd::Tab);
@@ -922,6 +986,8 @@ impl Session {
             Some(Cmd::Redo) => self.redo(),
             Some(Cmd::Open) => self.open_dialog(),
             Some(Cmd::New) => self.new_document(),
+            Some(Cmd::Save) => self.save(),
+            Some(Cmd::SaveAs) => self.save_as(),
             Some(Cmd::Tab) => {
                 self.editor_mode = if self.editor_mode == EditorMode::Model {
                     EditorMode::Object
@@ -940,8 +1006,17 @@ enum Cmd {
     Redo,
     Open,
     New,
+    Save,
+    SaveAs,
     Tab,
     Tool(Tool),
+}
+
+fn ensure_vox_extension(path: PathBuf) -> PathBuf {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("vox") => path,
+        _ => path.with_extension("vox"),
+    }
 }
 
 fn rot90(p: Cell, axis: Axis, clockwise: bool) -> Cell {
@@ -1097,7 +1172,149 @@ fn demo_tree() -> HashMap<Cell, u8> {
 struct Loaded {
     cells: HashMap<Cell, u8>,
     palette: Option<[[u8; 4]; 256]>,
+    materials: [Material; 256],
     model_count: usize,
+}
+
+/// Single-volume MagicaVoxel file, version 150. The grid is shifted so its
+/// minimum corner is the origin. Empty volumes and any axis longer than 256
+/// are refused. Voxels are sorted so two saves of the same volume match.
+fn save_vox(
+    cells: &HashMap<Cell, u8>,
+    palette: &[[u8; 4]; 256],
+    materials: &[Material; 256],
+) -> Result<Vec<u8>, String> {
+    let mut voxels: Vec<(i32, i32, i32, u8)> = cells
+        .iter()
+        .filter(|(_, index)| **index != 0)
+        .map(|(cell, index)| (cell.0, cell.1, cell.2, *index))
+        .collect();
+    if voxels.is_empty() {
+        return Err("cannot save an empty grid".into());
+    }
+    let mut min = (voxels[0].0, voxels[0].1, voxels[0].2);
+    let mut max = min;
+    for voxel in &voxels {
+        min.0 = min.0.min(voxel.0);
+        min.1 = min.1.min(voxel.1);
+        min.2 = min.2.min(voxel.2);
+        max.0 = max.0.max(voxel.0);
+        max.1 = max.1.max(voxel.1);
+        max.2 = max.2.max(voxel.2);
+    }
+    let sx = max.0 - min.0 + 1;
+    let sy = max.1 - min.1 + 1;
+    let sz = max.2 - min.2 + 1;
+    if sx > 256 || sy > 256 || sz > 256 {
+        return Err(format!(
+            "scene exceeds .vox single-model limit of 256 per axis (bounds {sx}x{sy}x{sz})"
+        ));
+    }
+    for voxel in &mut voxels {
+        voxel.0 -= min.0;
+        voxel.1 -= min.1;
+        voxel.2 -= min.2;
+    }
+    voxels.sort_unstable();
+
+    let mut children = Vec::new();
+    let mut size = Vec::new();
+    size.extend_from_slice(&(sx as u32).to_le_bytes());
+    size.extend_from_slice(&(sy as u32).to_le_bytes());
+    size.extend_from_slice(&(sz as u32).to_le_bytes());
+    push_chunk(&mut children, b"SIZE", &size);
+
+    let mut xyzi = Vec::with_capacity(4 + voxels.len() * 4);
+    xyzi.extend_from_slice(&(voxels.len() as u32).to_le_bytes());
+    for (x, y, z, index) in voxels {
+        xyzi.extend_from_slice(&[x as u8, y as u8, z as u8, index]);
+    }
+    push_chunk(&mut children, b"XYZI", &xyzi);
+    push_rgba(&mut children, palette);
+    push_matl(&mut children, materials);
+
+    let mut file = Vec::new();
+    file.extend_from_slice(b"VOX ");
+    file.extend_from_slice(&150u32.to_le_bytes());
+    file.extend_from_slice(b"MAIN");
+    file.extend_from_slice(&0u32.to_le_bytes());
+    file.extend_from_slice(&(children.len() as u32).to_le_bytes());
+    file.extend(children);
+    Ok(file)
+}
+
+fn push_chunk(out: &mut Vec<u8>, id: &[u8; 4], content: &[u8]) {
+    out.extend_from_slice(id);
+    out.extend_from_slice(&(content.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(content);
+}
+
+fn push_rgba(out: &mut Vec<u8>, palette: &[[u8; 4]; 256]) {
+    let mut body = Vec::with_capacity(1024);
+    for slot in 1..=255 {
+        body.extend_from_slice(&palette[slot]);
+    }
+    body.extend_from_slice(&[0, 0, 0, 0]);
+    push_chunk(out, b"RGBA", &body);
+}
+
+fn material_is_default(material: &Material) -> bool {
+    *material == Material::default()
+}
+
+fn format_float(value: f32) -> String {
+    // printf("%g") for the values the editor writes. Display round-trips
+    // through strtof for those (1, 0.5, 0.25); bit-identical files are not
+    // required, a reload of the same numbers is.
+    format!("{value}")
+}
+
+fn push_string(out: &mut Vec<u8>, text: &str) {
+    out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
+}
+
+fn matl_type(ty: MaterialType) -> &'static str {
+    match ty {
+        MaterialType::Metal => "_metal",
+        MaterialType::Glass => "_glass",
+        MaterialType::Emissive => "_emit",
+        MaterialType::Diffuse => "_diffuse",
+    }
+}
+
+fn push_matl(out: &mut Vec<u8>, materials: &[Material; 256]) {
+    for id in 1..=255 {
+        let material = materials[id];
+        if material_is_default(&material) {
+            continue;
+        }
+        let mut pairs = vec![
+            ("_type", matl_type(material.ty).to_string()),
+            ("_rough", format_float(material.roughness)),
+            ("_metal", format_float(material.metallic)),
+            ("_ior", format_float(material.ior - 1.0)),
+        ];
+        if material.transparency != 0.0 {
+            pairs.push(("_alpha", format_float(material.transparency)));
+        }
+        if material.ty == MaterialType::Emissive {
+            pairs.push(("_emit", format_float(material.emission)));
+            pairs.push((
+                "_flux",
+                format_float((material.emission_power - 1) as f32),
+            ));
+        }
+        let mut body = Vec::new();
+        body.extend_from_slice(&(id as u32).to_le_bytes());
+        body.extend_from_slice(&(pairs.len() as u32).to_le_bytes());
+        for (key, value) in &pairs {
+            push_string(&mut body, key);
+            push_string(&mut body, value);
+        }
+        push_chunk(out, b"MATL", &body);
+    }
 }
 
 fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
@@ -1120,6 +1337,7 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
     let mut models: Vec<Vec<(u8, u8, u8, u8)>> = Vec::new();
     let mut pending: Option<(u32, u32, u32)> = None;
     let mut palette = None;
+    let mut materials = [Material::default(); 256];
 
     while p + 12 <= end {
         let id = read_id(bytes, &mut p)?;
@@ -1170,6 +1388,10 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
             }
             pal[0] = [0, 0, 0, 0];
             palette = Some(pal);
+        } else if &id == b"MATL" {
+            if let Some((slot, material)) = parse_matl(body) {
+                materials[slot] = material;
+            }
         }
         p += content + children;
     }
@@ -1213,8 +1435,75 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
     Ok(Loaded {
         cells,
         palette,
+        materials,
         model_count,
     })
+}
+
+fn parse_matl(body: &[u8]) -> Option<(usize, Material)> {
+    let mut cursor = body;
+    let id = take_u32(&mut cursor)? as i32;
+    if !(1..=255).contains(&id) {
+        return None;
+    }
+    let count = take_u32(&mut cursor)? as usize;
+    let mut dict = HashMap::with_capacity(count);
+    for _ in 0..count {
+        let key = take_string(&mut cursor)?;
+        let value = take_string(&mut cursor)?;
+        dict.insert(key, value);
+    }
+    Some((id as usize, material_from_dict(&dict)))
+}
+
+fn take_u32(bytes: &mut &[u8]) -> Option<u32> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    let value = u32::from_le_bytes(bytes[..4].try_into().ok()?);
+    *bytes = &bytes[4..];
+    Some(value)
+}
+
+fn take_string(bytes: &mut &[u8]) -> Option<String> {
+    let len = take_u32(bytes)? as usize;
+    if bytes.len() < len {
+        return None;
+    }
+    let text = std::str::from_utf8(&bytes[..len]).ok()?.to_string();
+    *bytes = &bytes[len..];
+    Some(text)
+}
+
+fn dict_float(dict: &HashMap<String, String>, key: &str, fallback: f32) -> f32 {
+    match dict.get(key) {
+        Some(text) => text.parse().unwrap_or(0.0),
+        None => fallback,
+    }
+}
+
+fn material_from_dict(dict: &HashMap<String, String>) -> Material {
+    let mut material = Material::default();
+    if let Some(ty) = dict.get("_type") {
+        material.ty = match ty.as_str() {
+            "_metal" => MaterialType::Metal,
+            "_glass" => MaterialType::Glass,
+            "_emit" => MaterialType::Emissive,
+            _ => MaterialType::Diffuse,
+        };
+    }
+    material.roughness = dict_float(dict, "_rough", material.roughness);
+    material.metallic = dict_float(dict, "_metal", material.metallic);
+    material.ior = 1.0 + dict_float(dict, "_ior", material.ior - 1.0);
+    if let Some(alpha) = dict.get("_alpha").or_else(|| dict.get("_trans")) {
+        material.transparency = alpha.parse().unwrap_or(0.0);
+    }
+    if material.ty == MaterialType::Emissive {
+        material.emission = dict_float(dict, "_emit", material.emission);
+        let flux = dict_float(dict, "_flux", 0.0);
+        material.emission_power = (1 + flux as i32).clamp(1, 5);
+    }
+    material
 }
 
 fn read_id(bytes: &[u8], p: &mut usize) -> Result<[u8; 4], String> {
@@ -1336,5 +1625,131 @@ mod tests {
         session.commit();
         session.undo();
         assert_eq!(session.voxel_count(), before);
+    }
+
+    fn at_origin(cells: &HashMap<Cell, u8>) -> HashMap<Cell, u8> {
+        if cells.is_empty() {
+            return HashMap::new();
+        }
+        let mut min = *cells.keys().next().unwrap();
+        for cell in cells.keys() {
+            min.0 = min.0.min(cell.0);
+            min.1 = min.1.min(cell.1);
+            min.2 = min.2.min(cell.2);
+        }
+        cells
+            .iter()
+            .map(|(cell, index)| ((cell.0 - min.0, cell.1 - min.1, cell.2 - min.2), *index))
+            .collect()
+    }
+
+    fn sample() -> (HashMap<Cell, u8>, [[u8; 4]; 256], [Material; 256]) {
+        let mut cells = HashMap::new();
+        cells.insert((5, -2, 3), 36);
+        cells.insert((7, -2, 4), 10);
+        cells.insert((5, 0, 3), 20);
+        let mut palette = default_palette();
+        palette[36] = [11, 22, 33, 255];
+        palette[10] = [200, 10, 10, 255];
+        palette[20] = [0, 180, 40, 255];
+        let mut materials = [Material::default(); 256];
+        materials[36] = Material {
+            ty: MaterialType::Metal,
+            roughness: 0.25,
+            metallic: 0.5,
+            ..Material::default()
+        };
+        materials[10] = Material {
+            ty: MaterialType::Glass,
+            roughness: 0.5,
+            transparency: 0.25,
+            ior: 2.0,
+            ..Material::default()
+        };
+        materials[20] = Material {
+            ty: MaterialType::Emissive,
+            emission: 0.5,
+            emission_power: 3,
+            ..Material::default()
+        };
+        (cells, palette, materials)
+    }
+
+    #[test]
+    fn save_round_trips_voxels_palette_and_materials() {
+        let (cells, palette, materials) = sample();
+        let bytes = save_vox(&cells, &palette, &materials).expect("save");
+        let again = save_vox(&cells, &palette, &materials).expect("save");
+        assert_eq!(bytes, again);
+        assert!(bytes.windows(4).any(|w| w == b"MATL"));
+
+        let loaded = load_vox(&bytes).expect("load");
+        assert_eq!(at_origin(&loaded.cells), at_origin(&cells));
+        assert_eq!(loaded.palette.unwrap()[36], [11, 22, 33, 255]);
+        assert_eq!(loaded.palette.unwrap()[10], [200, 10, 10, 255]);
+        assert_eq!(loaded.materials[36], materials[36]);
+        assert_eq!(loaded.materials[10], materials[10]);
+        assert_eq!(loaded.materials[20], materials[20]);
+        assert_eq!(loaded.materials[1], Material::default());
+
+        let defaults = save_vox(&cells, &default_palette(), &[Material::default(); 256]).unwrap();
+        assert!(!defaults.windows(4).any(|w| w == b"MATL"));
+
+        if let Ok(path) = std::env::var("MACVOXEL_SAMPLE_VOX") {
+            std::fs::write(path, &bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn save_refuses_empty_and_oversized_volumes() {
+        let palette = default_palette();
+        let materials = [Material::default(); 256];
+        let err = save_vox(&HashMap::new(), &palette, &materials).unwrap_err();
+        assert!(err.contains("empty"));
+
+        let mut wide = HashMap::new();
+        wide.insert((0, 0, 0), 1);
+        wide.insert((256, 0, 0), 1);
+        let err = save_vox(&wide, &palette, &materials).unwrap_err();
+        assert!(err.contains("256"));
+    }
+
+    #[test]
+    fn undo_survives_a_save() {
+        let mut session = Session::new();
+        let before = session.voxel_count();
+        session.checkpoint();
+        session.stamp(Hit {
+            cell: (0, 0, 0),
+            normal: (0, 0, 1),
+        });
+        session.commit();
+        let path = std::env::temp_dir().join("macvoxel-egui-undo.vox");
+        session.write_vox(&path);
+        assert!(session.status.starts_with("Saved "));
+        session.undo();
+        assert_eq!(session.voxel_count(), before);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// After `MacVoxel voxrt --output` resaves a sample, the geometry,
+    /// palette, and materials must still match. Skipped unless
+    /// `MACVOXEL_RESAVE_VOX` points at that file.
+    #[test]
+    fn macvoxel_resave_keeps_the_sample() {
+        let Ok(path) = std::env::var("MACVOXEL_RESAVE_VOX") else {
+            return;
+        };
+        let (cells, palette, materials) = sample();
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let loaded = load_vox(&bytes).expect("resave");
+        assert_eq!(at_origin(&loaded.cells), at_origin(&cells));
+        let loaded_palette = loaded.palette.expect("rgba");
+        assert_eq!(loaded_palette[36], palette[36]);
+        assert_eq!(loaded_palette[10], palette[10]);
+        assert_eq!(loaded_palette[20], palette[20]);
+        assert_eq!(loaded.materials[36], materials[36]);
+        assert_eq!(loaded.materials[10], materials[10]);
+        assert_eq!(loaded.materials[20], materials[20]);
     }
 }

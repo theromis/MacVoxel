@@ -5,9 +5,12 @@
 //! cargo run --manifest-path egui/Cargo.toml -- path/to/model.vox
 //! ```
 //!
-//! The window is independent of the SwiftUI/Metal editor. Brush strokes
+//! The window is independent of the SwiftUI/Metal editor. On macOS the
+//! File and Edit commands live on the application menu bar. Brush strokes
 //! edit an in-memory volume so the panels can be tried against a viewport.
 
+#[cfg(target_os = "macos")]
+mod native_menu;
 mod panels;
 mod state;
 mod viewport;
@@ -40,6 +43,8 @@ fn main() -> eframe::Result {
             Ok(Box::new(Shell {
                 session,
                 cache: ViewCache::new(),
+                #[cfg(target_os = "macos")]
+                native_menu: None,
             }))
         }),
     )
@@ -48,39 +53,28 @@ fn main() -> eframe::Result {
 struct Shell {
     session: Session,
     cache: ViewCache,
+    #[cfg(target_os = "macos")]
+    native_menu: Option<native_menu::NativeMenu>,
 }
 
 impl eframe::App for Shell {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "macos")]
+        {
+            if self.native_menu.is_none()
+                && std::env::var_os("MACVOXEL_NO_NATIVE_MENU").is_none()
+            {
+                self.native_menu = Some(native_menu::NativeMenu::install());
+            }
+            if let Some(menu) = &self.native_menu {
+                menu.poll(&mut self.session, ctx);
+            }
+        }
+
         let title = format!("MacVoxel — {}", self.session.document_label());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         self.session.take_drops(ctx);
         self.session.take_keys(ctx);
-
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("New").clicked() {
-                        self.session.new_document();
-                        ui.close_menu();
-                    }
-                    if ui.button("Open…").clicked() {
-                        self.session.open_dialog();
-                        ui.close_menu();
-                    }
-                });
-                ui.menu_button("Edit", |ui| {
-                    if ui.button("Undo").clicked() {
-                        self.session.undo();
-                        ui.close_menu();
-                    }
-                    if ui.button("Redo").clicked() {
-                        self.session.redo();
-                        ui.close_menu();
-                    }
-                });
-            });
-        });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
