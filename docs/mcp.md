@@ -5,7 +5,7 @@ on stdin/stdout. They do not share a document.
 
 | Server | Binary | Window | What an agent can do |
 |---|---|---|---|
-| egui editor | `macvoxel-egui` | optional | Edit voxels. Screenshot, inspect, and click the live window when connected. No path tracer, no mesh export. |
+| egui editor | `macvoxel-egui` | optional | Edit voxels, export glTF. Screenshot, inspect, and click the live window when connected. No path tracer. |
 | C++ editor | `MacVoxel mcp` | never | Edit voxels, path-trace a PNG, export glTF. An already open MacVoxel window does not see these edits. |
 
 ## egui editor
@@ -104,8 +104,9 @@ changes nothing.
 
 `save_file` writes every non-empty object. Each model is origin-aligned and
 at most 256 cells on an axis; the scene graph stores the translation that
-puts it back. A rotation read from the file is baked into the cells, so the
-saved `_r` byte is identity.
+puts it back. A rotation read from the file is baked into the cells for
+editing and written back as `_r`. Resizing that object keeps the rotation:
+the size fields are the model SIZE, and surviving voxels stay where they were.
 `open_file` loads every object. `nTRN` translation and rotation are applied.
 A file with no scene graph still loads its first model.
 
@@ -130,7 +131,8 @@ A file with no scene graph still loads its first model.
 | `screenshot_viewport` | — | PNG of the 3D viewport, including its mode chips. Connected mode only |
 | `screenshot_region` | `x`, `y`, `width`, `height` | PNG of a rectangle in window points. Connected mode only |
 | `ui_inspect` | — | Previous frame's controls, tool, mode, active object, voxel count, and status. Connected mode only |
-| `ui_click` | `x`, `y` | Click the topmost registered control. A viewport hit stamps the active tool. Connected mode only |
+| `ui_click` | `x`, `y` | Click the topmost registered control. A viewport hit stamps the active tool. A slider sets its value from the point. A palette cell selects that slot. Connected mode only |
+| `export_mesh` | `path` | Write a glTF 2.0 `.glb` of every object. `merge` defaults to false. `vertexColors` defaults to false |
 
 `set_voxels` accepts each cell as `{"x","y","z","palette"}` or as
 `[x, y, z, palette]`. A later duplicate of the same coordinate wins. Cells
@@ -161,24 +163,35 @@ is an error.
 
 `ui_inspect` describes the previous frame. `window` is the client area.
 `regions` lists the tool buttons, Add/Remove/Paint, the outliner New,
-Duplicate, and Delete buttons, the Model/Object and Edit/Render chips, and
-the viewport. Each region is `id`, `label`, `x`, `y`, `width`, `height` in
-window points from the top-left of the client area. The reply also includes
-`tool`, `toolMode`, `editorMode`, `renderMode`, `activeObject`, `voxels`, and
-`status`.
+Duplicate, and Delete buttons, the sliders, the palette cells, the
+Model/Object and Edit/Render chips, and the viewport. Each region is `id`,
+`label`, `x`, `y`, `width`, `height` in window points from the top-left of
+the client area. The reply also includes `tool`, `toolMode`, `editorMode`,
+`renderMode`, `activeObject`, `voxels`, and `status`.
 
 `ui_click` takes `x` and `y` in those same points and activates the topmost
 region that contains the point. A hit on the viewport is a press and release
-of the active tool. A point on no region is an error. Both tools need the
-connected window; headless they fail like the screenshots.
+of the active tool. A hit on a slider sets that slider from how far `x` is
+along the track. A hit on a palette cell selects that slot. A point on no
+region is an error. Both tools need the connected window; headless they fail
+like the screenshots.
+
+`export_mesh` writes every solid voxel of every object, exposed faces only.
+`merge` defaults to false, one quad per exposed face. `true` greedy-merges
+coplanar faces that share a palette slot. `vertexColors` defaults to false:
+one material, a 256-wide palette texture, and each face's UVs point at its
+palette slot. `true` stores a linear `COLOR_0` and no image. The palette
+texture keeps the sRGB bytes. `COLOR_0` is converted with the sRGB transfer
+curve. The file is Y-up, positions `(x, z, −y)`. File → Export Mesh… uses the
+palette texture and always merges. An empty scene is an error.
 
 ### What this server does not do
 
-It does not path-trace, save a render, or export a mesh. It does not drive
-every mouse tool by name. `ui_click` only hits the controls `ui_inspect`
-lists, plus a stamp in the viewport. Voxel changes also go through
-`set_voxel`, `set_voxels`, and `fill_box` on the active object. Screenshots
-need the connected window.
+It does not path-trace or save a render. It does not drive every mouse tool
+by name. `ui_click` hits the controls `ui_inspect` lists, including sliders
+and palette cells, plus a stamp in the viewport. Voxel changes also go
+through `set_voxel`, `set_voxels`, and `fill_box` on the active object.
+Screenshots need the connected window.
 
 ## C++ editor
 

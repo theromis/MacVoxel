@@ -136,6 +136,25 @@ pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Valu
             session.redo();
             Ok(json!({"canUndo": session.can_undo(), "canRedo": session.can_redo()}))
         }
+        "mesh.export" => {
+            let path = req_str(&params, "path")?;
+            let merge = opt_bool(&params, "merge")?.unwrap_or(false);
+            let vertex_colors = opt_bool(&params, "vertexColors")?.unwrap_or(false);
+            let quads = crate::export::export_with(
+                session,
+                Path::new(&path),
+                &crate::export::MeshExport {
+                    vertex_colors,
+                    merge,
+                },
+            )?;
+            Ok(json!({
+                "path": path,
+                "quads": quads,
+                "merge": merge,
+                "vertexColors": vertex_colors
+            }))
+        }
         "ui.screenshot" | "ui.inspect" | "ui.click" => Err(NO_WINDOW.into()),
         "control.methods" => Ok(Value::Array(
             METHODS
@@ -166,6 +185,11 @@ const METHODS: &[(&str, &str, &str)] = &[
     ("object.set_active", "index", "Edit a different object"),
     ("edit.undo", "", "Undo the last edit"),
     ("edit.redo", "", "Redo the last undone edit"),
+    (
+        "mesh.export",
+        "path, merge?, vertexColors?",
+        "Write a glTF 2.0 .glb of every object. merge defaults to false. vertexColors defaults to false (palette texture).",
+    ),
     (
         "ui.screenshot",
         "region?, x?, y?, width?, height?, path?",
@@ -340,6 +364,14 @@ pub fn req_str(value: &Value, key: &str) -> Result<String, String> {
     opt_str(value, key)?.ok_or_else(|| format!("missing string {key}"))
 }
 
+fn opt_bool(value: &Value, key: &str) -> Result<Option<bool>, String> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(flag)) => Ok(Some(*flag)),
+        Some(_) => Err(format!("{key} must be a boolean")),
+    }
+}
+
 pub fn opt_str(value: &Value, key: &str) -> Result<Option<String>, String> {
     match value.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -468,5 +500,46 @@ mod tests {
         let (png, w, h) = png_region(&pixels, 2, 2, Some((1, 0, 1, 2))).unwrap();
         assert_eq!((w, h), (1, 2));
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn export_mesh_writes_a_palette_texture() {
+        let mut session = Session::new();
+        session.replace_empty();
+        apply(
+            &mut session,
+            "voxel.set",
+            &json!({"x": 0, "y": 0, "z": 0, "palette": 4}),
+        )
+        .unwrap();
+        apply(
+            &mut session,
+            "voxel.set",
+            &json!({"x": 1, "y": 0, "z": 0, "palette": 4}),
+        )
+        .unwrap();
+        let path = std::env::temp_dir().join("macvoxel-egui-mcp-export.glb");
+        let got = apply(
+            &mut session,
+            "mesh.export",
+            &json!({"path": path.display().to_string()}),
+        )
+        .unwrap();
+        assert_eq!(got["quads"], 10);
+        assert_eq!(got["merge"], false);
+        assert_eq!(got["vertexColors"], false);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..4], b"glTF");
+        let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        let json = &bytes[20..20 + json_len];
+        assert!(json.windows(10).any(|window| window == b"TEXCOORD_0"));
+        let merged = apply(
+            &mut session,
+            "mesh.export",
+            &json!({"path": path.display().to_string(), "merge": true}),
+        )
+        .unwrap();
+        assert_eq!(merged["quads"], 6);
+        let _ = std::fs::remove_file(path);
     }
 }

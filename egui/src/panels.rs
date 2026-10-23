@@ -41,31 +41,207 @@ fn segment<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(&str, T)]) 
     });
 }
 
-fn slider_i32(ui: &mut Ui, label: &str, value: &mut i32, range: std::ops::RangeInclusive<i32>) {
+fn slider_i32(
+    ui: &mut Ui,
+    session: &mut Session,
+    label: &str,
+    target: SliderTarget,
+    range: std::ops::RangeInclusive<i32>,
+) {
+    let mut value = slider_value(session, target).round() as i32;
     ui.horizontal(|ui| {
         ui.add_sized(
             [96.0, 16.0],
             egui::Label::new(RichText::new(label).small().color(DIM)),
         );
-        ui.add(Slider::new(value, range).show_value(false));
+        let resp = ui.add(Slider::new(&mut value, range.clone()).show_value(false));
+        note_slider(
+            session,
+            label,
+            target,
+            resp.rect,
+            *range.start() as f32,
+            *range.end() as f32,
+        );
+        if resp.changed() {
+            session.write_slider(target, value as f32);
+        }
         ui.monospace(format!("{value}"));
     });
 }
 
 fn slider_f32(
     ui: &mut Ui,
+    session: &mut Session,
     label: &str,
-    value: &mut f32,
+    target: SliderTarget,
     range: std::ops::RangeInclusive<f32>,
     digits: usize,
 ) {
+    let mut value = slider_value(session, target);
     ui.horizontal(|ui| {
         ui.add_sized(
             [96.0, 16.0],
             egui::Label::new(RichText::new(label).small().color(DIM)),
         );
-        ui.add(Slider::new(value, range).show_value(false));
+        let resp = ui.add(Slider::new(&mut value, range.clone()).show_value(false));
+        note_slider(
+            session,
+            label,
+            target,
+            resp.rect,
+            *range.start(),
+            *range.end(),
+        );
+        if resp.changed() {
+            session.write_slider(target, value);
+        }
         ui.monospace(format!("{value:.digits$}"));
+    });
+}
+
+fn slider_value(session: &Session, target: SliderTarget) -> f32 {
+    match target {
+        SliderTarget::BrushSize => session.brush_size as f32,
+        SliderTarget::FoliageSeed => session.foliage_seed as f32,
+        SliderTarget::FoliageDensity => session.foliage_density,
+        SliderTarget::TorusTube => session.torus_tube,
+        SliderTarget::NoiseScale => session.noise_scale,
+        SliderTarget::NoiseThreshold => session.noise_threshold,
+        SliderTarget::NoiseOctaves => session.noise_octaves as f32,
+        SliderTarget::NoiseSeed => session.noise_seed as f32,
+        SliderTarget::PerlinLo => session.perlin_lo as f32,
+        SliderTarget::PerlinHi => session.perlin_hi as f32,
+        SliderTarget::TreeDepth => session.tree_depth as f32,
+        SliderTarget::TreeWildness => session.tree_wildness,
+        SliderTarget::TreeTrunk => session.tree_trunk,
+        SliderTarget::TreeLeaf => session.tree_leaf as f32,
+        SliderTarget::TreeSeed => session.tree_seed as f32,
+        SliderTarget::HelixTurns => session.helix_turns,
+        SliderTarget::HelixRadius => session.helix_radius,
+        SliderTarget::HelixTube => session.helix_tube,
+        SliderTarget::ConiferTiers => session.conifer_tiers as f32,
+        SliderTarget::ConiferRagged => session.conifer_ragged,
+        SliderTarget::ConiferClump => session.conifer_clump,
+        SliderTarget::ConiferTrunk => session.conifer_trunk,
+        SliderTarget::ConiferCrown => session.conifer_crown,
+        SliderTarget::ConiferNeedle => session.conifer_needle as f32,
+        SliderTarget::ConiferSeed => session.conifer_seed as f32,
+        SliderTarget::MaxSamples => session.max_samples as f32,
+        SliderTarget::Aperture => session.aperture,
+        SliderTarget::FocusDistance => session.focus_distance,
+        SliderTarget::MaterialRoughness
+        | SliderTarget::MaterialMetallic
+        | SliderTarget::MaterialTransparency
+        | SliderTarget::MaterialIor
+        | SliderTarget::MaterialEmission
+        | SliderTarget::MaterialPower => material_shown(session, target),
+        SliderTarget::MaxBounces => session.max_bounces as f32,
+        SliderTarget::NeeRis => session.nee_ris as f32,
+        SliderTarget::IndirectClamp => session.indirect_clamp,
+        SliderTarget::EmaFloor => session.ema_floor,
+        SliderTarget::SkyIntensity => session.sky_intensity,
+        SliderTarget::HorizonSoftness => session.horizon_softness,
+        SliderTarget::SunElevation => session.sun_elevation,
+        SliderTarget::SunAzimuth => session.sun_azimuth,
+        SliderTarget::SunDisc => session.sun_disc,
+        SliderTarget::SunIntensity => session.sun_intensity,
+    }
+}
+
+fn note_slider(
+    session: &mut Session,
+    label: &str,
+    target: SliderTarget,
+    rect: egui::Rect,
+    min: f32,
+    max: f32,
+) {
+    session.note_ui(
+        target.id(),
+        label,
+        rect,
+        UiAction::Slider(SliderSpec { target, min, max }),
+    );
+}
+
+fn material_shown(session: &Session, target: SliderTarget) -> f32 {
+    let mat = &session.materials[session.active_slot as usize];
+    match target {
+        SliderTarget::MaterialRoughness => mat.roughness,
+        SliderTarget::MaterialMetallic => mat.metallic,
+        SliderTarget::MaterialTransparency => mat.transparency,
+        SliderTarget::MaterialIor => mat.ior,
+        SliderTarget::MaterialEmission => mat.emission * 100.0,
+        SliderTarget::MaterialPower => mat.emission_power as f32,
+        _ => 0.0,
+    }
+}
+
+fn material_slider_f32(
+    ui: &mut Ui,
+    session: &mut Session,
+    label: &str,
+    target: SliderTarget,
+    range: std::ops::RangeInclusive<f32>,
+    digits: usize,
+) {
+    let mut shown = material_shown(session, target);
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [96.0, 16.0],
+            egui::Label::new(RichText::new(label).small().color(DIM)),
+        );
+        let resp = ui.add(Slider::new(&mut shown, range.clone()).show_value(false));
+        note_slider(
+            session,
+            label,
+            target,
+            resp.rect,
+            *range.start(),
+            *range.end(),
+        );
+        if resp.changed() {
+            session.begin_edit();
+            session.write_slider(target, shown);
+        }
+        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+            session.end_edit();
+        }
+        ui.monospace(format!("{shown:.digits$}"));
+    });
+}
+
+fn material_slider_i32(
+    ui: &mut Ui,
+    session: &mut Session,
+    label: &str,
+    target: SliderTarget,
+    range: std::ops::RangeInclusive<i32>,
+) {
+    let mut shown = material_shown(session, target).round() as i32;
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [96.0, 16.0],
+            egui::Label::new(RichText::new(label).small().color(DIM)),
+        );
+        let resp = ui.add(Slider::new(&mut shown, range.clone()).show_value(false));
+        note_slider(
+            session,
+            label,
+            target,
+            resp.rect,
+            *range.start() as f32,
+            *range.end() as f32,
+        );
+        if resp.changed() {
+            session.begin_edit();
+            session.write_slider(target, shown as f32);
+        }
+        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+            session.end_edit();
+        }
+        ui.monospace(format!("{shown}"));
     });
 }
 
@@ -132,7 +308,7 @@ fn tools(ui: &mut Ui, session: &mut Session) {
 
     if session.tool != Tool::Face && session.tool != Tool::Generator {
         section(ui, "Brush");
-        slider_i32(ui, "Size", &mut session.brush_size, 1..=63);
+        slider_i32(ui, session, "Size", SliderTarget::BrushSize, 1..=63);
         session.brush_size = session.brush_size.clamp(1, 63);
         segment(
             ui,
@@ -256,12 +432,19 @@ fn tools(ui: &mut Ui, session: &mut Session) {
                     });
             });
             ui.label(RichText::new("Seed color").small().color(DIM));
-            slider_i32(ui, "Slot", &mut session.foliage_seed, 1..=255);
+            slider_i32(ui, session, "Slot", SliderTarget::FoliageSeed, 1..=255);
             session.foliage_seed = session.foliage_seed.clamp(1, 255);
             if ui.button("Use active palette slot").clicked() {
                 session.foliage_seed = session.active_slot as i32;
             }
-            slider_f32(ui, "Density", &mut session.foliage_density, 0.0..=1.0, 2);
+            slider_f32(
+                ui,
+                session,
+                "Density",
+                SliderTarget::FoliageDensity,
+                0.0..=1.0,
+                2,
+            );
         }
         _ => {}
     }
@@ -298,29 +481,71 @@ fn generator(ui: &mut Ui, session: &mut Session) {
         }
         GeneratorKind::Torus => {
             axis_row(ui, &mut session.gen_axis);
-            slider_f32(ui, "Tube", &mut session.torus_tube, 0.05..=1.0, 2);
+            slider_f32(ui, session, "Tube", SliderTarget::TorusTube, 0.05..=1.0, 2);
         }
         GeneratorKind::Perlin => {
-            slider_f32(ui, "Scale", &mut session.noise_scale, 1.0..=64.0, 1);
-            slider_f32(ui, "Threshold", &mut session.noise_threshold, 0.0..=1.0, 2);
-            slider_i32(ui, "Octaves", &mut session.noise_octaves, 1..=6);
-            slider_i32(ui, "Seed", &mut session.noise_seed, 0..=9999);
-            slider_i32(ui, "Palette lo", &mut session.perlin_lo, 1..=255);
-            slider_i32(ui, "Palette hi", &mut session.perlin_hi, 1..=255);
+            slider_f32(
+                ui,
+                session,
+                "Scale",
+                SliderTarget::NoiseScale,
+                1.0..=64.0,
+                1,
+            );
+            slider_f32(
+                ui,
+                session,
+                "Threshold",
+                SliderTarget::NoiseThreshold,
+                0.0..=1.0,
+                2,
+            );
+            slider_i32(ui, session, "Octaves", SliderTarget::NoiseOctaves, 1..=6);
+            slider_i32(ui, session, "Seed", SliderTarget::NoiseSeed, 0..=9999);
+            slider_i32(ui, session, "Palette lo", SliderTarget::PerlinLo, 1..=255);
+            slider_i32(ui, session, "Palette hi", SliderTarget::PerlinHi, 1..=255);
         }
         GeneratorKind::Tree => {
             axis_row(ui, &mut session.gen_axis);
-            slider_i32(ui, "Depth", &mut session.tree_depth, 1..=5);
-            slider_f32(ui, "Wildness", &mut session.tree_wildness, 0.0..=1.0, 2);
-            slider_f32(ui, "Trunk", &mut session.tree_trunk, 0.20..=1.50, 2);
-            slider_i32(ui, "Leaf color", &mut session.tree_leaf, 1..=255);
-            slider_i32(ui, "Seed", &mut session.tree_seed, 0..=9999);
+            slider_i32(ui, session, "Depth", SliderTarget::TreeDepth, 1..=5);
+            slider_f32(
+                ui,
+                session,
+                "Wildness",
+                SliderTarget::TreeWildness,
+                0.0..=1.0,
+                2,
+            );
+            slider_f32(
+                ui,
+                session,
+                "Trunk",
+                SliderTarget::TreeTrunk,
+                0.20..=1.50,
+                2,
+            );
+            slider_i32(ui, session, "Leaf color", SliderTarget::TreeLeaf, 1..=255);
+            slider_i32(ui, session, "Seed", SliderTarget::TreeSeed, 0..=9999);
         }
         GeneratorKind::Helix => {
             axis_row(ui, &mut session.gen_axis);
-            slider_f32(ui, "Turns", &mut session.helix_turns, 0.25..=12.0, 2);
-            slider_f32(ui, "Radius", &mut session.helix_radius, 0.0..=1.0, 2);
-            slider_f32(ui, "Tube", &mut session.helix_tube, 0.02..=0.90, 2);
+            slider_f32(
+                ui,
+                session,
+                "Turns",
+                SliderTarget::HelixTurns,
+                0.25..=12.0,
+                2,
+            );
+            slider_f32(
+                ui,
+                session,
+                "Radius",
+                SliderTarget::HelixRadius,
+                0.0..=1.0,
+                2,
+            );
+            slider_f32(ui, session, "Tube", SliderTarget::HelixTube, 0.02..=0.90, 2);
             ui.label(RichText::new("Winding").small().color(DIM));
             let mut cw = session.helix_cw;
             ui.horizontal(|ui| {
@@ -335,13 +560,41 @@ fn generator(ui: &mut Ui, session: &mut Session) {
         }
         GeneratorKind::Conifer => {
             axis_row(ui, &mut session.gen_axis);
-            slider_i32(ui, "Tiers", &mut session.conifer_tiers, 2..=5);
-            slider_f32(ui, "Raggedness", &mut session.conifer_ragged, 0.0..=1.0, 2);
-            slider_f32(ui, "Clump", &mut session.conifer_clump, 2.0..=24.0, 1);
-            slider_f32(ui, "Trunk", &mut session.conifer_trunk, 0.20..=1.50, 2);
-            slider_f32(ui, "Crown", &mut session.conifer_crown, 0.0..=1.0, 2);
-            slider_i32(ui, "Needle", &mut session.conifer_needle, 1..=255);
-            slider_i32(ui, "Seed", &mut session.conifer_seed, 0..=9999);
+            slider_i32(ui, session, "Tiers", SliderTarget::ConiferTiers, 2..=5);
+            slider_f32(
+                ui,
+                session,
+                "Raggedness",
+                SliderTarget::ConiferRagged,
+                0.0..=1.0,
+                2,
+            );
+            slider_f32(
+                ui,
+                session,
+                "Clump",
+                SliderTarget::ConiferClump,
+                2.0..=24.0,
+                1,
+            );
+            slider_f32(
+                ui,
+                session,
+                "Trunk",
+                SliderTarget::ConiferTrunk,
+                0.20..=1.50,
+                2,
+            );
+            slider_f32(
+                ui,
+                session,
+                "Crown",
+                SliderTarget::ConiferCrown,
+                0.0..=1.0,
+                2,
+            );
+            slider_i32(ui, session, "Needle", SliderTarget::ConiferNeedle, 1..=255);
+            slider_i32(ui, session, "Seed", SliderTarget::ConiferSeed, 0..=9999);
         }
     }
 }
@@ -380,6 +633,12 @@ fn palette(ui: &mut Ui, session: &mut Session) {
                 r,
                 1.0,
                 Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]),
+            );
+            session.note_ui(
+                &format!("palette.{slot}"),
+                &format!("{slot}"),
+                r,
+                UiAction::Palette(slot),
             );
             let selected = session.palette_slots.contains(&slot);
             let active = slot == session.active_slot;
@@ -500,8 +759,13 @@ fn palette(ui: &mut Ui, session: &mut Session) {
         ui.label(RichText::new("Active").small().color(DIM));
         ui.monospace(format!("{}", session.active_slot));
         let mut rgb = session.color(session.active_slot);
-        if ui.color_edit_button_srgb(&mut rgb).changed() {
+        let resp = ui.color_edit_button_srgb(&mut rgb);
+        if resp.changed() {
+            session.begin_edit();
             session.set_color(session.active_slot, rgb);
+        }
+        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+            session.end_edit();
         }
     });
 }
@@ -683,13 +947,27 @@ fn render(ui: &mut Ui, session: &mut Session) {
             ui.add(egui::DragValue::new(&mut session.render_height).range(16..=16384));
         });
     });
-    slider_i32(ui, "Samples", &mut session.max_samples, 16..=8192);
+    slider_i32(ui, session, "Samples", SliderTarget::MaxSamples, 16..=8192);
     section(ui, "Camera");
     ui.checkbox(&mut session.aces, "ACES tonemap");
     ui.checkbox(&mut session.denoise, "Denoise (OIDN)");
-    slider_f32(ui, "Aperture", &mut session.aperture, 0.0..=3.0, 2);
+    slider_f32(
+        ui,
+        session,
+        "Aperture",
+        SliderTarget::Aperture,
+        0.0..=3.0,
+        2,
+    );
     ui.add_enabled_ui(session.aperture > 0.0, |ui| {
-        slider_f32(ui, "Focus", &mut session.focus_distance, 1.0..=500.0, 0);
+        slider_f32(
+            ui,
+            session,
+            "Focus",
+            SliderTarget::FocusDistance,
+            1.0..=500.0,
+            0,
+        );
     });
     if ui.button("Save render…").clicked() {
         session.status =
@@ -704,93 +982,152 @@ fn render(ui: &mut Ui, session: &mut Session) {
             .small()
             .color(DIM),
     );
-    let mat = session.material_mut();
+    let mut ty = session.materials[session.active_slot as usize].ty;
+    let before = ty;
     egui::ComboBox::from_id_salt("material")
-        .selected_text(mat.ty.name())
+        .selected_text(ty.name())
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut mat.ty, MaterialType::Diffuse, "Diffuse");
-            ui.selectable_value(&mut mat.ty, MaterialType::Metal, "Metal");
-            ui.selectable_value(&mut mat.ty, MaterialType::Emissive, "Emissive");
-            ui.selectable_value(&mut mat.ty, MaterialType::Glass, "Glass");
+            ui.selectable_value(&mut ty, MaterialType::Diffuse, "Diffuse");
+            ui.selectable_value(&mut ty, MaterialType::Metal, "Metal");
+            ui.selectable_value(&mut ty, MaterialType::Emissive, "Emissive");
+            ui.selectable_value(&mut ty, MaterialType::Glass, "Glass");
         });
-    let ty = session.materials[session.active_slot as usize].ty;
+    if ty != before {
+        session.begin_edit();
+        session.material_mut().ty = ty;
+        session.end_edit();
+    }
     match ty {
         MaterialType::Diffuse => {}
         MaterialType::Metal => {
-            slider_f32(
+            material_slider_f32(
                 ui,
+                session,
                 "Roughness",
-                &mut session.material_mut().roughness,
+                SliderTarget::MaterialRoughness,
                 0.0..=1.0,
                 2,
             );
-            slider_f32(
+            material_slider_f32(
                 ui,
+                session,
                 "Metallic",
-                &mut session.material_mut().metallic,
+                SliderTarget::MaterialMetallic,
                 0.0..=1.0,
                 2,
             );
         }
         MaterialType::Glass => {
-            slider_f32(
+            material_slider_f32(
                 ui,
+                session,
                 "Roughness",
-                &mut session.material_mut().roughness,
+                SliderTarget::MaterialRoughness,
                 0.0..=1.0,
                 2,
             );
-            slider_f32(
+            material_slider_f32(
                 ui,
+                session,
                 "Transparency",
-                &mut session.material_mut().transparency,
+                SliderTarget::MaterialTransparency,
                 0.0..=1.0,
                 2,
             );
-            slider_f32(ui, "IoR", &mut session.material_mut().ior, 1.0..=3.0, 2);
+            material_slider_f32(ui, session, "IoR", SliderTarget::MaterialIor, 1.0..=3.0, 2);
         }
         MaterialType::Emissive => {
-            let mut shown = session.materials[session.active_slot as usize].emission * 100.0;
-            slider_f32(ui, "Emission", &mut shown, 0.0..=100.0, 0);
-            session.material_mut().emission = shown / 100.0;
-            slider_i32(
+            material_slider_f32(
                 ui,
-                "Power",
-                &mut session.material_mut().emission_power,
-                1..=5,
+                session,
+                "Emission",
+                SliderTarget::MaterialEmission,
+                0.0..=100.0,
+                0,
             );
+            material_slider_i32(ui, session, "Power", SliderTarget::MaterialPower, 1..=5);
         }
     }
 }
 
 fn light(ui: &mut Ui, session: &mut Session) {
     section(ui, "Path tracer");
-    slider_i32(ui, "Bounces", &mut session.max_bounces, 1..=8);
+    slider_i32(ui, session, "Bounces", SliderTarget::MaxBounces, 1..=8);
     ui.add_enabled_ui(session.stochastic_gi, |ui| {
         ui.checkbox(&mut session.power_weighted_nee, "Power-weighted NEE");
-        slider_i32(ui, "RIS samples", &mut session.nee_ris, 1..=32);
+        slider_i32(ui, session, "RIS samples", SliderTarget::NeeRis, 1..=32);
     });
     slider_f32(
         ui,
+        session,
         "Indirect clamp",
-        &mut session.indirect_clamp,
+        SliderTarget::IndirectClamp,
         0.0..=32.0,
         1,
     );
-    slider_f32(ui, "Temporal smooth", &mut session.ema_floor, 0.0..=1.0, 3);
+    slider_f32(
+        ui,
+        session,
+        "Temporal smooth",
+        SliderTarget::EmaFloor,
+        0.0..=1.0,
+        3,
+    );
 
     section(ui, "Sky");
     ui.checkbox(&mut session.atmospheric_sky, "Atmospheric sky");
     ui.add_enabled_ui(!session.atmospheric_sky, |ui| {
-        slider_f32(ui, "Intensity", &mut session.sky_intensity, 0.0..=4.0, 2);
+        slider_f32(
+            ui,
+            session,
+            "Intensity",
+            SliderTarget::SkyIntensity,
+            0.0..=4.0,
+            2,
+        );
     });
-    slider_f32(ui, "Horizon", &mut session.horizon_softness, 0.0..=15.0, 1);
+    slider_f32(
+        ui,
+        session,
+        "Horizon",
+        SliderTarget::HorizonSoftness,
+        0.0..=15.0,
+        1,
+    );
 
     section(ui, "Sun");
-    slider_f32(ui, "Elevation", &mut session.sun_elevation, -90.0..=90.0, 0);
-    slider_f32(ui, "Azimuth", &mut session.sun_azimuth, 0.0..=360.0, 0);
-    slider_f32(ui, "Disc size", &mut session.sun_disc, 0.1..=30.0, 1);
-    slider_f32(ui, "Intensity", &mut session.sun_intensity, 0.0..=10.0, 2);
+    slider_f32(
+        ui,
+        session,
+        "Elevation",
+        SliderTarget::SunElevation,
+        -90.0..=90.0,
+        0,
+    );
+    slider_f32(
+        ui,
+        session,
+        "Azimuth",
+        SliderTarget::SunAzimuth,
+        0.0..=360.0,
+        0,
+    );
+    slider_f32(
+        ui,
+        session,
+        "Disc size",
+        SliderTarget::SunDisc,
+        0.1..=30.0,
+        1,
+    );
+    slider_f32(
+        ui,
+        session,
+        "Intensity",
+        SliderTarget::SunIntensity,
+        0.0..=10.0,
+        2,
+    );
     ui.horizontal(|ui| {
         ui.add_sized(
             [96.0, 16.0],

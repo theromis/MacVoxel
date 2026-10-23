@@ -255,6 +255,127 @@ pub enum UiAction {
     Duplicate,
     DeleteObject,
     Viewport,
+    Palette(u8),
+    Slider(SliderSpec),
+}
+
+/// A slider `ui_click` can set. `min` and `max` match the widget range.
+#[derive(Clone, Copy, PartialEq)]
+pub struct SliderSpec {
+    pub target: SliderTarget,
+    pub min: f32,
+    pub max: f32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum SliderTarget {
+    BrushSize,
+    FoliageSeed,
+    FoliageDensity,
+    TorusTube,
+    NoiseScale,
+    NoiseThreshold,
+    NoiseOctaves,
+    NoiseSeed,
+    PerlinLo,
+    PerlinHi,
+    TreeDepth,
+    TreeWildness,
+    TreeTrunk,
+    TreeLeaf,
+    TreeSeed,
+    HelixTurns,
+    HelixRadius,
+    HelixTube,
+    ConiferTiers,
+    ConiferRagged,
+    ConiferClump,
+    ConiferTrunk,
+    ConiferCrown,
+    ConiferNeedle,
+    ConiferSeed,
+    MaxSamples,
+    Aperture,
+    FocusDistance,
+    MaterialRoughness,
+    MaterialMetallic,
+    MaterialTransparency,
+    MaterialIor,
+    MaterialEmission,
+    MaterialPower,
+    MaxBounces,
+    NeeRis,
+    IndirectClamp,
+    EmaFloor,
+    SkyIntensity,
+    HorizonSoftness,
+    SunElevation,
+    SunAzimuth,
+    SunDisc,
+    SunIntensity,
+}
+
+impl SliderTarget {
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            SliderTarget::BrushSize => "slider.brush-size",
+            SliderTarget::FoliageSeed => "slider.foliage-seed",
+            SliderTarget::FoliageDensity => "slider.foliage-density",
+            SliderTarget::TorusTube => "slider.torus-tube",
+            SliderTarget::NoiseScale => "slider.noise-scale",
+            SliderTarget::NoiseThreshold => "slider.noise-threshold",
+            SliderTarget::NoiseOctaves => "slider.noise-octaves",
+            SliderTarget::NoiseSeed => "slider.noise-seed",
+            SliderTarget::PerlinLo => "slider.perlin-lo",
+            SliderTarget::PerlinHi => "slider.perlin-hi",
+            SliderTarget::TreeDepth => "slider.tree-depth",
+            SliderTarget::TreeWildness => "slider.tree-wildness",
+            SliderTarget::TreeTrunk => "slider.tree-trunk",
+            SliderTarget::TreeLeaf => "slider.tree-leaf",
+            SliderTarget::TreeSeed => "slider.tree-seed",
+            SliderTarget::HelixTurns => "slider.helix-turns",
+            SliderTarget::HelixRadius => "slider.helix-radius",
+            SliderTarget::HelixTube => "slider.helix-tube",
+            SliderTarget::ConiferTiers => "slider.conifer-tiers",
+            SliderTarget::ConiferRagged => "slider.conifer-ragged",
+            SliderTarget::ConiferClump => "slider.conifer-clump",
+            SliderTarget::ConiferTrunk => "slider.conifer-trunk",
+            SliderTarget::ConiferCrown => "slider.conifer-crown",
+            SliderTarget::ConiferNeedle => "slider.conifer-needle",
+            SliderTarget::ConiferSeed => "slider.conifer-seed",
+            SliderTarget::MaxSamples => "slider.samples",
+            SliderTarget::Aperture => "slider.aperture",
+            SliderTarget::FocusDistance => "slider.focus",
+            SliderTarget::MaterialRoughness => "slider.roughness",
+            SliderTarget::MaterialMetallic => "slider.metallic",
+            SliderTarget::MaterialTransparency => "slider.transparency",
+            SliderTarget::MaterialIor => "slider.ior",
+            SliderTarget::MaterialEmission => "slider.emission",
+            SliderTarget::MaterialPower => "slider.power",
+            SliderTarget::MaxBounces => "slider.bounces",
+            SliderTarget::NeeRis => "slider.ris",
+            SliderTarget::IndirectClamp => "slider.indirect-clamp",
+            SliderTarget::EmaFloor => "slider.temporal-smooth",
+            SliderTarget::SkyIntensity => "slider.sky-intensity",
+            SliderTarget::HorizonSoftness => "slider.horizon",
+            SliderTarget::SunElevation => "slider.sun-elevation",
+            SliderTarget::SunAzimuth => "slider.sun-azimuth",
+            SliderTarget::SunDisc => "slider.sun-disc",
+            SliderTarget::SunIntensity => "slider.sun-intensity",
+        }
+    }
+
+    fn is_material(self) -> bool {
+        matches!(
+            self,
+            SliderTarget::MaterialRoughness
+                | SliderTarget::MaterialMetallic
+                | SliderTarget::MaterialTransparency
+                | SliderTarget::MaterialIor
+                | SliderTarget::MaterialEmission
+                | SliderTarget::MaterialPower
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -571,7 +692,11 @@ impl Session {
     }
 
     pub fn size_xyz(&self) -> Option<(i32, i32, i32)> {
-        let (_, dims) = resolved_box(self.active())?;
+        let object = self.active();
+        if stored_rotation(object) {
+            return Some(object.model_dims);
+        }
+        let (_, dims) = resolved_box(object)?;
         Some((dims[0], dims[1], dims[2]))
     }
 
@@ -591,8 +716,23 @@ impl Session {
         if slot == 0 {
             return;
         }
-        self.palette[slot as usize] = [rgb[0], rgb[1], rgb[2], 255];
+        let next = [rgb[0], rgb[1], rgb[2], 255];
+        if self.palette[slot as usize] == next {
+            return;
+        }
+        self.palette[slot as usize] = next;
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+    }
+
+    /// Remember the document before a color or material drag. A second call
+    /// in the same gesture does nothing.
+    pub fn begin_edit(&mut self) {
+        self.checkpoint();
+    }
+
+    /// Push the color or material gesture if it changed anything.
+    pub fn end_edit(&mut self) {
+        self.commit();
     }
 
     pub fn palette_drag(&self) -> Option<((i32, i32), (i32, i32))> {
@@ -1201,7 +1341,7 @@ impl Session {
             .cloned()
     }
 
-    pub fn activate_ui(&mut self, region: &UiRegion) -> Result<(), String> {
+    pub fn activate_ui(&mut self, region: &UiRegion, at: Option<(f32, f32)>) -> Result<(), String> {
         match region.action {
             UiAction::None | UiAction::Viewport => {}
             UiAction::Tool(tool) => self.tool = tool,
@@ -1216,8 +1356,86 @@ impl Session {
                 }
                 self.delete_object();
             }
+            UiAction::Palette(slot) => self.select_palette_slot(slot, false),
+            UiAction::Slider(spec) => {
+                let (x, _) = at.ok_or("slider click needs a point")?;
+                let t = if region.w <= f32::EPSILON {
+                    0.0
+                } else {
+                    (x - region.x) / region.w
+                };
+                self.apply_slider(spec, t);
+            }
         }
         Ok(())
+    }
+
+    fn apply_slider(&mut self, spec: SliderSpec, t: f32) {
+        let t = t.clamp(0.0, 1.0);
+        let value = spec.min + (spec.max - spec.min) * t;
+        if spec.target.is_material() {
+            self.checkpoint();
+        }
+        self.write_slider(spec.target, value);
+        if spec.target.is_material() {
+            self.commit();
+        }
+    }
+
+    pub(crate) fn write_slider(&mut self, target: SliderTarget, value: f32) {
+        let whole = value.round() as i32;
+        match target {
+            SliderTarget::BrushSize => self.brush_size = whole.clamp(1, 63),
+            SliderTarget::FoliageSeed => self.foliage_seed = whole.clamp(1, 255),
+            SliderTarget::FoliageDensity => self.foliage_density = value.clamp(0.0, 1.0),
+            SliderTarget::TorusTube => self.torus_tube = value.clamp(0.05, 1.0),
+            SliderTarget::NoiseScale => self.noise_scale = value.clamp(1.0, 64.0),
+            SliderTarget::NoiseThreshold => self.noise_threshold = value.clamp(0.0, 1.0),
+            SliderTarget::NoiseOctaves => self.noise_octaves = whole.clamp(1, 6),
+            SliderTarget::NoiseSeed => self.noise_seed = whole.clamp(0, 9999),
+            SliderTarget::PerlinLo => self.perlin_lo = whole.clamp(1, 255),
+            SliderTarget::PerlinHi => self.perlin_hi = whole.clamp(1, 255),
+            SliderTarget::TreeDepth => self.tree_depth = whole.clamp(1, 5),
+            SliderTarget::TreeWildness => self.tree_wildness = value.clamp(0.0, 1.0),
+            SliderTarget::TreeTrunk => self.tree_trunk = value.clamp(0.20, 1.50),
+            SliderTarget::TreeLeaf => self.tree_leaf = whole.clamp(1, 255),
+            SliderTarget::TreeSeed => self.tree_seed = whole.clamp(0, 9999),
+            SliderTarget::HelixTurns => self.helix_turns = value.clamp(0.25, 12.0),
+            SliderTarget::HelixRadius => self.helix_radius = value.clamp(0.0, 1.0),
+            SliderTarget::HelixTube => self.helix_tube = value.clamp(0.02, 0.90),
+            SliderTarget::ConiferTiers => self.conifer_tiers = whole.clamp(2, 5),
+            SliderTarget::ConiferRagged => self.conifer_ragged = value.clamp(0.0, 1.0),
+            SliderTarget::ConiferClump => self.conifer_clump = value.clamp(2.0, 24.0),
+            SliderTarget::ConiferTrunk => self.conifer_trunk = value.clamp(0.20, 1.50),
+            SliderTarget::ConiferCrown => self.conifer_crown = value.clamp(0.0, 1.0),
+            SliderTarget::ConiferNeedle => self.conifer_needle = whole.clamp(1, 255),
+            SliderTarget::ConiferSeed => self.conifer_seed = whole.clamp(0, 9999),
+            SliderTarget::MaxSamples => self.max_samples = whole.clamp(16, 8192),
+            SliderTarget::Aperture => self.aperture = value.clamp(0.0, 3.0),
+            SliderTarget::FocusDistance => self.focus_distance = value.clamp(1.0, 500.0),
+            SliderTarget::MaterialRoughness => {
+                self.material_mut().roughness = value.clamp(0.0, 1.0)
+            }
+            SliderTarget::MaterialMetallic => self.material_mut().metallic = value.clamp(0.0, 1.0),
+            SliderTarget::MaterialTransparency => {
+                self.material_mut().transparency = value.clamp(0.0, 1.0);
+            }
+            SliderTarget::MaterialIor => self.material_mut().ior = value.clamp(1.0, 3.0),
+            SliderTarget::MaterialEmission => {
+                self.material_mut().emission = (value / 100.0).clamp(0.0, 1.0);
+            }
+            SliderTarget::MaterialPower => self.material_mut().emission_power = whole.clamp(1, 5),
+            SliderTarget::MaxBounces => self.max_bounces = whole.clamp(1, 8),
+            SliderTarget::NeeRis => self.nee_ris = whole.clamp(1, 32),
+            SliderTarget::IndirectClamp => self.indirect_clamp = value.clamp(0.0, 32.0),
+            SliderTarget::EmaFloor => self.ema_floor = value.clamp(0.0, 1.0),
+            SliderTarget::SkyIntensity => self.sky_intensity = value.clamp(0.0, 4.0),
+            SliderTarget::HorizonSoftness => self.horizon_softness = value.clamp(0.0, 15.0),
+            SliderTarget::SunElevation => self.sun_elevation = value.clamp(-90.0, 90.0),
+            SliderTarget::SunAzimuth => self.sun_azimuth = value.clamp(0.0, 360.0),
+            SliderTarget::SunDisc => self.sun_disc = value.clamp(0.1, 30.0),
+            SliderTarget::SunIntensity => self.sun_intensity = value.clamp(0.0, 10.0),
+        }
     }
 
     /// Press and release at one world ray, so a connected click can stamp
@@ -1444,6 +1662,7 @@ impl Session {
         Snapshot {
             objects: self.objects.clone(),
             palette: self.palette,
+            materials: self.materials,
         }
     }
 
@@ -1451,6 +1670,7 @@ impl Session {
         Snapshot {
             objects: std::mem::replace(&mut self.objects, snap.objects),
             palette: std::mem::replace(&mut self.palette, snap.palette),
+            materials: std::mem::replace(&mut self.materials, snap.materials),
         }
     }
 
@@ -1462,7 +1682,10 @@ impl Session {
 
     fn commit(&mut self) {
         if let Some(prev) = self.pending.take() {
-            if prev.objects != self.objects || prev.palette != self.palette {
+            if prev.objects != self.objects
+                || prev.palette != self.palette
+                || prev.materials != self.materials
+            {
                 self.undo.push(prev);
                 self.redo.clear();
                 if self.undo.len() > 40 {
@@ -2629,12 +2852,18 @@ impl Session {
 
     /// Set one axis of the active object's SIZE box. The minimum corner stays
     /// put. Shrinking clips voxels past the new face; growing keeps an empty
-    /// margin that save writes back into the file.
+    /// margin that save writes back into the file. A loaded rotation stays:
+    /// the axis is the model SIZE, and the pivot shifts so surviving voxels
+    /// do not move.
     pub fn resize_active(&mut self, axis: usize, new_size: i32) {
         if axis > 2 {
             return;
         }
         let new_size = new_size.clamp(1, 256);
+        if stored_rotation(self.active()) {
+            self.resize_rotated(axis, new_size);
+            return;
+        }
         let Some((min, mut dims)) = resolved_box(self.active()) else {
             return;
         };
@@ -2656,11 +2885,75 @@ impl Session {
         let volume = self.active_mut();
         volume.box_min = min;
         volume.dims = (dims[0], dims[1], dims[2]);
-        // The margin lives in baked cell space, so the file rotation no longer
-        // describes these voxels.
-        volume.rot = ROT_IDENTITY;
-        volume.model_dims = (0, 0, 0);
-        volume.pivot = (0, 0, 0);
+        self.commit();
+    }
+
+    fn resize_rotated(&mut self, axis: usize, new_size: i32) {
+        let volume = self.active();
+        let mut dims = [
+            volume.model_dims.0,
+            volume.model_dims.1,
+            volume.model_dims.2,
+        ];
+        if new_size == dims[axis] {
+            return;
+        }
+        let old_half = [dims[0] / 2, dims[1] / 2, dims[2] / 2];
+        let rot = volume.rot;
+        let pivot = volume.pivot;
+        let translation = volume.translation;
+        self.checkpoint();
+        if new_size < dims[axis] {
+            let inverse = rot_transpose(rot);
+            let cells = std::mem::take(&mut self.active_mut().cells);
+            self.active_mut().cells = cells
+                .into_iter()
+                .filter(|(cell, slot)| {
+                    if *slot == 0 {
+                        return false;
+                    }
+                    let delta = [
+                        cell.0 + translation.0 - pivot.0,
+                        cell.1 + translation.1 - pivot.1,
+                        cell.2 + translation.2 - pivot.2,
+                    ];
+                    let local = rot_apply(inverse, delta)[axis] + old_half[axis];
+                    local >= 0 && local < new_size
+                })
+                .collect();
+            self.clear_picked();
+            self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        }
+        dims[axis] = new_size;
+        let new_half = [dims[0] / 2, dims[1] / 2, dims[2] / 2];
+        let shift = rot_apply(
+            self.active().rot,
+            [
+                new_half[0] - old_half[0],
+                new_half[1] - old_half[1],
+                new_half[2] - old_half[2],
+            ],
+        );
+        let volume = self.active_mut();
+        volume.model_dims = (dims[0], dims[1], dims[2]);
+        volume.pivot = (
+            volume.pivot.0 + shift[0],
+            volume.pivot.1 + shift[1],
+            volume.pivot.2 + shift[2],
+        );
+        let (world_min, aabb) = size_box_world(
+            dims,
+            new_half,
+            [volume.pivot.0, volume.pivot.1, volume.pivot.2],
+            volume.rot,
+        );
+        let translation = volume.translation;
+        volume.box_min = (
+            world_min.0 - translation.0,
+            world_min.1 - translation.1,
+            world_min.2 - translation.2,
+        );
+        volume.dims = aabb;
         self.commit();
     }
 
@@ -2995,6 +3288,7 @@ enum Cmd {
 struct Snapshot {
     objects: Vec<Volume>,
     palette: [[u8; 4]; 256],
+    materials: [Material; 256],
 }
 
 #[derive(Clone)]
@@ -3699,8 +3993,7 @@ fn save_vox(
 /// Every non-empty object, each as its own model. Local cells are shifted
 /// so the SIZE box origin is zero. That box keeps an empty margin when the
 /// editor grew the object. The leaf translation puts the model back where
-/// the editor had it. Rotations are not stored: a loaded rotation is baked
-/// into the cells.
+/// the editor had it. A loaded rotation is written back as `_r`.
 fn save_scene(
     objects: &[Volume],
     palette: &[[u8; 4]; 256],
@@ -3857,6 +4150,10 @@ fn trn_body(id: i32, child: i32, t: [i32; 3], rot: [[i32; 3]; 3], name: &str) ->
     }
     push_dict(&mut body, &frame);
     body
+}
+
+fn stored_rotation(object: &Volume) -> bool {
+    !rot_is_identity(object.rot) && object.model_dims != (0, 0, 0)
 }
 
 /// File-space voxels for a rotated model. `None` when the orientation is
@@ -5107,6 +5404,92 @@ mod tests {
     }
 
     #[test]
+    fn resize_keeps_a_loaded_rotation() {
+        let mut size = Vec::new();
+        for dim in [2u32, 2, 2] {
+            size.extend_from_slice(&dim.to_le_bytes());
+        }
+        let mut xyzi = Vec::new();
+        xyzi.extend_from_slice(&2u32.to_le_bytes());
+        xyzi.extend_from_slice(&[0, 0, 0, 3]);
+        xyzi.extend_from_slice(&[0, 0, 1, 7]);
+        let mut rot = Vec::new();
+        push_i32(&mut rot, 0);
+        push_dict(&mut rot, &[]);
+        push_i32(&mut rot, 1);
+        push_i32(&mut rot, -1);
+        push_i32(&mut rot, -1);
+        push_i32(&mut rot, 1);
+        push_dict(&mut rot, &[("_r", "8")]);
+        let mut shape = Vec::new();
+        push_i32(&mut shape, 1);
+        push_dict(&mut shape, &[]);
+        push_i32(&mut shape, 1);
+        push_i32(&mut shape, 0);
+        push_dict(&mut shape, &[]);
+        let mut children = chunk(b"SIZE", &size);
+        children.extend(chunk(b"XYZI", &xyzi));
+        children.extend(chunk(b"nTRN", &rot));
+        children.extend(chunk(b"nSHP", &shape));
+        let loaded = load_vox(&wrap_vox(children)).expect("rotated");
+        let src = &loaded.objects[0];
+        let mut session = Session::new();
+        session.objects[0] = Volume {
+            name: src.name.clone(),
+            cells: src.cells.clone(),
+            translation: src.translation,
+            box_min: src.box_min,
+            dims: src.dims,
+            rot: src.rot,
+            pivot: src.pivot,
+            model_dims: src.model_dims,
+        };
+        let stay = src
+            .cells
+            .iter()
+            .find(|(_, slot)| **slot == 3)
+            .map(|(cell, _)| {
+                (
+                    cell.0 + src.translation.0,
+                    cell.1 + src.translation.1,
+                    cell.2 + src.translation.2,
+                )
+            })
+            .unwrap();
+        assert_eq!(session.size_xyz(), Some((2, 2, 2)));
+        session.resize_active(0, 4);
+        assert_eq!(session.size_xyz(), Some((4, 2, 2)));
+        assert_eq!(rot_to_byte(session.active().rot), 8);
+        let moved = session
+            .active()
+            .cells
+            .iter()
+            .find(|(_, slot)| **slot == 3)
+            .map(|(cell, _)| {
+                (
+                    cell.0 + session.active().translation.0,
+                    cell.1 + session.active().translation.1,
+                    cell.2 + session.active().translation.2,
+                )
+            })
+            .unwrap();
+        assert_eq!(moved, stay);
+        let bytes = save_scene(&session.objects, &session.palette, &session.materials).unwrap();
+        let again = load_vox(&bytes).expect("saved");
+        assert_eq!(again.objects[0].model_dims, (4, 2, 2));
+        assert_eq!(rot_to_byte(again.objects[0].rot), 8);
+        session.undo();
+        assert_eq!(session.size_xyz(), Some((2, 2, 2)));
+        session.resize_active(2, 1);
+        assert!(session.active().cells.values().all(|slot| *slot != 7));
+        assert_eq!(rot_to_byte(session.active().rot), 8);
+        let bytes = save_scene(&session.objects, &session.palette, &session.materials).unwrap();
+        let shrunk = load_vox(&bytes).expect("shrunk");
+        assert_eq!(rot_to_byte(shrunk.objects[0].rot), 8);
+        assert_eq!(shrunk.objects[0].model_dims.2, 1);
+    }
+
+    #[test]
     fn pick_object_chooses_the_volume_under_the_ray() {
         let mut session = Session::new();
         session.active_mut().cells.clear();
@@ -5648,10 +6031,57 @@ mod tests {
         );
         let hit = session.ui_target(5.0, 5.0).unwrap();
         assert_eq!(hit.id, "tool.line");
-        session.activate_ui(&hit).unwrap();
+        session.activate_ui(&hit, None).unwrap();
         assert!(session.tool == Tool::Line);
         let described = session.describe_ui();
         assert_eq!(described["tool"], "Line");
         assert_eq!(described["regions"][1]["id"], "tool.line");
+    }
+
+    #[test]
+    fn palette_click_selects_the_slot_and_a_slider_uses_the_track() {
+        let mut session = Session::new();
+        session.note_ui(
+            "palette.4",
+            "4",
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(14.0, 14.0)),
+            UiAction::Palette(4),
+        );
+        let hit = session.ui_target(2.0, 2.0).unwrap();
+        session.activate_ui(&hit, None).unwrap();
+        assert_eq!(session.active_slot, 4);
+        session.note_ui(
+            "slider.brush-size",
+            "Size",
+            egui::Rect::from_min_size(egui::pos2(0.0, 20.0), egui::vec2(100.0, 12.0)),
+            UiAction::Slider(SliderSpec {
+                target: SliderTarget::BrushSize,
+                min: 1.0,
+                max: 63.0,
+            }),
+        );
+        let hit = session.ui_target(99.0, 22.0).unwrap();
+        session.activate_ui(&hit, Some((99.0, 22.0))).unwrap();
+        assert_eq!(session.brush_size, 62);
+    }
+
+    #[test]
+    fn color_and_material_edits_are_one_undo_step() {
+        let mut session = Session::new();
+        session.picked.insert((0, 0, 0));
+        let before = session.palette[36];
+        session.begin_edit();
+        session.set_color(36, [9, 8, 7]);
+        session.end_edit();
+        session.begin_edit();
+        session.material_mut().roughness = 0.25;
+        session.end_edit();
+        session.undo();
+        assert_eq!(session.materials[36].roughness, 1.0);
+        assert_eq!(session.palette[36], [9, 8, 7, 255]);
+        assert!(session.picked.contains(&(0, 0, 0)));
+        session.undo();
+        assert_eq!(session.palette[36], before);
+        assert!(session.picked.contains(&(0, 0, 0)));
     }
 }

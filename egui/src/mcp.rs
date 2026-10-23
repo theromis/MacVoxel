@@ -342,6 +342,7 @@ fn map_tool(name: &str, args: &Value) -> Result<(String, Value), String> {
         "screenshot_region" => "ui.screenshot",
         "ui_inspect" => "ui.inspect",
         "ui_click" => "ui.click",
+        "export_mesh" => "mesh.export",
         other => return Err(format!("unknown tool `{other}`")),
     };
     let params = match name {
@@ -449,11 +450,16 @@ fn tools() -> Vec<Value> {
             "height": num_prop("Height in window points"),
             "path": str_prop("Optional file to write")
         }), &["x", "y", "width", "height"]),
-        tool("ui_inspect", "Controls from the previous frame: tool buttons, mode, outliner, viewport chips, and the viewport rectangle, in window points. Only when connected to a window.", json!({}), &[]),
-        tool("ui_click", "Click the topmost registered control at a window point. A viewport hit stamps the active tool. Only when connected to a window.", json!({
+        tool("ui_inspect", "Controls from the previous frame: tool buttons, mode, outliner, sliders, palette cells, viewport chips, and the viewport rectangle, in window points. Only when connected to a window.", json!({}), &[]),
+        tool("ui_click", "Click the topmost registered control at a window point. A viewport hit stamps the active tool. A slider hit sets that slider from the point along its track. A palette cell selects that slot. Only when connected to a window.", json!({
             "x": num_prop("X in window points, origin at the top-left of the client area"),
             "y": num_prop("Y in window points, origin at the top-left of the client area")
         }), &["x", "y"]),
+        tool("export_mesh", "Write a glTF 2.0 .glb of every object. Exposed faces only. The default material is a 256-wide palette texture.", json!({
+            "path": str_prop("Where to write the .glb"),
+            "merge": {"type": "boolean", "description": "Greedy-merge coplanar faces of one palette slot. Defaults to false."},
+            "vertexColors": {"type": "boolean", "description": "Store a linear COLOR_0 on each vertex instead of the palette texture. Defaults to false."}
+        }), &["path"]),
     ]
 }
 

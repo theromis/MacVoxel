@@ -245,7 +245,7 @@ impl Shell {
             let ray = viewport::ray_through(&self.session, rect, egui::pos2(x, y));
             self.session.click_viewport(ray);
         } else {
-            self.session.activate_ui(&region)?;
+            self.session.activate_ui(&region, Some((x, y)))?;
         }
         Ok(serde_json::json!({"id": region.id, "label": region.label}))
     }
