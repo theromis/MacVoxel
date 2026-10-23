@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <new>
 #include <string>
 #include <utility>
@@ -49,6 +50,14 @@ constexpr int kCorner[6][4][3] = {
     {{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}}, {{0, 1, 0}, {0, 1, 1}, {1, 1, 1}, {1, 1, 0}},
     {{0, 0, 0}, {0, 1, 0}, {1, 1, 0}, {1, 0, 0}}, {{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}},
 };
+// u = corner1 - corner0, v = corner3 - corner0. Both are +1 along one axis,
+// so a w×h quad extends along the same winding as a unit face.
+constexpr int kTangentU[6][3] = {
+    {0, 0, 1}, {0, 1, 0}, {1, 0, 0}, {0, 0, 1}, {0, 1, 0}, {1, 0, 0},
+};
+constexpr int kTangentV[6][3] = {
+    {0, 1, 0}, {0, 0, 1}, {0, 0, 1}, {1, 0, 0}, {1, 0, 0}, {0, 1, 0},
+};
 
 struct Quad {
     int32_t x = 0;
@@ -56,6 +65,8 @@ struct Quad {
     int32_t z = 0;
     uint8_t face = 0;
     uint8_t palette = 0;
+    int32_t w = 1;
+    int32_t h = 1;
 };
 
 struct Section {
@@ -105,6 +116,15 @@ bool FaceTablesOk() {
         const int nz = e1x * e2y - e1y * e2x;
         if (nx != kNormal[f][0] || ny != kNormal[f][1] || nz != kNormal[f][2])
             return false;
+        for (int c = 0; c < 4; ++c) {
+            const int su = (c == 1 || c == 2) ? 1 : 0;
+            const int sv = (c == 2 || c == 3) ? 1 : 0;
+            for (int a = 0; a < 3; ++a) {
+                const int got = kCorner[f][0][a] + kTangentU[f][a] * su + kTangentV[f][a] * sv;
+                if (got != kCorner[f][c][a])
+                    return false;
+            }
+        }
     }
     return true;
 }
@@ -387,6 +407,104 @@ bool CollectQuads(const VoxelGrid& grid, std::vector<Quad>* quads, std::string* 
     return true;
 }
 
+int AxisOf(const int step[3]) {
+    if (step[0] != 0)
+        return 0;
+    if (step[1] != 0)
+        return 1;
+    return 2;
+}
+
+int32_t AxisCoord(const Quad& quad, int axis) {
+    if (axis == 0)
+        return quad.x;
+    if (axis == 1)
+        return quad.y;
+    return quad.z;
+}
+
+void SetAxis(int32_t* x, int32_t* y, int32_t* z, int axis, int32_t value) {
+    if (axis == 0)
+        *x = value;
+    else if (axis == 1)
+        *y = value;
+    else
+        *z = value;
+}
+
+// Greedy rectangles over coplanar unit faces of one palette slot.
+// Scan order is (v, u), so an L splits the same way every time.
+bool MergeQuads(std::vector<Quad>* quads, std::string* error) {
+    // face -> plane -> (v, u) -> palette. std::map keeps the scan stable.
+    std::map<uint8_t, std::map<int32_t, std::map<std::pair<int32_t, int32_t>, uint8_t>>> slices;
+    for (const Quad& quad : *quads) {
+        const int u_axis = AxisOf(kTangentU[quad.face]);
+        const int v_axis = AxisOf(kTangentV[quad.face]);
+        const int plane_axis = quad.face / 2;
+        const int32_t u = AxisCoord(quad, u_axis);
+        const int32_t v = AxisCoord(quad, v_axis);
+        slices[quad.face][AxisCoord(quad, plane_axis)][{v, u}] = quad.palette;
+    }
+    const size_t unit_count = quads->size();
+    std::vector<Quad> merged;
+    merged.reserve(unit_count);
+    int64_t covered = 0;
+    for (auto& [face, planes] : slices) {
+        const int u_axis = AxisOf(kTangentU[face]);
+        const int v_axis = AxisOf(kTangentV[face]);
+        const int plane_axis = face / 2;
+        for (auto& [plane, mask] : planes) {
+            std::vector<std::pair<int32_t, int32_t>> order;
+            order.reserve(mask.size());
+            for (const auto& entry : mask)
+                order.push_back(entry.first);
+            for (const auto& cell : order) {
+                const auto it = mask.find(cell);
+                if (it == mask.end())
+                    continue;
+                const int32_t v = cell.first;
+                const int32_t u = cell.second;
+                const uint8_t palette = it->second;
+                int32_t w = 1;
+                while (true) {
+                    const auto next = mask.find({v, u + w});
+                    if (next == mask.end() || next->second != palette)
+                        break;
+                    ++w;
+                }
+                int32_t h = 1;
+                while (true) {
+                    bool row = true;
+                    for (int32_t i = 0; i < w; ++i) {
+                        const auto next = mask.find({v + h, u + i});
+                        if (next == mask.end() || next->second != palette) {
+                            row = false;
+                            break;
+                        }
+                    }
+                    if (!row)
+                        break;
+                    ++h;
+                }
+                for (int32_t j = 0; j < h; ++j) {
+                    for (int32_t i = 0; i < w; ++i)
+                        mask.erase({v + j, u + i});
+                }
+                int32_t x = 0, y = 0, z = 0;
+                SetAxis(&x, &y, &z, plane_axis, plane);
+                SetAxis(&x, &y, &z, u_axis, u);
+                SetAxis(&x, &y, &z, v_axis, v);
+                merged.push_back(Quad{x, y, z, face, palette, w, h});
+                covered += static_cast<int64_t>(w) * static_cast<int64_t>(h);
+            }
+        }
+    }
+    if (covered != static_cast<int64_t>(unit_count))
+        return Fail(error, "internal mesh merge error");
+    *quads = std::move(merged);
+    return true;
+}
+
 // Palette slots are sRGB 8-bit. The PNG stores those bytes unchanged:
 // glTF baseColorTexture is sRGB, and Blender imports it with an sRGB
 // colorspace, so the swatch matches the palette.
@@ -425,9 +543,17 @@ std::vector<uint8_t> BuildGlb(const std::vector<Quad>& quads, const Palette& pal
         if (color.a != 255)
             blend = true;
         for (int c = 0; c < 4; ++c) {
-            const float gx = static_cast<float>(quad.x + kCorner[quad.face][c][0]);
-            const float gy = static_cast<float>(quad.y + kCorner[quad.face][c][1]);
-            const float gz = static_cast<float>(quad.z + kCorner[quad.face][c][2]);
+            const int su = (c == 1 || c == 2) ? quad.w : 0;
+            const int sv = (c == 2 || c == 3) ? quad.h : 0;
+            const float gx = static_cast<float>(quad.x + kCorner[quad.face][0][0] +
+                                                kTangentU[quad.face][0] * su +
+                                                kTangentV[quad.face][0] * sv);
+            const float gy = static_cast<float>(quad.y + kCorner[quad.face][0][1] +
+                                                kTangentU[quad.face][1] * su +
+                                                kTangentV[quad.face][1] * sv);
+            const float gz = static_cast<float>(quad.z + kCorner[quad.face][0][2] +
+                                                kTangentU[quad.face][2] * su +
+                                                kTangentV[quad.face][2] * sv);
             const Vec3 p = GridToGltf(gx, gy, gz);
             Consider(&pmin, &pmax, p);
             AppendFloat(&bin, p.x);
@@ -568,13 +694,13 @@ bool WriteFile(const std::string& path, const std::vector<uint8_t>& bytes, std::
 
 void PrintUsage() {
     std::fprintf(stderr, "usage: MacVoxel export --input <file.vox> --output <file.glb>\n"
-                         "                       [--vertex-colors]\n");
+                         "                       [--vertex-colors] [--merge]\n");
 }
 
 }  // namespace
 
 bool ExportSceneGlb(Document& doc, const std::string& path, MeshColorMode mode,
-                    MeshExportStats* stats, std::string* error) {
+                    MeshExportStats* stats, std::string* error, bool merge) {
     if (path.empty())
         return Fail(error, "path is empty");
     if (!FaceTablesOk())
@@ -590,6 +716,8 @@ bool ExportSceneGlb(Document& doc, const std::string& path, MeshColorMode mode,
         std::vector<Quad> quads;
         if (!CollectQuads(flat, &quads, error))
             return false;
+        if (merge && !MergeQuads(&quads, error))
+            return false;
         const std::vector<uint8_t> glb = BuildGlb(quads, doc.palette, mode, stats, error);
         if (glb.empty())
             return false;
@@ -603,6 +731,7 @@ int RunCliExport(int argc, const char* argv[]) {
     const char* input = nullptr;
     const char* output = nullptr;
     bool vertex_colors = false;
+    bool merge = false;
     for (int i = 1; i < argc; ++i) {
         const auto eq = [&](const char* tag) { return std::strcmp(argv[i], tag) == 0; };
         if (eq("--input")) {
@@ -619,6 +748,8 @@ int RunCliExport(int argc, const char* argv[]) {
             output = argv[++i];
         } else if (eq("--vertex-colors")) {
             vertex_colors = true;
+        } else if (eq("--merge")) {
+            merge = true;
         } else if (eq("-h") || eq("--help")) {
             PrintUsage();
             return 2;
@@ -645,7 +776,7 @@ int RunCliExport(int argc, const char* argv[]) {
     MeshExportStats stats;
     std::fprintf(stderr, "exporting %s → %s (%s)\n", input, output,
                  vertex_colors ? "vertex colors" : "texture");
-    if (!ExportSceneGlb(doc, output, mode, &stats, &err)) {
+    if (!ExportSceneGlb(doc, output, mode, &stats, &err, merge)) {
         std::fprintf(stderr, "export failed: %s\n", err.c_str());
         return 1;
     }

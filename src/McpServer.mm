@@ -378,8 +378,27 @@ Json ToolList() {
                     "List the non-empty cells of the active object inside an inclusive "
                     "box. At most 100000 cells are returned.",
                     std::move(box), Required({"x0", "y0", "z0", "x1", "y1", "z1"})));
-    tools.push(Tool("set_palette", "Replace one palette slot. One undo step.", std::move(pal),
-                    Required({"index", "r", "g", "b"})));
+    Json entry_props = Json::object();
+    entry_props.set("index", SInt("Palette slot 0..255"));
+    entry_props.set("r", SInt("Red 0..255"));
+    entry_props.set("g", SInt("Green 0..255"));
+    entry_props.set("b", SInt("Blue 0..255"));
+    entry_props.set("a", SInt("Alpha 0..255. Default 255."));
+    Json entry = Json::object();
+    entry.set("type", Json::str("object"));
+    entry.set("properties", std::move(entry_props));
+    Json entries = Json::object();
+    entries.set("type", Json::str("array"));
+    entries.set("description",
+                Json::str("Replace many slots as one undo step. Each item is "
+                          "{index, r, g, b, a?}. A later duplicate index wins. "
+                          "At most 256 items. Omit this and pass index, r, g, b "
+                          "for one slot."));
+    entries.set("items", std::move(entry));
+    pal.set("entries", std::move(entries));
+    tools.push(Tool("set_palette",
+                    "Replace one palette slot, or many via entries, as one undo step.",
+                    std::move(pal), Json::array()));
     Json active = Json::object();
     active.set("index", SInt("Object index from inspect_document"));
     tools.push(Tool("set_active_object",
@@ -396,12 +415,16 @@ Json ToolList() {
     mesh.set("vertexColors",
              SBool("Bake each voxel's palette color into COLOR_0 and do not write a "
                    "texture. Default false (one palette texture)."));
+    mesh.set("merge",
+             SBool("Greedy-merge coplanar exposed faces that share a palette slot. "
+                   "Default false: one quad per exposed face."));
     tools.push(Tool(
         "export_mesh",
         "Export the whole scene as a glTF 2.0 mesh (.glb) that Blender imports. "
         "Folds the active object's edits in first. Without vertexColors, colors "
         "are a palette texture; with vertexColors, each vertex carries the palette "
-        "color and no image is written.",
+        "color and no image is written. merge combines coplanar faces of one "
+        "palette slot; leave it false for one quad per exposed face.",
         std::move(mesh), Required({"path"})));
 
     Json result = Json::object();
@@ -426,7 +449,27 @@ struct Session {
     bool modern = false;
 };
 
-void MarkSynced(Document& doc) { doc.synced_geometry_version = doc.geometry_version; }
+// A fresh Document's BumpAll starts the typed counters over at 1. The
+// path tracer only re-uploads when those numbers differ from its cache,
+// so a second open can reuse the previous scene's buffers. Continue
+// each counter from the document being replaced.
+void CarryVersions(Document* fresh, const Document& old) {
+    fresh->version = old.version + 1;
+    fresh->geometry_version = old.geometry_version + 1;
+    fresh->palette_version = old.palette_version + 1;
+    fresh->material_version = old.material_version + 1;
+    fresh->scene_version = old.scene_version + 1;
+    fresh->synced_geometry_version = fresh->geometry_version;
+}
+
+void ReplaceDocument(Session* session, Document fresh) {
+    CarryVersions(&fresh, session->ctx.document);
+    session->ctx.document = std::move(fresh);
+    session->ctx.history.Clear();
+    session->ctx.selection.Clear();
+    session->ctx.ClearObjectSelection();
+    session->ctx.editor_mode = EditorMode::Model;
+}
 
 Json ObjectJson(const Document& doc, int index, bool active) {
     const SceneObject& o = doc.scene.objects[static_cast<size_t>(index)];
@@ -499,12 +542,7 @@ void ResetEmpty(Session* session) {
     fresh.active_object = 0;
     fresh.RebakeActiveObject();
     fresh.BumpAll();
-    MarkSynced(fresh);
-    session->ctx.document = std::move(fresh);
-    session->ctx.history.Clear();
-    session->ctx.selection.Clear();
-    session->ctx.ClearObjectSelection();
-    session->ctx.editor_mode = EditorMode::Model;
+    ReplaceDocument(session, std::move(fresh));
 }
 
 Json OpenFile(Session* session, const Json& args) {
@@ -519,12 +557,7 @@ Json OpenFile(Session* session, const Json& args) {
     fresh.active_object = 0;
     fresh.RebakeActiveObject();
     fresh.BumpAll();
-    MarkSynced(fresh);
-    session->ctx.document = std::move(fresh);
-    session->ctx.history.Clear();
-    session->ctx.selection.Clear();
-    session->ctx.ClearObjectSelection();
-    session->ctx.editor_mode = EditorMode::Model;
+    ReplaceDocument(session, std::move(fresh));
     Json j = Json::object();
     j.set("path", Json::str(path));
     j.set("objectCount",
@@ -811,36 +844,95 @@ bool ByteChannel(const Json& args, const char* key, bool required, uint8_t fallb
     return true;
 }
 
-Json SetPalette(Session* session, const Json& args) {
-    int32_t index = 0;
-    std::string error;
-    if (!ArgInt(args, "index", &index, &error)) return ToolError(error);
-    if (index < 0 || index > 255) return ToolError("index must be 0..255");
+bool ReadColor(const Json& args, Color* out, std::string* error) {
     uint8_t r = 0, g = 0, b = 0, a = 255;
-    if (!ByteChannel(args, "r", true, 0, &r, &error) ||
-        !ByteChannel(args, "g", true, 0, &g, &error) ||
-        !ByteChannel(args, "b", true, 0, &b, &error) ||
-        !ByteChannel(args, "a", false, 255, &a, &error)) {
-        return ToolError(error);
+    if (!ByteChannel(args, "r", true, 0, &r, error) ||
+        !ByteChannel(args, "g", true, 0, &g, error) ||
+        !ByteChannel(args, "b", true, 0, &b, error) ||
+        !ByteChannel(args, "a", false, 255, &a, error)) {
+        return false;
     }
+    *out = Color{r, g, b, a};
+    return true;
+}
+
+Json SetPalette(Session* session, const Json& args) {
+    const bool has_entries = args.find("entries") != nullptr;
+    const bool has_index = args.find("index") != nullptr;
+    if (has_entries && has_index) return ToolError("pass index or entries, not both");
+    if (!has_entries && !has_index) return ToolError("missing integer index");
+
+    struct Slot {
+        bool set = false;
+        Color color{};
+    };
+    std::array<Slot, 256> slots{};
+    if (!has_entries) {
+        int32_t index = 0;
+        std::string error;
+        if (!ArgInt(args, "index", &index, &error)) return ToolError(error);
+        if (index < 0 || index > 255) return ToolError("index must be 0..255");
+        Color color;
+        if (!ReadColor(args, &color, &error)) return ToolError(error);
+        slots[static_cast<size_t>(index)] = Slot{true, color};
+    } else {
+        const Json* entries = args.find("entries");
+        if (!entries->is_array()) return ToolError("entries must be an array");
+        if (entries->elements().empty()) return ToolError("entries is empty");
+        if (entries->elements().size() > 256) {
+            return ToolError("too many palette entries (limit 256)");
+        }
+        for (const Json& item : entries->elements()) {
+            if (!item.is_object()) return ToolError("palette entry must be an object");
+            int32_t index = 0;
+            std::string error;
+            if (!ArgInt(item, "index", &index, &error)) return ToolError(error);
+            if (index < 0 || index > 255) return ToolError("index must be 0..255");
+            Color color;
+            if (!ReadColor(item, &color, &error)) return ToolError(error);
+            slots[static_cast<size_t>(index)] = Slot{true, color};
+        }
+    }
+
     Document& doc = session->ctx.document;
-    const auto slot = static_cast<uint8_t>(index);
-    const Color old = doc.palette.Get(slot);
-    const Color neu{r, g, b, a};
-    if (old == neu) {
+    int64_t changed = 0;
+    bool began = false;
+    for (int i = 0; i < 256; ++i) {
+        if (!slots[static_cast<size_t>(i)].set) continue;
+        const auto slot = static_cast<uint8_t>(i);
+        const Color old = doc.palette.Get(slot);
+        const Color neu = slots[static_cast<size_t>(i)].color;
+        if (old == neu) continue;
+        if (!began) {
+            session->ctx.history.BeginOp();
+            began = true;
+        }
+        session->ctx.history.RecordPalette(slot, old, neu);
+        doc.palette.Set(slot, neu);
+        ++changed;
+    }
+    if (began) {
+        session->ctx.history.CommitOp();
+        doc.BumpPalette();
+    }
+    if (!has_entries) {
+        int32_t index = 0;
+        std::string error;
+        ArgInt(args, "index", &index, &error);
+        const Color neu = slots[static_cast<size_t>(index)].color;
+        if (changed == 0) {
+            Json j = Json::object();
+            j.set("index", Json::integer(index));
+            j.set("changed", Json::boolean(false));
+            return ToolText(j, false);
+        }
         Json j = Json::object();
         j.set("index", Json::integer(index));
-        j.set("changed", Json::boolean(false));
+        j.set("color", Json::str(HexColor(neu)));
         return ToolText(j, false);
     }
-    session->ctx.history.BeginOp();
-    session->ctx.history.RecordPalette(slot, old, neu);
-    doc.palette.Set(slot, neu);
-    session->ctx.history.CommitOp();
-    doc.BumpPalette();
     Json j = Json::object();
-    j.set("index", Json::integer(index));
-    j.set("color", Json::str(HexColor(neu)));
+    j.set("changed", Json::integer(changed));
     return ToolText(j, false);
 }
 
@@ -982,15 +1074,21 @@ Json ExportMesh(Session* session, const Json& args) {
         if (!flag->is_bool()) return ToolError("vertexColors must be a boolean");
         vertex_colors = flag->boolean();
     }
+    bool merge = false;
+    if (const Json* flag = args.find("merge")) {
+        if (!flag->is_bool()) return ToolError("merge must be a boolean");
+        merge = flag->boolean();
+    }
     const MeshColorMode mode =
         vertex_colors ? MeshColorMode::VertexColors : MeshColorMode::Texture;
     MeshExportStats stats;
-    if (!ExportSceneGlb(session->ctx.document, path, mode, &stats, &error)) {
+    if (!ExportSceneGlb(session->ctx.document, path, mode, &stats, &error, merge)) {
         return ToolError(error);
     }
     Json j = Json::object();
     j.set("path", Json::str(path));
     j.set("colorMode", Json::str(vertex_colors ? "vertex-colors" : "texture"));
+    j.set("merged", Json::boolean(merge));
     j.set("triangles", Json::integer(stats.triangles));
     j.set("vertices", Json::integer(stats.vertices));
     return ToolText(j, false);

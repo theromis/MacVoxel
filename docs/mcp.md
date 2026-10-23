@@ -79,18 +79,24 @@ session the same way.
 | `set_voxels` | `cells` | Write up to 200000 cells as one undo step |
 | `fill_box` | `x0`, `y0`, `z0`, `x1`, `y1`, `z1`, `palette` | Fill an inclusive box, at most 2000000 cells, one undo step |
 | `get_voxels` | `x0`, `y0`, `z0`, `x1`, `y1`, `z1` | Non-empty cells inside an inclusive box, at most 100000 |
-| `set_palette` | `index`, `r`, `g`, `b` | Replace one slot. `a` defaults to 255. One undo step |
+| `set_palette` | `index`, `r`, `g`, `b` or `entries` | Replace one slot, or many via `entries`, as one undo step. `a` defaults to 255 |
 | `set_active_object` | `index` | Edit a different object from `inspect_document` |
 | `undo` | — | Undo the last edit |
 | `redo` | — | Redo the last undone edit |
 | `render` | `path` | Path-trace the whole scene to a PNG |
-| `export_mesh` | `path` | Write a glTF 2.0 `.glb` of the whole scene |
+| `export_mesh` | `path` | Write a glTF 2.0 `.glb` of the whole scene. `merge` defaults to false |
 
 `set_voxels` accepts each cell as `{"x","y","z","palette"}` or as
 `[x, y, z, palette]`. A later duplicate of the same coordinate wins. Cells
 that already hold the requested index are not an undo step.
 
 `fill_box` corners may arrive in either order. The box is inclusive.
+
+`set_palette` takes either one slot (`index`, `r`, `g`, `b`, optional `a`) or
+`entries`: an array of those objects, at most 256. A later duplicate `index`
+wins. The batch is one undo step. Slots that already hold the requested color
+are skipped, and a call that changes nothing does not push undo. Pass one form
+or the other, not both.
 
 `inspect_document` returns:
 
@@ -106,6 +112,10 @@ that already hold the requested index are not an undo step.
 0..8 bounces. The camera frames the scene. An empty scene is an error.
 
 `export_mesh` writes every solid voxel of every object, exposed faces only.
+`merge` defaults to false, which writes one quad per exposed face. `true`
+greedy-merges coplanar faces that share a palette slot into larger quads, so
+a flat run of the same color becomes one rectangle instead of a quad per voxel.
+The default stays one quad per face, so existing output does not change.
 `vertexColors` defaults to false:
 
 - **false.** One material. A 256-wide palette texture, and each face's UVs
@@ -125,6 +135,7 @@ The same mesh is available from File → Export Mesh… (⇧⌘E) and without MC
 ```sh
 MacVoxel export --input in.vox --output out.glb
 MacVoxel export --input in.vox --output out.glb --vertex-colors
+MacVoxel export --input in.vox --output out.glb --merge
 ```
 
 ## What this server does not do
