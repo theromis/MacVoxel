@@ -28,8 +28,9 @@ struct MeshExportStats {
 // meshes the flattened scene (not only the active grid). Exposed faces
 // only. Empty scenes fail. `stats` and `error` may be null.
 // `merge` greedy-merges coplanar faces of the same palette slot, then
-// splits edges where another face's corner meets them so the mesh has no
-// T-junctions. False writes one quad per exposed face.
+// splits an edge where a corner of a face on another plane or palette
+// slot meets it, so that seam is not a T-junction. Vertices of one merged
+// face are shared. False writes one quad per exposed face.
 bool ExportSceneGlb(Document& doc, const std::string& path, MeshColorMode mode,
                     MeshExportStats* stats, std::string* error, bool merge = false);
 

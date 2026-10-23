@@ -29,6 +29,9 @@ Other clients use the same command:
 }
 ```
 
+An MCP client keeps the server binary it launched. After rebuilding MacVoxel,
+restart the client or its session to load the new binary.
+
 `MacVoxel mcp --help` prints usage and exits. Anything else on the command line
 is an error. Logs and usage go to stderr. Stdout carries only protocol messages.
 
@@ -120,9 +123,10 @@ keep the framing angle. Pitch 90 looks straight down, and pitch is limited to
 `merge` defaults to false, which writes one quad per exposed face. `true`
 greedy-merges coplanar faces that share a palette slot into larger quads, so
 a flat run of the same color becomes one rectangle instead of a quad per voxel.
-Edges of those quads are then split where a corner of a neighbouring face
-lands in the middle, so the mesh has no T-junctions. The default stays one
-quad per face, so existing output does not change.
+Edges of those quads are then split where a corner of a neighbouring face on
+a different plane or palette slot lands in the middle, so those seams are not
+T-junctions. Triangles of one merged face share vertices. The default stays
+one quad per face, so existing output does not change.
 `vertexColors` defaults to false:
 
 - **false.** One material. A 256-wide palette texture, and each face's UVs

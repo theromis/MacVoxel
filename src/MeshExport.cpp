@@ -532,21 +532,29 @@ int32_t Comp(IVec3 v, int axis) {
     return v.z;
 }
 
+struct CornerHit {
+    IVec3 at;
+    uint8_t face = 0;
+    uint8_t palette = 0;
+};
+
 // A merged quad's edge can carry a corner of a neighbouring face in its
-// open span (different slot, or a step). Cut the quad on those parameters
-// so every such corner is a vertex of the pieces, not a T-junction.
-// Cutting one face adds vertices on the edge it shares with the next face,
-// so repeat until a pass adds nothing.
+// open span. Cut there so that corner is a vertex of the pieces, not a
+// T-junction. A neighbour on the same plane and the same palette slot is
+// not a cut: those faces are one surface, and the split only duplicates
+// the grid. A different plane or a different slot still cuts, or the seam
+// cracks. Cutting one face adds vertices on the edge it shares with the
+// next face, so repeat until a pass adds nothing.
 bool SplitTJunctions(std::vector<Quad>* quads, std::string* error) {
     const size_t limit = std::max<size_t>(quads->size() * 4, 8);
     for (size_t pass = 0; pass < limit; ++pass) {
-        std::map<std::pair<int, int32_t>, std::vector<IVec3>> on_plane;
+        std::map<std::pair<int, int32_t>, std::vector<CornerHit>> on_plane;
         for (const Quad& quad : *quads) {
             for (int c = 0; c < 4; ++c) {
-                const IVec3 v = QuadCorner(quad, c);
-                on_plane[{0, v.x}].push_back(v);
-                on_plane[{1, v.y}].push_back(v);
-                on_plane[{2, v.z}].push_back(v);
+                const CornerHit hit{QuadCorner(quad, c), quad.face, quad.palette};
+                on_plane[{0, hit.at.x}].push_back(hit);
+                on_plane[{1, hit.at.y}].push_back(hit);
+                on_plane[{2, hit.at.z}].push_back(hit);
             }
         }
         std::vector<Quad> split;
@@ -561,9 +569,13 @@ bool SplitTJunctions(std::vector<Quad>* quads, std::string* error) {
             std::vector<int32_t> u_splits{0, quad.w};
             std::vector<int32_t> v_splits{0, quad.h};
             if (found != on_plane.end()) {
-                for (const IVec3& p : found->second) {
-                    const int32_t u = Comp(p, u_axis) - Comp(c0, u_axis);
-                    const int32_t v = Comp(p, v_axis) - Comp(c0, v_axis);
+                for (const CornerHit& hit : found->second) {
+                    // Same oriented plane and slot: MergeQuads already kept
+                    // these as one surface. Steiner points here are wasted.
+                    if (hit.face == quad.face && hit.palette == quad.palette)
+                        continue;
+                    const int32_t u = Comp(hit.at, u_axis) - Comp(c0, u_axis);
+                    const int32_t v = Comp(hit.at, v_axis) - Comp(c0, v_axis);
                     if (u < 0 || u > quad.w || v < 0 || v > quad.h)
                         continue;
                     if ((v == 0 || v == quad.h) && u > 0 && u < quad.w)
@@ -621,12 +633,72 @@ float SrgbByteToLinear(uint8_t channel) {
         return static_cast<float>(encoded / 12.92);
     return static_cast<float>(std::pow((encoded + 0.055) / 1.055, 2.4));
 }
+
+struct SharedVert {
+    int32_t x = 0;
+    int32_t y = 0;
+    int32_t z = 0;
+    uint8_t face = 0;
+    uint8_t palette = 0;
+
+    bool operator<(const SharedVert& other) const {
+        if (x != other.x)
+            return x < other.x;
+        if (y != other.y)
+            return y < other.y;
+        if (z != other.z)
+            return z < other.z;
+        if (face != other.face)
+            return face < other.face;
+        return palette < other.palette;
+    }
+};
+
+// `share_vertices` welds corners that carry the same position, face, and
+// palette, so the two triangles of a quad and the pieces of one merged
+// face reuse indices. Off leaves four fresh vertices per quad, which keeps
+// unmerged output byte-identical.
 std::vector<uint8_t> BuildGlb(const std::vector<Quad>& quads, const Palette& palette,
-                              MeshColorMode mode, MeshExportStats* stats, std::string* error) {
+                              MeshColorMode mode, MeshExportStats* stats, std::string* error,
+                              bool share_vertices) {
     const bool vertex_colors = mode == MeshColorMode::VertexColors;
-    const size_t vertex_count = quads.size() * 4;
-    const size_t index_count = quads.size() * 6;
     bool blend = false;
+    std::vector<SharedVert> verts;
+    std::vector<uint32_t> tris;
+    verts.reserve(quads.size() * 4);
+    tris.reserve(quads.size() * 6);
+    std::map<SharedVert, uint32_t> weld;
+    for (const Quad& quad : quads) {
+        if (palette.Get(quad.palette).a != 255)
+            blend = true;
+        uint32_t corner[4];
+        for (int c = 0; c < 4; ++c) {
+            const IVec3 at = QuadCorner(quad, c);
+            const SharedVert key{at.x, at.y, at.z, quad.face, quad.palette};
+            if (!share_vertices) {
+                corner[c] = static_cast<uint32_t>(verts.size());
+                verts.push_back(key);
+                continue;
+            }
+            const auto found = weld.find(key);
+            if (found != weld.end()) {
+                corner[c] = found->second;
+                continue;
+            }
+            corner[c] = static_cast<uint32_t>(verts.size());
+            weld.emplace(key, corner[c]);
+            verts.push_back(key);
+        }
+        tris.push_back(corner[0]);
+        tris.push_back(corner[1]);
+        tris.push_back(corner[2]);
+        tris.push_back(corner[0]);
+        tris.push_back(corner[2]);
+        tris.push_back(corner[3]);
+    }
+    const size_t vertex_count = verts.size();
+    const size_t index_count = tris.size();
+
     std::vector<uint8_t> bin;
     const size_t pos_bytes = vertex_count * 12;
     const size_t nrm_bytes = vertex_count * 12;
@@ -639,83 +711,55 @@ std::vector<uint8_t> BuildGlb(const std::vector<Quad>& quads, const Palette& pal
     const float inf = std::numeric_limits<float>::infinity();
     Vec3 pmin{inf, inf, inf};
     Vec3 pmax{-inf, -inf, -inf};
-    for (const Quad& quad : quads) {
-        const Color color = palette.Get(quad.palette);
-        if (color.a != 255)
-            blend = true;
-        for (int c = 0; c < 4; ++c) {
-            const int su = (c == 1 || c == 2) ? quad.w : 0;
-            const int sv = (c == 2 || c == 3) ? quad.h : 0;
-            const float gx = static_cast<float>(quad.x + kCorner[quad.face][0][0] +
-                                                kTangentU[quad.face][0] * su +
-                                                kTangentV[quad.face][0] * sv);
-            const float gy = static_cast<float>(quad.y + kCorner[quad.face][0][1] +
-                                                kTangentU[quad.face][1] * su +
-                                                kTangentV[quad.face][1] * sv);
-            const float gz = static_cast<float>(quad.z + kCorner[quad.face][0][2] +
-                                                kTangentU[quad.face][2] * su +
-                                                kTangentV[quad.face][2] * sv);
-            const Vec3 p = GridToGltf(gx, gy, gz);
-            Consider(&pmin, &pmax, p);
-            AppendFloat(&bin, p.x);
-            AppendFloat(&bin, p.y);
-            AppendFloat(&bin, p.z);
-        }
+    for (const SharedVert& vert : verts) {
+        const Vec3 p = GridToGltf(static_cast<float>(vert.x), static_cast<float>(vert.y),
+                                  static_cast<float>(vert.z));
+        Consider(&pmin, &pmax, p);
+        AppendFloat(&bin, p.x);
+        AppendFloat(&bin, p.y);
+        AppendFloat(&bin, p.z);
     }
     pos.length = bin.size() - pos.offset;
 
     Section nrm;
     nrm.offset = bin.size();
-    for (const Quad& quad : quads) {
-        const Vec3 n = GridToGltf(static_cast<float>(kNormal[quad.face][0]),
-                                  static_cast<float>(kNormal[quad.face][1]),
-                                  static_cast<float>(kNormal[quad.face][2]));
-        for (int c = 0; c < 4; ++c) {
-            AppendFloat(&bin, n.x);
-            AppendFloat(&bin, n.y);
-            AppendFloat(&bin, n.z);
-        }
+    for (const SharedVert& vert : verts) {
+        const Vec3 n = GridToGltf(static_cast<float>(kNormal[vert.face][0]),
+                                  static_cast<float>(kNormal[vert.face][1]),
+                                  static_cast<float>(kNormal[vert.face][2]));
+        AppendFloat(&bin, n.x);
+        AppendFloat(&bin, n.y);
+        AppendFloat(&bin, n.z);
     }
     nrm.length = bin.size() - nrm.offset;
 
     Section color;
     color.offset = bin.size();
     if (vertex_colors) {
-        for (const Quad& quad : quads) {
-            const Color c = palette.Get(quad.palette);
+        for (const SharedVert& vert : verts) {
+            const Color c = palette.Get(vert.palette);
             const float r = SrgbByteToLinear(c.r);
             const float g = SrgbByteToLinear(c.g);
             const float b = SrgbByteToLinear(c.b);
             const float a = static_cast<float>(c.a) / 255.0f;
-            for (int v = 0; v < 4; ++v) {
-                AppendFloat(&bin, r);
-                AppendFloat(&bin, g);
-                AppendFloat(&bin, b);
-                AppendFloat(&bin, a);
-            }
+            AppendFloat(&bin, r);
+            AppendFloat(&bin, g);
+            AppendFloat(&bin, b);
+            AppendFloat(&bin, a);
         }
     } else {
-        for (const Quad& quad : quads) {
-            const float u = (static_cast<float>(quad.palette) + 0.5f) / 256.0f;
-            for (int v = 0; v < 4; ++v) {
-                AppendFloat(&bin, u);
-                AppendFloat(&bin, 0.5f);
-            }
+        for (const SharedVert& vert : verts) {
+            const float u = (static_cast<float>(vert.palette) + 0.5f) / 256.0f;
+            AppendFloat(&bin, u);
+            AppendFloat(&bin, 0.5f);
         }
     }
     color.length = bin.size() - color.offset;
 
     Section indices;
     indices.offset = bin.size();
-    for (size_t q = 0; q < quads.size(); ++q) {
-        const auto base = static_cast<uint32_t>(q * 4);
-        AppendLE32(&bin, base);
-        AppendLE32(&bin, base + 1);
-        AppendLE32(&bin, base + 2);
-        AppendLE32(&bin, base);
-        AppendLE32(&bin, base + 2);
-        AppendLE32(&bin, base + 3);
-    }
+    for (uint32_t index : tris)
+        AppendLE32(&bin, index);
     indices.length = bin.size() - indices.offset;
 
     Section image;
@@ -823,7 +867,7 @@ bool ExportSceneGlb(Document& doc, const std::string& path, MeshColorMode mode,
             if (!SplitTJunctions(&quads, error))
                 return false;
         }
-        const std::vector<uint8_t> glb = BuildGlb(quads, doc.palette, mode, stats, error);
+        const std::vector<uint8_t> glb = BuildGlb(quads, doc.palette, mode, stats, error, merge);
         if (glb.empty())
             return false;
         return WriteFile(path, glb, error);

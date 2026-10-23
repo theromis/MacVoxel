@@ -3,7 +3,7 @@
 
 Renders two documents in one session and compares pixels, so a stale path
 tracer cache (versions restarting at zero after open_file) fails the run.
-Also checks batched set_palette and greedy mesh merge.
+Also checks batched set_palette, greedy mesh merge, and merged glb size.
 """
 
 import json
@@ -147,6 +147,7 @@ def main():
             check_palette(session)
             check_merge(session, tmp)
             check_junctions(session, tmp)
+            check_merged_size(session, tmp)
             check_camera(session, tmp)
             check_reload(session, tmp)
     finally:
@@ -296,6 +297,36 @@ def check_junctions(session, tmp):
             for v in points:
                 if v != a and v != b and on_open_segment(a, b, v):
                     raise SystemExit(f"T-junction: {v} lies on {a}–{b}")
+
+
+def check_merged_size(session, tmp):
+    # Fixed multi-colour scene: an 8x8 slab, a mixed ring around it, and a
+    # mixed row on top. Merged output shares vertices of each split face.
+    # Emitting a fresh vertex per sub-quad corner makes this file 40404 bytes,
+    # the same size as the unmerged export.
+    session.tool("new_document")
+    cells = []
+    for x in range(8):
+        for y in range(8):
+            cells.append({"x": x, "y": y, "z": 0, "palette": 1})
+    for x in range(8):
+        cells.append({"x": x, "y": -1, "z": 0, "palette": 2 + (x % 4)})
+        cells.append({"x": x, "y": 8, "z": 0, "palette": 2 + (x % 4)})
+    for y in range(8):
+        cells.append({"x": -1, "y": y, "z": 0, "palette": 6 + (y % 4)})
+        cells.append({"x": 8, "y": y, "z": 0, "palette": 6 + (y % 4)})
+    for x in range(8):
+        cells.append({"x": x, "y": 3, "z": 1, "palette": 10 + (x % 5)})
+    session.tool("set_voxels", {"cells": cells})
+    session.tool(
+        "export_mesh", {"path": str(tmp / "colors-merge.glb"), "merge": True}
+    )
+    size = (tmp / "colors-merge.glb").stat().st_size
+    if size != 30224:
+        raise SystemExit(
+            f"merged colourful glb is {size} bytes, want 30224 "
+            "(40404 without shared vertices)"
+        )
 
 
 def check_camera(session, tmp):
