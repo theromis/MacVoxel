@@ -1,11 +1,11 @@
-//! egui shell preview.
+//! MacVoxel editor.
 //!
 //! ```sh
-//! cargo run --manifest-path egui/Cargo.toml
-//! cargo run --manifest-path egui/Cargo.toml -- path/to/model.vox
-//! cargo run --manifest-path egui/Cargo.toml -- --control 7979
-//! cargo run --manifest-path egui/Cargo.toml -- mcp
-//! cargo run --manifest-path egui/Cargo.toml -- mcp --connect 127.0.0.1:7979 --launch
+//! cargo run
+//! cargo run -- path/to/model.vox
+//! cargo run -- --control 7979
+//! cargo run -- mcp
+//! cargo run -- mcp --connect 127.0.0.1:7979 --launch
 //! ```
 //!
 //! `mcp` speaks Model Context Protocol on stdin/stdout. Without `--connect`
@@ -14,9 +14,8 @@
 //! `--launch` opens that editor. Render mode path-traces on the GPU
 //! through wgpu. MCP has no render tool.
 //!
-//! The window is independent of the SwiftUI/Metal editor. On macOS the
-//! File and Edit commands live on the application menu bar. Brush strokes
-//! edit an in-memory volume so the panels can be tried against a viewport.
+//! The Swift/Metal editor lives in `legacy/`. On macOS the File and Edit
+//! commands live on the application menu bar.
 
 mod control;
 mod export;

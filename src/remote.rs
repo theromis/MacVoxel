@@ -218,7 +218,7 @@ fn inspect(session: &Session) -> Value {
             json!({
                 "index": index,
                 "name": object.name,
-                "hidden": false,
+                "hidden": object.hidden,
                 "active": index == session.selected,
                 "model": index,
                 "voxels": object.cells.len(),

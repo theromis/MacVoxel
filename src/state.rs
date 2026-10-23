@@ -191,6 +191,24 @@ pub struct Volume {
     pub pivot: Cell,
     /// File SIZE that `rot` was applied to. `(0, 0, 0)` saves an identity `_r`.
     pub model_dims: (i32, i32, i32),
+    /// Any `_hidden` on the node or an ancestor. Hidden objects stay in the
+    /// file and the outliner, and are left out of the mesh and the tracer.
+    pub hidden: bool,
+    /// Leaf transform this object was loaded from. `None` for objects the
+    /// editor created. Save uses it to write the original graph back.
+    pub file: Option<FileLink>,
+}
+
+/// Where a loaded object sits in the `.vox` graph.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FileLink {
+    pub trn: i32,
+    pub model: i32,
+    pub parent_rot: [[i32; 3]; 3],
+    pub parent_t: [i32; 3],
+    /// Name stored on the node when the file was opened, after the editor's
+    /// fallback. Save writes `_name` only when the object name changes.
+    pub name: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -450,6 +468,9 @@ pub struct Session {
     pub object_selection: Vec<usize>,
     pub next_object: u32,
     pub path: Option<PathBuf>,
+    /// Scene graph from the last opened `.vox`. Save writes it back, including
+    /// groups, layers, hidden flags, and animation frames past the first.
+    graph: Option<VoxGraph>,
 
     pub editor_mode: EditorMode,
     pub render_mode: RenderMode,
@@ -577,6 +598,7 @@ impl Session {
             object_selection: vec![0],
             next_object: 2,
             path: None,
+            graph: None,
             editor_mode: EditorMode::Model,
             render_mode: RenderMode::Edit,
             stochastic_gi: true,
@@ -644,6 +666,8 @@ impl Session {
             rot: ROT_IDENTITY,
             pivot: (0, 0, 0),
             model_dims: (0, 0, 0),
+            hidden: false,
+            file: None,
         });
         session.frame_camera();
         session
@@ -1031,11 +1055,14 @@ impl Session {
             rot: ROT_IDENTITY,
             pivot: (0, 0, 0),
             model_dims: (0, 0, 0),
+            hidden: false,
+            file: None,
         });
         self.selected = 0;
         self.focus_object();
         self.next_object = 2;
         self.path = None;
+        self.graph = None;
         self.palette = default_palette();
         self.materials = [Material::default(); 256];
         self.undo.clear();
@@ -1085,6 +1112,10 @@ impl Session {
             } else {
                 format!("Object {}", index + 1)
             };
+            let mut file = object.file;
+            if let Some(link) = file.as_mut() {
+                link.name = name.clone();
+            }
             self.objects.push(Volume {
                 name,
                 cells: object.cells,
@@ -1094,6 +1125,8 @@ impl Session {
                 rot: object.rot,
                 pivot: object.pivot,
                 model_dims: object.model_dims,
+                hidden: object.hidden,
+                file,
             });
         }
         if self.objects.is_empty() {
@@ -1106,6 +1139,8 @@ impl Session {
                 rot: ROT_IDENTITY,
                 pivot: (0, 0, 0),
                 model_dims: (0, 0, 0),
+                hidden: false,
+                file: None,
             });
         }
         self.selected = 0;
@@ -1113,6 +1148,7 @@ impl Session {
         self.next_object = (self.objects.len() as u32).saturating_add(1).max(2);
         self.palette = loaded.palette.unwrap_or_else(default_palette);
         self.materials = loaded.materials;
+        self.graph = loaded.graph;
         self.path = Some(path.to_path_buf());
         self.undo.clear();
         self.redo.clear();
@@ -1143,11 +1179,14 @@ impl Session {
             rot: ROT_IDENTITY,
             pivot: (0, 0, 0),
             model_dims: (0, 0, 0),
+            hidden: false,
+            file: None,
         });
         self.selected = 0;
         self.focus_object();
         self.next_object = 2;
         self.path = None;
+        self.graph = None;
         self.palette = default_palette();
         self.materials = [Material::default(); 256];
         self.undo.clear();
@@ -1269,7 +1308,12 @@ impl Session {
             .iter()
             .filter(|object| !object.cells.is_empty())
             .count();
-        let bytes = match save_scene(&self.objects, &self.palette, &self.materials) {
+        let bytes = match save_document(
+            &self.objects,
+            &self.palette,
+            &self.materials,
+            self.graph.as_ref(),
+        ) {
             Ok(bytes) => bytes,
             Err(e) => {
                 self.status = e.clone();
@@ -1592,6 +1636,8 @@ impl Session {
             rot: ROT_IDENTITY,
             pivot: (0, 0, 0),
             model_dims: (0, 0, 0),
+            hidden: false,
+            file: None,
         });
         self.selected = self.objects.len() - 1;
         self.focus_object();
@@ -1622,6 +1668,8 @@ impl Session {
                 source.pivot.2 + delta.2,
             ),
             model_dims: source.model_dims,
+            hidden: source.hidden,
+            file: None,
         };
         self.objects.insert(self.selected + 1, copy);
         self.selected += 1;
@@ -1716,6 +1764,7 @@ impl Session {
             objects: self.objects.clone(),
             palette: self.palette,
             materials: self.materials,
+            graph: self.graph.clone(),
         }
     }
 
@@ -1724,6 +1773,7 @@ impl Session {
             objects: std::mem::replace(&mut self.objects, snap.objects),
             palette: std::mem::replace(&mut self.palette, snap.palette),
             materials: std::mem::replace(&mut self.materials, snap.materials),
+            graph: std::mem::replace(&mut self.graph, snap.graph),
         }
     }
 
@@ -1738,6 +1788,7 @@ impl Session {
             if prev.objects != self.objects
                 || prev.palette != self.palette
                 || prev.materials != self.materials
+                || prev.graph != self.graph
             {
                 self.undo.push(prev);
                 self.redo.clear();
@@ -1787,6 +1838,8 @@ impl Session {
                 rot: ROT_IDENTITY,
                 pivot: (0, 0, 0),
                 model_dims: (0, 0, 0),
+                hidden: false,
+                file: None,
             });
         }
         self.selected = self.selected.min(self.objects.len() - 1);
@@ -3259,6 +3312,9 @@ impl Session {
     fn pick_object(&self, origin: Vec3, dir: Vec3) -> Option<(usize, Hit)> {
         let mut best: Option<(f32, usize, Hit)> = None;
         for (index, object) in self.objects.iter().enumerate() {
+            if object.hidden {
+                continue;
+            }
             let local = origin
                 - Vec3::new(
                     object.translation.0 as f32,
@@ -3342,6 +3398,7 @@ struct Snapshot {
     objects: Vec<Volume>,
     palette: [[u8; 4]; 256],
     materials: [Material; 256],
+    graph: Option<VoxGraph>,
 }
 
 #[derive(Clone)]
@@ -3976,12 +4033,15 @@ struct LoadedObject {
     rot: [[i32; 3]; 3],
     pivot: Cell,
     model_dims: (i32, i32, i32),
+    hidden: bool,
+    file: Option<FileLink>,
 }
 
 struct Loaded {
     objects: Vec<LoadedObject>,
     palette: Option<[[u8; 4]; 256]>,
     materials: [Material; 256],
+    graph: Option<VoxGraph>,
 }
 
 /// Graphless single-model writer. The editor saves a scene; these tests
@@ -4041,6 +4101,504 @@ fn save_vox(
     push_rgba(&mut children, palette);
     push_matl(&mut children, materials);
     Ok(wrap_vox(children))
+}
+
+fn save_document(
+    objects: &[Volume],
+    palette: &[[u8; 4]; 256],
+    materials: &[Material; 256],
+    graph: Option<&VoxGraph>,
+) -> Result<Vec<u8>, String> {
+    match graph {
+        Some(graph) => save_graph(objects, palette, materials, graph),
+        None => save_scene(objects, palette, materials),
+    }
+}
+
+/// Write the loaded graph back. Frame 0 picks up the edited translation,
+/// rotation, name, and `_hidden`. Later animation frames, groups, shape
+/// model lists, and layers stay as they were read.
+fn save_graph(
+    objects: &[Volume],
+    palette: &[[u8; 4]; 256],
+    materials: &[Material; 256],
+    graph: &VoxGraph,
+) -> Result<Vec<u8>, String> {
+    let mut models = graph.models.clone();
+    let mut nodes = graph.nodes.clone();
+    let mut next_id = nodes.iter().map(|node| node.id).max().unwrap_or(0) + 1;
+    let index_of = |nodes: &[VoxNode], id: i32| nodes.iter().position(|node| node.id == id);
+
+    for object in objects {
+        let Some(link) = &object.file else {
+            continue;
+        };
+        let Some((packed, keep_rotation)) = pack_model(object)? else {
+            continue;
+        };
+        if (0..models.len()).contains(&(link.model as usize)) {
+            models[link.model as usize] = packed;
+        }
+        if let Some(index) = index_of(&nodes, link.trn) {
+            rewrite_leaf(&mut nodes[index], object, link, graph.shift, keep_rotation);
+        }
+    }
+
+    let mut added = Vec::new();
+    for object in objects {
+        if object.file.is_some() {
+            continue;
+        }
+        let Some((packed, _)) = pack_model(object)? else {
+            continue;
+        };
+        let model = models.len() as i32;
+        models.push(packed);
+        let (parent_t, parent_rot, _) = group_space(&nodes);
+        let shape_id = next_id;
+        next_id += 1;
+        let trn_id = next_id;
+        next_id += 1;
+        let keep_rotation = stored_rotation(object) && unbake_model(object).is_some();
+        nodes.push(shape_node(shape_id, model));
+        nodes.push(transform_node(
+            trn_id,
+            shape_id,
+            object,
+            parent_t,
+            parent_rot,
+            graph.shift,
+            keep_rotation,
+        ));
+        added.push(trn_id);
+    }
+    if !added.is_empty() {
+        let group_id = ensure_group(&mut nodes, &mut next_id);
+        if let Some(group) = nodes.iter_mut().find(|node| node.id == group_id) {
+            group.children.extend(added);
+        }
+    }
+
+    let live: HashSet<i32> = objects
+        .iter()
+        .filter_map(|object| object.file.as_ref().map(|link| link.trn))
+        .collect();
+    let mut skip = HashSet::new();
+    for node in &graph.nodes {
+        if node.kind != VoxKind::Transform || live.contains(&node.id) {
+            continue;
+        }
+        let child_is_shape = graph
+            .nodes
+            .iter()
+            .any(|other| other.id == node.child && other.kind == VoxKind::Shape);
+        if child_is_shape {
+            skip.insert(node.id);
+        }
+    }
+    loop {
+        let mut grew = false;
+        for node in &nodes {
+            if node.kind != VoxKind::Transform || skip.contains(&node.id) {
+                continue;
+            }
+            let child_skipped = nodes.iter().any(|other| {
+                other.id == node.child
+                    && other.kind == VoxKind::Transform
+                    && skip.contains(&other.id)
+            });
+            if child_skipped {
+                skip.insert(node.id);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    if models.is_empty() {
+        return Err("cannot save an empty grid".into());
+    }
+    let mut children = Vec::new();
+    for model in &models {
+        push_model(&mut children, model)?;
+    }
+    for node in &nodes {
+        if skip.contains(&node.id) {
+            continue;
+        }
+        match node.kind {
+            VoxKind::Transform => {
+                push_chunk(&mut children, b"nTRN", &transform_body(node));
+            }
+            VoxKind::Group => {
+                let kids: Vec<i32> = node
+                    .children
+                    .iter()
+                    .copied()
+                    .filter(|id| !skip.contains(id))
+                    .collect();
+                push_chunk(&mut children, b"nGRP", &group_body(node, &kids));
+            }
+            VoxKind::Shape => {
+                let used: Vec<_> = node
+                    .models
+                    .iter()
+                    .filter(|(model, _)| (0..models.len()).contains(&(*model as usize)))
+                    .cloned()
+                    .collect();
+                if used.is_empty() {
+                    continue;
+                }
+                push_chunk(&mut children, b"nSHP", &shape_body(node, &used));
+            }
+        }
+    }
+    for layer in &graph.layers {
+        push_chunk(&mut children, b"LAYR", &layer_body(layer));
+    }
+    push_rgba(&mut children, palette);
+    push_matl(&mut children, materials);
+    Ok(wrap_vox(children))
+}
+
+fn pack_model(object: &Volume) -> Result<Option<(StoredModel, bool)>, String> {
+    let empty = object.cells.values().all(|slot| *slot == 0);
+    if empty {
+        if object.file.is_none() {
+            return Ok(None);
+        }
+        let dims = if object.model_dims != (0, 0, 0) {
+            [
+                object.model_dims.0,
+                object.model_dims.1,
+                object.model_dims.2,
+            ]
+        } else if object.dims != (0, 0, 0) {
+            [object.dims.0, object.dims.1, object.dims.2]
+        } else {
+            [1, 1, 1]
+        };
+        return Ok(Some((
+            StoredModel {
+                dims: [dims[0].max(1), dims[1].max(1), dims[2].max(1)],
+                voxels: Vec::new(),
+            },
+            stored_rotation(object),
+        )));
+    }
+    if let Some(voxels) = unbake_model(object) {
+        return Ok(Some((
+            StoredModel {
+                dims: [
+                    object.model_dims.0,
+                    object.model_dims.1,
+                    object.model_dims.2,
+                ],
+                voxels,
+            },
+            true,
+        )));
+    }
+    let Some((min, dims)) = resolved_box(object) else {
+        return Ok(None);
+    };
+    if dims[0] > 256 || dims[1] > 256 || dims[2] > 256 {
+        return Err(format!(
+            "scene exceeds .vox single-model limit of 256 per axis (bounds {}x{}x{})",
+            dims[0], dims[1], dims[2]
+        ));
+    }
+    let mut voxels: Vec<(i32, i32, i32, u8)> = object
+        .cells
+        .iter()
+        .filter(|(_, slot)| **slot != 0)
+        .map(|(cell, slot)| (cell.0 - min.0, cell.1 - min.1, cell.2 - min.2, *slot))
+        .collect();
+    voxels.sort_unstable();
+    Ok(Some((StoredModel { dims, voxels }, false)))
+}
+
+fn editor_center(object: &Volume, keep_rotation: bool) -> Option<[i32; 3]> {
+    if keep_rotation {
+        return Some([object.pivot.0, object.pivot.1, object.pivot.2]);
+    }
+    let (min, dims) = resolved_box(object)?;
+    let half = [dims[0] / 2, dims[1] / 2, dims[2] / 2];
+    Some([
+        object.translation.0 + min.0 + half[0],
+        object.translation.1 + min.1 + half[1],
+        object.translation.2 + min.2 + half[2],
+    ])
+}
+
+fn file_local(
+    object: &Volume,
+    parent_t: [i32; 3],
+    parent_rot: [[i32; 3]; 3],
+    shift: [i32; 3],
+    keep_rotation: bool,
+) -> Option<([i32; 3], [[i32; 3]; 3])> {
+    let center = editor_center(object, keep_rotation)?;
+    let file_center = [
+        center[0] - shift[0],
+        center[1] - shift[1],
+        center[2] - shift[2],
+    ];
+    let delta = [
+        file_center[0] - parent_t[0],
+        file_center[1] - parent_t[1],
+        file_center[2] - parent_t[2],
+    ];
+    let local_t = rot_apply(rot_transpose(parent_rot), delta);
+    let local_r = if keep_rotation {
+        rot_mul(rot_transpose(parent_rot), object.rot)
+    } else {
+        ROT_IDENTITY
+    };
+    Some((local_t, local_r))
+}
+
+fn rewrite_leaf(
+    node: &mut VoxNode,
+    object: &Volume,
+    link: &FileLink,
+    shift: [i32; 3],
+    keep_rotation: bool,
+) {
+    upsert_pair(
+        &mut node.attrs,
+        "_hidden",
+        object.hidden.then(|| "1".to_string()),
+    );
+    if object.name != link.name {
+        upsert_pair(
+            &mut node.attrs,
+            "_name",
+            (!object.name.is_empty()).then(|| object.name.clone()),
+        );
+    }
+    let Some((local_t, local_r)) =
+        file_local(object, link.parent_t, link.parent_rot, shift, keep_rotation)
+    else {
+        return;
+    };
+    if node.frames.is_empty() {
+        node.frames.push(Vec::new());
+    }
+    let frame = &mut node.frames[0];
+    upsert_pair(
+        frame,
+        "_t",
+        (local_t != [0, 0, 0]).then(|| format!("{} {} {}", local_t[0], local_t[1], local_t[2])),
+    );
+    upsert_pair(
+        frame,
+        "_r",
+        (!rot_is_identity(local_r)).then(|| rot_to_byte(local_r).to_string()),
+    );
+    node.t = local_t;
+    node.rot = rot_to_byte(local_r);
+}
+
+fn group_space(nodes: &[VoxNode]) -> ([i32; 3], [[i32; 3]; 3], Option<i32>) {
+    if let Some(root) = nodes
+        .iter()
+        .find(|node| node.id == 0 && node.kind == VoxKind::Transform)
+    {
+        if nodes
+            .iter()
+            .any(|node| node.id == root.child && node.kind == VoxKind::Group)
+        {
+            return (root.t, rot_from_byte(root.rot), Some(root.child));
+        }
+    }
+    if let Some(group) = nodes.iter().find(|node| node.kind == VoxKind::Group) {
+        return ([0, 0, 0], ROT_IDENTITY, Some(group.id));
+    }
+    ([0, 0, 0], ROT_IDENTITY, None)
+}
+
+fn ensure_group(nodes: &mut Vec<VoxNode>, next_id: &mut i32) -> i32 {
+    if let Some(id) = group_space(nodes).2 {
+        return id;
+    }
+    let group_id = *next_id;
+    *next_id += 1;
+    let previous = nodes
+        .iter()
+        .find(|node| node.id == 0 && node.kind == VoxKind::Transform)
+        .map(|node| node.child);
+    if let Some(root) = nodes
+        .iter_mut()
+        .find(|node| node.id == 0 && node.kind == VoxKind::Transform)
+    {
+        root.child = group_id;
+    }
+    nodes.push(VoxNode {
+        id: group_id,
+        kind: VoxKind::Group,
+        child: -1,
+        children: previous.into_iter().collect(),
+        model_id: -1,
+        models: Vec::new(),
+        t: [0, 0, 0],
+        rot: 4,
+        layer: -1,
+        name: String::new(),
+        attrs: Vec::new(),
+        frames: Vec::new(),
+    });
+    group_id
+}
+
+fn shape_node(id: i32, model: i32) -> VoxNode {
+    VoxNode {
+        id,
+        kind: VoxKind::Shape,
+        child: -1,
+        children: Vec::new(),
+        model_id: model,
+        models: vec![(model, Vec::new())],
+        t: [0, 0, 0],
+        rot: 4,
+        layer: -1,
+        name: String::new(),
+        attrs: Vec::new(),
+        frames: Vec::new(),
+    }
+}
+
+fn transform_node(
+    id: i32,
+    child: i32,
+    object: &Volume,
+    parent_t: [i32; 3],
+    parent_rot: [[i32; 3]; 3],
+    shift: [i32; 3],
+    keep_rotation: bool,
+) -> VoxNode {
+    let (local_t, local_r) = file_local(object, parent_t, parent_rot, shift, keep_rotation)
+        .unwrap_or(([0, 0, 0], ROT_IDENTITY));
+    let mut attrs = Vec::new();
+    if !object.name.is_empty() {
+        attrs.push(("_name".to_string(), object.name.clone()));
+    }
+    if object.hidden {
+        attrs.push(("_hidden".to_string(), "1".to_string()));
+    }
+    let mut frame = Vec::new();
+    if local_t != [0, 0, 0] {
+        frame.push((
+            "_t".to_string(),
+            format!("{} {} {}", local_t[0], local_t[1], local_t[2]),
+        ));
+    }
+    if !rot_is_identity(local_r) {
+        frame.push(("_r".to_string(), rot_to_byte(local_r).to_string()));
+    }
+    VoxNode {
+        id,
+        kind: VoxKind::Transform,
+        child,
+        children: Vec::new(),
+        model_id: -1,
+        models: Vec::new(),
+        t: local_t,
+        rot: rot_to_byte(local_r),
+        layer: -1,
+        name: object.name.clone(),
+        attrs,
+        frames: vec![frame],
+    }
+}
+
+fn push_model(out: &mut Vec<u8>, model: &StoredModel) -> Result<(), String> {
+    let dims = [
+        model.dims[0].max(1),
+        model.dims[1].max(1),
+        model.dims[2].max(1),
+    ];
+    if dims[0] > 256 || dims[1] > 256 || dims[2] > 256 {
+        return Err(format!(
+            "scene exceeds .vox single-model limit of 256 per axis (bounds {}x{}x{})",
+            dims[0], dims[1], dims[2]
+        ));
+    }
+    let mut size = Vec::new();
+    for dim in dims {
+        size.extend_from_slice(&(dim as u32).to_le_bytes());
+    }
+    push_chunk(out, b"SIZE", &size);
+    let mut xyzi = Vec::with_capacity(4 + model.voxels.len() * 4);
+    xyzi.extend_from_slice(&(model.voxels.len() as u32).to_le_bytes());
+    for (x, y, z, slot) in &model.voxels {
+        if !(0..256).contains(x) || !(0..256).contains(y) || !(0..256).contains(z) {
+            return Err("model voxels escape the .vox 256-per-axis local box".into());
+        }
+        xyzi.extend_from_slice(&[*x as u8, *y as u8, *z as u8, *slot]);
+    }
+    push_chunk(out, b"XYZI", &xyzi);
+    Ok(())
+}
+
+fn push_pairs(out: &mut Vec<u8>, pairs: &[(String, String)]) {
+    push_i32(out, pairs.len() as i32);
+    for (key, value) in pairs {
+        push_string(out, key);
+        push_string(out, value);
+    }
+}
+
+fn transform_body(node: &VoxNode) -> Vec<u8> {
+    let mut body = Vec::new();
+    push_i32(&mut body, node.id);
+    push_pairs(&mut body, &node.attrs);
+    push_i32(&mut body, node.child);
+    push_i32(&mut body, -1);
+    push_i32(&mut body, node.layer);
+    let frames = if node.frames.is_empty() {
+        vec![Vec::new()]
+    } else {
+        node.frames.clone()
+    };
+    push_i32(&mut body, frames.len() as i32);
+    for frame in &frames {
+        push_pairs(&mut body, frame);
+    }
+    body
+}
+
+fn group_body(node: &VoxNode, children: &[i32]) -> Vec<u8> {
+    let mut body = Vec::new();
+    push_i32(&mut body, node.id);
+    push_pairs(&mut body, &node.attrs);
+    push_i32(&mut body, children.len() as i32);
+    for child in children {
+        push_i32(&mut body, *child);
+    }
+    body
+}
+
+fn shape_body(node: &VoxNode, models: &[(i32, Vec<(String, String)>)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    push_i32(&mut body, node.id);
+    push_pairs(&mut body, &node.attrs);
+    push_i32(&mut body, models.len() as i32);
+    for (model, attrs) in models {
+        push_i32(&mut body, *model);
+        push_pairs(&mut body, attrs);
+    }
+    body
+}
+
+fn layer_body(layer: &VoxLayer) -> Vec<u8> {
+    let mut body = Vec::new();
+    push_i32(&mut body, layer.id);
+    push_pairs(&mut body, &layer.attrs);
+    push_i32(&mut body, -1);
+    body
 }
 
 /// Every non-empty object, each as its own model. Local cells are shifted
@@ -4363,6 +4921,8 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
     let mut models: Vec<([i32; 3], Vec<(i32, i32, i32, u8)>)> = Vec::new();
     let mut pending: Option<[i32; 3]> = None;
     let mut nodes: HashMap<i32, VoxNode> = HashMap::new();
+    let mut order = Vec::new();
+    let mut layers = Vec::new();
     let mut palette = None;
     let mut materials = [Material::default(); 256];
 
@@ -4407,15 +4967,22 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
             models.push((dims, voxels));
         } else if &id == b"nTRN" {
             if let Some(node) = parse_trn(body) {
-                nodes.insert(node.id, node);
+                nodes.insert(node.id, node.clone());
+                order.push(node);
             }
         } else if &id == b"nGRP" {
             if let Some(node) = parse_grp(body) {
-                nodes.insert(node.id, node);
+                nodes.insert(node.id, node.clone());
+                order.push(node);
             }
         } else if &id == b"nSHP" {
             if let Some(node) = parse_shp(body) {
-                nodes.insert(node.id, node);
+                nodes.insert(node.id, node.clone());
+                order.push(node);
+            }
+        } else if &id == b"LAYR" {
+            if let Some(layer) = parse_layr(body) {
+                layers.push(layer);
             }
         } else if &id == b"RGBA" {
             if body.len() < 1024 {
@@ -4443,11 +5010,28 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
     if models.is_empty() {
         return Err("file has no models".into());
     }
-    let objects = place_models(&models, &nodes);
+    let (objects, shift) = place_models(&models, &nodes);
+    let graph = if order.is_empty() && layers.is_empty() {
+        None
+    } else {
+        Some(VoxGraph {
+            nodes: order,
+            models: models
+                .iter()
+                .map(|(dims, voxels)| StoredModel {
+                    dims: *dims,
+                    voxels: voxels.clone(),
+                })
+                .collect(),
+            layers,
+            shift,
+        })
+    };
     Ok(Loaded {
         objects,
         palette,
         materials,
+        graph,
     })
 }
 
@@ -4458,16 +5042,42 @@ enum VoxKind {
     Shape,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
+struct VoxGraph {
+    nodes: Vec<VoxNode>,
+    models: Vec<StoredModel>,
+    layers: Vec<VoxLayer>,
+    /// Editor position minus file position. Load recenters the scene; save
+    /// subtracts this so node translations stay in file space.
+    shift: [i32; 3],
+}
+
+#[derive(Clone, PartialEq)]
+struct StoredModel {
+    dims: [i32; 3],
+    voxels: Vec<(i32, i32, i32, u8)>,
+}
+
+#[derive(Clone, PartialEq)]
+struct VoxLayer {
+    id: i32,
+    attrs: Vec<(String, String)>,
+}
+
+#[derive(Clone, PartialEq)]
 struct VoxNode {
     id: i32,
     kind: VoxKind,
     child: i32,
     children: Vec<i32>,
     model_id: i32,
+    models: Vec<(i32, Vec<(String, String)>)>,
     t: [i32; 3],
     rot: u8,
+    layer: i32,
     name: String,
+    attrs: Vec<(String, String)>,
+    frames: Vec<Vec<(String, String)>>,
 }
 
 const ROT_IDENTITY: [[i32; 3]; 3] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
@@ -4566,23 +5176,28 @@ fn mirror_matrix(axis: Axis) -> [[i32; 3]; 3] {
 fn parse_trn(body: &[u8]) -> Option<VoxNode> {
     let mut cursor = body;
     let id = take_i32(&mut cursor)?;
-    let attrs = read_dict(&mut cursor)?;
+    let attrs = read_pairs(&mut cursor)?;
     let child = take_i32(&mut cursor)?;
     let _reserved = take_i32(&mut cursor)?;
-    let _layer = take_i32(&mut cursor)?;
-    let frames = take_i32(&mut cursor)?;
+    let layer = take_i32(&mut cursor)?;
+    let frame_count = take_i32(&mut cursor)?;
+    if frame_count < 0 {
+        return None;
+    }
+    let mut frames = Vec::with_capacity(frame_count as usize);
     let mut t = [0, 0, 0];
     let mut rot = 4u8;
-    for index in 0..frames {
-        let frame = read_dict(&mut cursor)?;
+    for index in 0..frame_count {
+        let frame = read_pairs(&mut cursor)?;
         if index == 0 {
-            if let Some(text) = frame.get("_t") {
+            if let Some(text) = pair(&frame, "_t") {
                 t = parse_translation(text).unwrap_or(t);
             }
-            if let Some(text) = frame.get("_r") {
+            if let Some(text) = pair(&frame, "_r") {
                 rot = text.parse().unwrap_or(4);
             }
         }
+        frames.push(frame);
     }
     Some(VoxNode {
         id,
@@ -4590,16 +5205,20 @@ fn parse_trn(body: &[u8]) -> Option<VoxNode> {
         child,
         children: Vec::new(),
         model_id: -1,
+        models: Vec::new(),
         t,
         rot,
-        name: attrs.get("_name").cloned().unwrap_or_default(),
+        layer,
+        name: pair(&attrs, "_name").unwrap_or("").to_string(),
+        attrs,
+        frames,
     })
 }
 
 fn parse_grp(body: &[u8]) -> Option<VoxNode> {
     let mut cursor = body;
     let id = take_i32(&mut cursor)?;
-    let _attrs = read_dict(&mut cursor)?;
+    let attrs = read_pairs(&mut cursor)?;
     let count = take_i32(&mut cursor)?;
     if count < 0 {
         return None;
@@ -4614,38 +5233,52 @@ fn parse_grp(body: &[u8]) -> Option<VoxNode> {
         child: -1,
         children,
         model_id: -1,
+        models: Vec::new(),
         t: [0, 0, 0],
         rot: 4,
-        name: String::new(),
+        layer: -1,
+        name: pair(&attrs, "_name").unwrap_or("").to_string(),
+        attrs,
+        frames: Vec::new(),
     })
 }
 
 fn parse_shp(body: &[u8]) -> Option<VoxNode> {
     let mut cursor = body;
     let id = take_i32(&mut cursor)?;
-    let attrs = read_dict(&mut cursor)?;
+    let attrs = read_pairs(&mut cursor)?;
     let count = take_i32(&mut cursor)?;
     if count < 0 {
         return None;
     }
-    let mut model_id = -1;
-    for index in 0..count {
+    let mut models = Vec::with_capacity(count as usize);
+    for _ in 0..count {
         let model = take_i32(&mut cursor)?;
-        let _model_attrs = read_dict(&mut cursor)?;
-        if index == 0 {
-            model_id = model;
-        }
+        let model_attrs = read_pairs(&mut cursor)?;
+        models.push((model, model_attrs));
     }
     Some(VoxNode {
         id,
         kind: VoxKind::Shape,
         child: -1,
         children: Vec::new(),
-        model_id,
+        model_id: models.first().map(|(model, _)| *model).unwrap_or(-1),
+        models,
         t: [0, 0, 0],
         rot: 4,
-        name: attrs.get("_name").cloned().unwrap_or_default(),
+        layer: -1,
+        name: pair(&attrs, "_name").unwrap_or("").to_string(),
+        attrs,
+        frames: Vec::new(),
     })
+}
+
+fn parse_layr(body: &[u8]) -> Option<VoxLayer> {
+    let mut cursor = body;
+    let id = take_i32(&mut cursor)?;
+    let attrs = read_pairs(&mut cursor)?;
+    let _reserved = take_i32(&mut cursor)?;
+    Some(VoxLayer { id, attrs })
 }
 
 fn parse_translation(text: &str) -> Option<[i32; 3]> {
@@ -4662,12 +5295,16 @@ struct Placement {
     world_t: [i32; 3],
     world_r: [[i32; 3]; 3],
     name: String,
+    hidden: bool,
+    trn: i32,
+    parent_rot: [[i32; 3]; 3],
+    parent_t: [i32; 3],
 }
 
 fn place_models(
     models: &[([i32; 3], Vec<(i32, i32, i32, u8)>)],
     nodes: &HashMap<i32, VoxNode>,
-) -> Vec<LoadedObject> {
+) -> (Vec<LoadedObject>, [i32; 3]) {
     let placements = if nodes.is_empty() {
         Vec::new()
     } else {
@@ -4678,7 +5315,15 @@ fn place_models(
         };
         let mut out = Vec::new();
         let mut path = HashSet::new();
-        walk_nodes(nodes, root, [0, 0, 0], ROT_IDENTITY, &mut path, &mut out);
+        walk_nodes(
+            nodes,
+            root,
+            [0, 0, 0],
+            ROT_IDENTITY,
+            false,
+            &mut path,
+            &mut out,
+        );
         out
     };
     let placements = if placements.is_empty() {
@@ -4688,6 +5333,10 @@ fn place_models(
             world_t: [dims[0] / 2, dims[1] / 2, dims[2] / 2],
             world_r: ROT_IDENTITY,
             name: String::new(),
+            hidden: false,
+            trn: -1,
+            parent_rot: ROT_IDENTITY,
+            parent_t: [0, 0, 0],
         }]
     } else {
         placements
@@ -4721,28 +5370,50 @@ fn place_models(
             boxed,
             placement.world_r,
             *dims,
+            placement.hidden,
+            placement.trn,
+            placement.parent_rot,
+            placement.parent_t,
+            placement.model_id,
         ));
     }
     if world.is_empty() {
-        return vec![LoadedObject {
-            name: String::new(),
-            cells: HashMap::new(),
-            translation: (0, 0, 0),
-            box_min: (0, 0, 0),
-            dims: (0, 0, 0),
-            rot: ROT_IDENTITY,
-            pivot: (0, 0, 0),
-            model_dims: (0, 0, 0),
-        }];
+        return (
+            vec![LoadedObject {
+                name: String::new(),
+                cells: HashMap::new(),
+                translation: (0, 0, 0),
+                box_min: (0, 0, 0),
+                dims: (0, 0, 0),
+                rot: ROT_IDENTITY,
+                pivot: (0, 0, 0),
+                model_dims: (0, 0, 0),
+                hidden: false,
+                file: None,
+            }],
+            [0, 0, 0],
+        );
     }
     let shift0 = world
         .iter()
-        .find_map(|(_, cells, _, _, _, _)| display_shift(cells))
+        .find_map(|(_, cells, _, _, _, _, _, _, _, _, _)| display_shift(cells))
         .unwrap_or((0, 0, 0));
-    world
+    let objects = world
         .into_iter()
         .map(
-            |(name, cells, anchor, (box_min, dims), world_r, file_dims)| {
+            |(
+                name,
+                cells,
+                anchor,
+                (box_min, dims),
+                world_r,
+                file_dims,
+                hidden,
+                trn,
+                parent_rot,
+                parent_t,
+                model_id,
+            )| {
                 let shift = display_shift(&cells).unwrap_or((0, 0, 0));
                 let local = cells
                     .into_iter()
@@ -4753,6 +5424,7 @@ fn place_models(
                         )
                     })
                     .collect();
+                let link_name = name.clone();
                 let translation = if shift == (0, 0, 0) && local_is_empty(&local) {
                     (
                         anchor[0] + shift0.0,
@@ -4791,10 +5463,19 @@ fn place_models(
                     } else {
                         (file_dims[0], file_dims[1], file_dims[2])
                     },
+                    hidden,
+                    file: (trn >= 0).then(|| FileLink {
+                        trn,
+                        model: model_id,
+                        parent_rot,
+                        parent_t,
+                        name: link_name,
+                    }),
                 }
             },
         )
-        .collect()
+        .collect();
+    (objects, [shift0.0, shift0.1, shift0.2])
 }
 
 fn size_box_world(
@@ -4860,6 +5541,7 @@ fn walk_nodes(
     id: i32,
     t: [i32; 3],
     r: [[i32; 3]; 3],
+    hidden: bool,
     path: &mut HashSet<i32>,
     out: &mut Vec<Placement>,
 ) {
@@ -4869,6 +5551,7 @@ fn walk_nodes(
     if let Some(node) = nodes.get(&id).cloned() {
         match node.kind {
             VoxKind::Transform => {
+                let hidden = hidden || attr_hidden(&node.attrs);
                 let spun = rot_apply(r, node.t);
                 let ct = [t[0] + spun[0], t[1] + spun[1], t[2] + spun[2]];
                 let cr = rot_mul(r, rot_from_byte(node.rot));
@@ -4888,16 +5571,21 @@ fn walk_nodes(
                                 world_t: ct,
                                 world_r: cr,
                                 name,
+                                hidden: hidden || attr_hidden(&shape.attrs),
+                                trn: node.id,
+                                parent_rot: r,
+                                parent_t: t,
                             });
                         }
                     }
                 } else {
-                    walk_nodes(nodes, node.child, ct, cr, path, out);
+                    walk_nodes(nodes, node.child, ct, cr, hidden, path, out);
                 }
             }
             VoxKind::Group => {
+                let hidden = hidden || attr_hidden(&node.attrs);
                 for child in &node.children {
-                    walk_nodes(nodes, *child, t, r, path, out);
+                    walk_nodes(nodes, *child, t, r, hidden, path, out);
                 }
             }
             VoxKind::Shape => {
@@ -4907,6 +5595,10 @@ fn walk_nodes(
                         world_t: t,
                         world_r: r,
                         name: node.name.clone(),
+                        hidden: hidden || attr_hidden(&node.attrs),
+                        trn: -1,
+                        parent_rot: ROT_IDENTITY,
+                        parent_t: [0, 0, 0],
                     });
                 }
             }
@@ -4935,15 +5627,36 @@ fn take_i32(bytes: &mut &[u8]) -> Option<i32> {
     take_u32(bytes).map(|value| value as i32)
 }
 
-fn read_dict(bytes: &mut &[u8]) -> Option<HashMap<String, String>> {
+fn read_pairs(bytes: &mut &[u8]) -> Option<Vec<(String, String)>> {
     let count = take_u32(bytes)? as usize;
-    let mut dict = HashMap::with_capacity(count);
+    let mut pairs = Vec::with_capacity(count);
     for _ in 0..count {
-        let key = take_string(bytes)?;
-        let value = take_string(bytes)?;
-        dict.insert(key, value);
+        pairs.push((take_string(bytes)?, take_string(bytes)?));
     }
-    Some(dict)
+    Some(pairs)
+}
+
+fn pair<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    pairs
+        .iter()
+        .find(|(stored, _)| stored == key)
+        .map(|(_, value)| value.as_str())
+}
+
+fn attr_hidden(pairs: &[(String, String)]) -> bool {
+    pair(pairs, "_hidden") == Some("1")
+}
+
+fn upsert_pair(pairs: &mut Vec<(String, String)>, key: &str, value: Option<String>) {
+    if let Some(value) = value {
+        if let Some(slot) = pairs.iter_mut().find(|(stored, _)| stored == key) {
+            slot.1 = value;
+        } else {
+            pairs.push((key.to_string(), value));
+        }
+    } else {
+        pairs.retain(|(stored, _)| stored != key);
+    }
 }
 
 fn take_u32(bytes: &mut &[u8]) -> Option<u32> {
@@ -5253,6 +5966,8 @@ mod tests {
             rot: ROT_IDENTITY,
             pivot: (0, 0, 0),
             model_dims: (0, 0, 0),
+            hidden: false,
+            file: None,
         });
         session.finish_object_band(
             &ObjectBand {
@@ -5288,6 +6003,8 @@ mod tests {
             rot: ROT_IDENTITY,
             pivot: (0, 0, 0),
             model_dims: (0, 0, 0),
+            hidden: false,
+            file: None,
         });
         session.object_selection = vec![0, 1];
         let down = (Vec3::new(0.5, 0.5, 5.0), Vec3::new(0.0, 0.0, -1.0));
@@ -5316,6 +6033,8 @@ mod tests {
             rot: ROT_IDENTITY,
             pivot: (0, 0, 0),
             model_dims: (0, 0, 0),
+            hidden: false,
+            file: None,
         });
         session.object_selection = vec![0, 1];
         session.rotate_object(Axis::Z, false);
@@ -5496,6 +6215,8 @@ mod tests {
             rot: src.rot,
             pivot: src.pivot,
             model_dims: src.model_dims,
+            hidden: src.hidden,
+            file: src.file.clone(),
         };
         let stay = src
             .cells
@@ -5929,6 +6650,8 @@ mod tests {
                 rot: ROT_IDENTITY,
                 pivot: (0, 0, 0),
                 model_dims: (0, 0, 0),
+                hidden: false,
+                file: None,
             },
             Volume {
                 name: "B".into(),
@@ -5939,6 +6662,8 @@ mod tests {
                 rot: ROT_IDENTITY,
                 pivot: (0, 0, 0),
                 model_dims: (0, 0, 0),
+                hidden: false,
+                file: None,
             },
         ];
         let bytes = save_scene(&objects, &default_palette(), &[Material::default(); 256]).unwrap();
@@ -5948,6 +6673,165 @@ mod tests {
         assert_eq!(loaded.objects[1].name, "B");
         assert_eq!(world_of(&loaded.objects[0], 1), (0, 0, 0));
         assert_eq!(world_of(&loaded.objects[1], 2), (5, 0, 0));
+    }
+
+    fn volume_from(object: &LoadedObject) -> Volume {
+        let mut file = object.file.clone();
+        if let Some(link) = file.as_mut() {
+            link.name = object.name.clone();
+        }
+        Volume {
+            name: object.name.clone(),
+            cells: object.cells.clone(),
+            translation: object.translation,
+            box_min: object.box_min,
+            dims: object.dims,
+            rot: object.rot,
+            pivot: object.pivot,
+            model_dims: object.model_dims,
+            hidden: object.hidden,
+            file,
+        }
+    }
+
+    #[test]
+    fn scene_graph_keeps_hidden_layers_frames_and_groups() {
+        let mut size = Vec::new();
+        for _ in 0..3 {
+            size.extend_from_slice(&1u32.to_le_bytes());
+        }
+        let mut xyzi_a = Vec::new();
+        xyzi_a.extend_from_slice(&1u32.to_le_bytes());
+        xyzi_a.extend_from_slice(&[0, 0, 0, 1]);
+        let mut xyzi_b = Vec::new();
+        xyzi_b.extend_from_slice(&1u32.to_le_bytes());
+        xyzi_b.extend_from_slice(&[0, 0, 0, 2]);
+
+        let mut root = Vec::new();
+        push_i32(&mut root, 0);
+        push_dict(&mut root, &[]);
+        push_i32(&mut root, 1);
+        push_i32(&mut root, -1);
+        push_i32(&mut root, -1);
+        push_i32(&mut root, 1);
+        push_dict(&mut root, &[]);
+
+        let mut group = Vec::new();
+        push_i32(&mut group, 1);
+        push_dict(&mut group, &[("_name", "Group")]);
+        push_i32(&mut group, 2);
+        push_i32(&mut group, 2);
+        push_i32(&mut group, 4);
+
+        let mut hidden = Vec::new();
+        push_i32(&mut hidden, 2);
+        push_dict(&mut hidden, &[("_name", "Hidden"), ("_hidden", "1")]);
+        push_i32(&mut hidden, 3);
+        push_i32(&mut hidden, -1);
+        push_i32(&mut hidden, -1);
+        push_i32(&mut hidden, 2);
+        push_dict(&mut hidden, &[]);
+        push_dict(&mut hidden, &[("_t", "3 0 0"), ("_f", "1")]);
+
+        let mut shown = Vec::new();
+        push_i32(&mut shown, 4);
+        push_dict(&mut shown, &[("_name", "Shown")]);
+        push_i32(&mut shown, 5);
+        push_i32(&mut shown, -1);
+        push_i32(&mut shown, -1);
+        push_i32(&mut shown, 1);
+        push_dict(&mut shown, &[("_t", "6 0 0")]);
+
+        let mut shape_a = Vec::new();
+        push_i32(&mut shape_a, 3);
+        push_dict(&mut shape_a, &[]);
+        push_i32(&mut shape_a, 1);
+        push_i32(&mut shape_a, 0);
+        push_dict(&mut shape_a, &[]);
+
+        let mut shape_b = Vec::new();
+        push_i32(&mut shape_b, 5);
+        push_dict(&mut shape_b, &[]);
+        push_i32(&mut shape_b, 1);
+        push_i32(&mut shape_b, 1);
+        push_dict(&mut shape_b, &[]);
+
+        let mut layer = Vec::new();
+        push_i32(&mut layer, 0);
+        push_dict(&mut layer, &[("_name", "Layer")]);
+        push_i32(&mut layer, -1);
+
+        let mut children = chunk(b"SIZE", &size);
+        children.extend(chunk(b"XYZI", &xyzi_a));
+        children.extend(chunk(b"SIZE", &size));
+        children.extend(chunk(b"XYZI", &xyzi_b));
+        children.extend(chunk(b"nTRN", &root));
+        children.extend(chunk(b"nGRP", &group));
+        children.extend(chunk(b"nTRN", &hidden));
+        children.extend(chunk(b"nSHP", &shape_a));
+        children.extend(chunk(b"nTRN", &shown));
+        children.extend(chunk(b"nSHP", &shape_b));
+        children.extend(chunk(b"LAYR", &layer));
+
+        let loaded = load_vox(&wrap_vox(children)).expect("graph");
+        assert_eq!(loaded.objects.len(), 2);
+        assert!(loaded.objects[0].hidden);
+        assert!(!loaded.objects[1].hidden);
+        assert_eq!(loaded.objects[0].name, "Hidden");
+        assert_eq!(loaded.objects[1].name, "Shown");
+
+        let volumes: Vec<Volume> = loaded.objects.iter().map(volume_from).collect();
+        let bytes = save_document(
+            &volumes,
+            &default_palette(),
+            &[Material::default(); 256],
+            loaded.graph.as_ref(),
+        )
+        .unwrap();
+        assert!(bytes.windows(4).any(|window| window == b"LAYR"));
+        let again = load_vox(&bytes).expect("resave");
+        assert!(again.objects[0].hidden);
+        assert!(!again.objects[1].hidden);
+        assert_eq!(
+            world_of(&again.objects[1], 2).0 - world_of(&again.objects[0], 1).0,
+            6
+        );
+        let graph = again.graph.expect("graph");
+        let hidden_node = graph.nodes.iter().find(|node| node.id == 2).unwrap();
+        assert_eq!(hidden_node.frames.len(), 2);
+        assert_eq!(pair(&hidden_node.frames[1], "_t"), Some("3 0 0"));
+        assert_eq!(pair(&hidden_node.frames[1], "_f"), Some("1"));
+        assert!(attr_hidden(&hidden_node.attrs));
+        let group = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == VoxKind::Group)
+            .unwrap();
+        assert_eq!(group.children, vec![2, 4]);
+        assert_eq!(pair(&graph.layers[0].attrs, "_name"), Some("Layer"));
+
+        let mut moved = volumes;
+        moved[1].translation.0 += 2;
+        let bytes = save_document(
+            &moved,
+            &default_palette(),
+            &[Material::default(); 256],
+            loaded.graph.as_ref(),
+        )
+        .unwrap();
+        let shifted = load_vox(&bytes).expect("moved");
+        let shown = shifted
+            .graph
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|node| node.id == 4)
+            .unwrap();
+        assert_eq!(pair(&shown.frames[0], "_t"), Some("8 0 0"));
+        assert_eq!(
+            world_of(&shifted.objects[1], 2).0 - world_of(&shifted.objects[0], 1).0,
+            8
+        );
     }
 
     #[test]
@@ -5995,6 +6879,8 @@ mod tests {
                 rot: object.rot,
                 pivot: object.pivot,
                 model_dims: object.model_dims,
+                hidden: object.hidden,
+                file: object.file.clone(),
             }],
             &default_palette(),
             &[Material::default(); 256],

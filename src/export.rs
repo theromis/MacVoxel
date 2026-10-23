@@ -250,48 +250,54 @@ fn build_with(session: &Session, options: &MeshExport) -> Built {
         max: [f32::MIN; 3],
         blend: false,
     };
+    let mut quads = Vec::new();
     for object in &session.objects {
-        let shift = [
-            object.translation.0 as f32,
-            object.translation.1 as f32,
-            object.translation.2 as f32,
-        ];
-        for quad in merged_quads(&object.cells, options.merge) {
-            let rgba = session.palette[quad.slot as usize];
-            if rgba[3] != 255 {
-                built.blend = true;
-            }
-            let color = [
-                linear(rgba[0]),
-                linear(rgba[1]),
-                linear(rgba[2]),
-                rgba[3] as f32 / 255.0,
-            ];
-            let uv = [(quad.slot as f32 + 0.5) / 256.0, 0.5];
-            let base = (built.positions.len() / 3) as u32;
-            let normal = y_up(NORMALS[quad.face]);
-            for corner in quad_corners(quad.face, quad.cell, quad.w, quad.h) {
-                let point = y_up([
-                    corner[0] as f32 + shift[0],
-                    corner[1] as f32 + shift[1],
-                    corner[2] as f32 + shift[2],
-                ]);
-                for axis in 0..3 {
-                    built.min[axis] = built.min[axis].min(point[axis]);
-                    built.max[axis] = built.max[axis].max(point[axis]);
-                    built.positions.push(point[axis]);
-                    built.normals.push(normal[axis]);
-                }
-                if options.vertex_colors {
-                    built.extra.extend_from_slice(&color);
-                } else {
-                    built.extra.extend_from_slice(&uv);
-                }
-            }
-            built
-                .indices
-                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        if object.hidden {
+            continue;
         }
+        for mut quad in merged_quads(&object.cells, options.merge) {
+            quad.cell = (
+                quad.cell.0 + object.translation.0,
+                quad.cell.1 + object.translation.1,
+                quad.cell.2 + object.translation.2,
+            );
+            quads.push(quad);
+        }
+    }
+    if options.merge {
+        quads = split_junctions(quads);
+    }
+    for quad in quads {
+        let rgba = session.palette[quad.slot as usize];
+        if rgba[3] != 255 {
+            built.blend = true;
+        }
+        let color = [
+            linear(rgba[0]),
+            linear(rgba[1]),
+            linear(rgba[2]),
+            rgba[3] as f32 / 255.0,
+        ];
+        let uv = [(quad.slot as f32 + 0.5) / 256.0, 0.5];
+        let base = (built.positions.len() / 3) as u32;
+        let normal = y_up(NORMALS[quad.face]);
+        for corner in quad_corners(quad.face, quad.cell, quad.w, quad.h) {
+            let point = y_up([corner[0] as f32, corner[1] as f32, corner[2] as f32]);
+            for axis in 0..3 {
+                built.min[axis] = built.min[axis].min(point[axis]);
+                built.max[axis] = built.max[axis].max(point[axis]);
+                built.positions.push(point[axis]);
+                built.normals.push(normal[axis]);
+            }
+            if options.vertex_colors {
+                built.extra.extend_from_slice(&color);
+            } else {
+                built.extra.extend_from_slice(&uv);
+            }
+        }
+        built
+            .indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
     if built.positions.is_empty() {
         built.min = [0.0; 3];
@@ -406,6 +412,101 @@ fn quad_corners(face: usize, cell: Cell, w: i32, h: i32) -> [[i32; 3]; 4] {
         corners[i] = [cell.0 + point[0], cell.1 + point[1], cell.2 + point[2]];
     }
     corners
+}
+
+/// Geometric corner at the minimum `u` and `v` of a quad. Positive faces
+/// sit on the far side of the cell, so that coordinate is one past `cell`.
+fn split_origin(quad: &GreedyQuad) -> [i32; 3] {
+    let (normal, _, _) = face_axes(quad.face);
+    let mut origin = [quad.cell.0, quad.cell.1, quad.cell.2];
+    if quad.face % 2 == 0 {
+        origin[normal] += 1;
+    }
+    origin
+}
+
+/// Cut a quad where a corner of another face lands in an open edge.
+///
+/// A neighbour on the same oriented plane and the same palette slot is
+/// left alone: greedy merge already made those one surface. A different
+/// plane or a different slot still cuts, or the seam cracks. Each cut adds
+/// vertices on the shared edge, so this repeats until a pass adds nothing.
+fn split_junctions(quads: Vec<GreedyQuad>) -> Vec<GreedyQuad> {
+    let limit = (quads.len() * 4).max(8);
+    let mut quads = quads;
+    for _ in 0..limit {
+        let mut on_plane: BTreeMap<(usize, i32), Vec<([i32; 3], usize, u8)>> = BTreeMap::new();
+        for quad in &quads {
+            for corner in quad_corners(quad.face, quad.cell, quad.w, quad.h) {
+                for axis in 0..3 {
+                    on_plane
+                        .entry((axis, corner[axis]))
+                        .or_default()
+                        .push((corner, quad.face, quad.slot));
+                }
+            }
+        }
+        let mut next = Vec::with_capacity(quads.len());
+        let mut grew = false;
+        for quad in &quads {
+            let (normal, u_axis, v_axis) = face_axes(quad.face);
+            let origin = split_origin(quad);
+            let mut u_splits = vec![0, quad.w];
+            let mut v_splits = vec![0, quad.h];
+            if let Some(hits) = on_plane.get(&(normal, origin[normal])) {
+                for (at, face, slot) in hits {
+                    if *face == quad.face && *slot == quad.slot {
+                        continue;
+                    }
+                    let u = at[u_axis] - origin[u_axis];
+                    let v = at[v_axis] - origin[v_axis];
+                    if u < 0 || u > quad.w || v < 0 || v > quad.h {
+                        continue;
+                    }
+                    if (v == 0 || v == quad.h) && u > 0 && u < quad.w {
+                        u_splits.push(u);
+                    }
+                    if (u == 0 || u == quad.w) && v > 0 && v < quad.h {
+                        v_splits.push(v);
+                    }
+                }
+            }
+            u_splits.sort_unstable();
+            u_splits.dedup();
+            v_splits.sort_unstable();
+            v_splits.dedup();
+            if u_splits.len() > 2 || v_splits.len() > 2 {
+                grew = true;
+            }
+            for pair_v in v_splits.windows(2) {
+                for pair_u in u_splits.windows(2) {
+                    let (u0, du) = (pair_u[0], pair_u[1] - pair_u[0]);
+                    let (v0, dv) = (pair_v[0], pair_v[1] - pair_v[0]);
+                    if du <= 0 || dv <= 0 {
+                        continue;
+                    }
+                    let mut cell = origin;
+                    cell[u_axis] += u0;
+                    cell[v_axis] += v0;
+                    if quad.face % 2 == 0 {
+                        cell[normal] -= 1;
+                    }
+                    next.push(GreedyQuad {
+                        face: quad.face,
+                        cell: (cell[0], cell[1], cell[2]),
+                        w: du,
+                        h: dv,
+                        slot: quad.slot,
+                    });
+                }
+            }
+        }
+        quads = next;
+        if !grew {
+            break;
+        }
+    }
+    quads
 }
 
 fn y_up(p: [f32; 3]) -> [f32; 3] {
@@ -585,6 +686,56 @@ mod tests {
         session.objects[0].cells.insert((0, 0, 0), 1);
         session.objects[0].cells.insert((1, 0, 0), 2);
         assert_eq!(build(&session).indices.len() / 6, 10);
+    }
+
+    #[test]
+    fn a_different_slot_splits_the_long_edge() {
+        let mut session = Session::new();
+        session.objects[0].cells.clear();
+        session.objects[0].cells.insert((0, 0, 0), 1);
+        session.objects[0].cells.insert((1, 0, 0), 1);
+        session.objects[0].cells.insert((2, 0, 0), 1);
+        session.objects[0].cells.insert((2, 1, 0), 2);
+        let merged = merged_quads(&session.objects[0].cells, true);
+        let area = |quads: &[GreedyQuad]| {
+            quads
+                .iter()
+                .filter(|quad| quad.face == 4 && quad.slot == 1)
+                .map(|quad| quad.w * quad.h)
+                .sum::<i32>()
+        };
+        assert!(merged
+            .iter()
+            .any(|quad| quad.face == 4 && quad.slot == 1 && quad.w == 3));
+        assert_eq!(area(&merged), 3);
+        let before = merged.len();
+        let split = split_junctions(merged);
+        assert!(split
+            .iter()
+            .filter(|quad| quad.face == 4 && quad.slot == 1)
+            .all(|quad| quad.w < 3));
+        assert_eq!(area(&split), 3);
+        assert!(split.len() > before);
+    }
+
+    #[test]
+    fn hidden_object_is_left_out_of_the_mesh() {
+        let mut session = Session::new();
+        session.objects[0].cells.clear();
+        session.objects[0].cells.insert((0, 0, 0), 1);
+        session.objects.push(crate::state::Volume {
+            name: "Hidden".into(),
+            cells: session.objects[0].cells.clone(),
+            translation: (3, 0, 0),
+            box_min: (0, 0, 0),
+            dims: (0, 0, 0),
+            rot: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            pivot: (0, 0, 0),
+            model_dims: (0, 0, 0),
+            hidden: true,
+            file: None,
+        });
+        assert_eq!(build(&session).indices.len() / 6, 6);
     }
 
     #[test]

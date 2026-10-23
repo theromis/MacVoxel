@@ -159,6 +159,9 @@ impl SceneGpu {
     fn sync_chunks(&mut self, device: &wgpu::Device, session: &Session) {
         let mut live = std::collections::HashSet::new();
         for (index, object) in session.objects.iter().enumerate() {
+            if object.hidden {
+                continue;
+            }
             let mut buckets: HashMap<(i32, i32, i32), Vec<(crate::state::Cell, [u8; 3])>> =
                 HashMap::new();
             for (&cell, &slot) in &object.cells {

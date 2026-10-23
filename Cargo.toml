@@ -1,9 +1,9 @@
 [package]
-name = "macvoxel-egui"
-version = "0.1.0"
+name = "macvoxel"
+version = "0.0.1"
 edition = "2021"
 publish = false
-description = "egui shell preview for MacVoxel. Does not link the C++/Metal editor."
+description = "MacVoxel voxel editor. The Swift/Metal app lives in legacy/."
 
 [dependencies]
 eframe = { version = "0.31", features = ["wgpu"] }

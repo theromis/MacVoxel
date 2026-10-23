@@ -416,6 +416,9 @@ pub fn write_png(path: &std::path::Path, image: &Image, session: &Session) -> Re
 fn build_world(session: &Session) -> World {
     let mut voxels = HashMap::new();
     for object in &session.objects {
+        if object.hidden {
+            continue;
+        }
         for (cell, slot) in &object.cells {
             if *slot == 0 {
                 continue;

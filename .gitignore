@@ -35,5 +35,6 @@ compile_commands.json
 # Agent memos
 old-memos/
 
-# egui shell preview (cargo)
+# Cargo build output. The old egui/target directory is left from before the crate moved.
+target/
 egui/target/
