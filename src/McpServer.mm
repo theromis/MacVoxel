@@ -9,6 +9,7 @@
 #include "EditVolume.h"
 #include "EditorContext.h"
 #include "Json.h"
+#include "MeshExport.h"
 #include "PathTraceRenderer.h"
 #include "SceneOps.h"
 #include "VoxFile.h"
@@ -48,7 +49,8 @@ const char* kInstructions =
     "object is at most 256 voxels on a side. inspect_document describes the "
     "open file; set_voxel, set_voxels and fill_box edit it; undo and redo "
     "walk that history. set_active_object chooses which object those edits "
-    "apply to. save_file writes the .vox and render writes a path-traced PNG. "
+    "apply to. save_file writes the .vox, render writes a path-traced PNG, and "
+    "export_mesh writes a glTF .glb of the whole scene. "
     "This server is headless: a running MacVoxel window does not update.";
 
 // ---------------------------------------------------------------------------
@@ -389,6 +391,18 @@ Json ToolList() {
                     "Path-trace the whole scene to a PNG. Blocks until the file is "
                     "written. The camera frames the scene.",
                     std::move(render), Required({"path"})));
+    Json mesh = Json::object();
+    mesh.set("path", SString("glTF binary (.glb) file to write"));
+    mesh.set("vertexColors",
+             SBool("Bake each voxel's palette color into COLOR_0 and do not write a "
+                   "texture. Default false (one palette texture)."));
+    tools.push(Tool(
+        "export_mesh",
+        "Export the whole scene as a glTF 2.0 mesh (.glb) that Blender imports. "
+        "Folds the active object's edits in first. Without vertexColors, colors "
+        "are a palette texture; with vertexColors, each vertex carries the palette "
+        "color and no image is written.",
+        std::move(mesh), Required({"path"})));
 
     Json result = Json::object();
     result.set("tools", std::move(tools));
@@ -958,6 +972,30 @@ Json Render(Session* session, const Json& args) {
     return ToolText(j, false);
 }
 
+Json ExportMesh(Session* session, const Json& args) {
+    std::string path;
+    std::string error;
+    if (!ArgString(args, "path", &path, &error)) return ToolError(error);
+    if (path.empty()) return ToolError("path is empty");
+    bool vertex_colors = false;
+    if (const Json* flag = args.find("vertexColors")) {
+        if (!flag->is_bool()) return ToolError("vertexColors must be a boolean");
+        vertex_colors = flag->boolean();
+    }
+    const MeshColorMode mode =
+        vertex_colors ? MeshColorMode::VertexColors : MeshColorMode::Texture;
+    MeshExportStats stats;
+    if (!ExportSceneGlb(session->ctx.document, path, mode, &stats, &error)) {
+        return ToolError(error);
+    }
+    Json j = Json::object();
+    j.set("path", Json::str(path));
+    j.set("colorMode", Json::str(vertex_colors ? "vertex-colors" : "texture"));
+    j.set("triangles", Json::integer(stats.triangles));
+    j.set("vertices", Json::integer(stats.vertices));
+    return ToolText(j, false);
+}
+
 Json CallTool(Session* session, const Json& params) {
     const Json* name = params.find("name");
     if (name == nullptr || !name->is_string()) return ToolError("missing tool name");
@@ -985,6 +1023,7 @@ Json CallTool(Session* session, const Json& params) {
     if (n == "undo") return Undo(session);
     if (n == "redo") return Redo(session);
     if (n == "render") return Render(session, a);
+    if (n == "export_mesh") return ExportMesh(session, a);
     return ToolError("unknown tool " + n);
 }
 

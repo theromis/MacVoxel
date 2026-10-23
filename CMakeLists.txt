@@ -22,6 +22,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_OBJCXX_STANDARD 20)
 set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 
+# CMake records libc++ as an implicit link library of both CXX and OBJCXX.
+# swiftc is the link driver and forwards both, so ld warns
+# "ignoring duplicate libraries: '-lc++'". The C++ language still
+# contributes -lc++; the Obj-C++ copy is the duplicate.
+set(CMAKE_OBJCXX_IMPLICIT_LINK_LIBRARIES "")
+
 # Export compile_commands.json for clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -34,6 +40,7 @@ set(APP_SOURCES
     src/main.mm
     src/Camera.cpp
     src/CliRender.mm
+    src/MeshExport.cpp
     src/RaycastRenderer.mm
     src/PathTraceRenderer.mm
     src/SceneOverlayRenderer.mm

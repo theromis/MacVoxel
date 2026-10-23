@@ -105,6 +105,18 @@ The `-G Ninja` flag is optional but produces faster, cleaner builds.
   C++ `EditorContext`. `MetalScene` (MTKView subclass) hosts the renderers
   inside an `NSViewRepresentable`; SwiftUI never sees C++ directly.
 
+## MCP
+
+`MacVoxel mcp` speaks the Model Context Protocol on stdin/stdout. An agent can
+open and edit a `.vox`, undo, path-trace a PNG, and export a glTF mesh,
+without opening the window. A MacVoxel window that is already running does not
+see those edits. Tool list, coordinates, and the vertex-color export flag are
+in [docs/mcp.md](docs/mcp.md).
+
+```sh
+claude mcp add macvoxel -- "$PWD/build/MacVoxel.app/Contents/MacOS/MacVoxel" mcp
+```
+
 ## License
 
 MIT. See `LICENSE`.
