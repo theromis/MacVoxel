@@ -5,7 +5,9 @@ use egui::{Color32, RichText, Slider, Ui};
 
 use crate::state::*;
 
-const DIM: Color32 = Color32::from_rgb(150, 150, 156);
+/// Secondary labels. Light enough to read on the blue-gray panel
+/// (`#2c333e`), still quieter than the primary text.
+const DIM: Color32 = Color32::from_rgb(196, 206, 220);
 
 pub fn left(ui: &mut Ui, session: &mut Session) {
     tools(ui, session);
@@ -27,12 +29,7 @@ pub fn right(ui: &mut Ui, session: &mut Session) {
 
 fn section(ui: &mut Ui, title: &str) {
     ui.add_space(4.0);
-    ui.label(
-        RichText::new(title.to_ascii_uppercase())
-            .small()
-            .strong()
-            .color(DIM),
-    );
+    ui.label(RichText::new(title.to_ascii_uppercase()).small().strong());
 }
 
 fn segment<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(&str, T)]) {
@@ -162,12 +159,7 @@ fn tools(ui: &mut Ui, session: &mut Session) {
         } else {
             format!("{edge} × {edge}  ({n} cells, on face plane)")
         };
-        ui.label(
-            RichText::new(summary)
-                .small()
-                .monospace()
-                .color(Color32::from_gray(120)),
-        );
+        ui.label(RichText::new(summary).small().monospace().color(DIM));
     }
 
     match session.tool {
@@ -286,7 +278,7 @@ fn generator(ui: &mut Ui, session: &mut Session) {
             ui.label(
                 RichText::new("(shape derives from bounds)")
                     .small()
-                    .color(Color32::from_gray(120)),
+                    .color(DIM),
             );
         }
         GeneratorKind::Cylinder => axis_row(ui, &mut session.gen_axis),
@@ -710,7 +702,7 @@ fn render(ui: &mut Ui, session: &mut Session) {
     ui.label(
         RichText::new(format!("Index {}", session.active_slot))
             .small()
-            .color(Color32::from_gray(120)),
+            .color(DIM),
     );
     let mat = session.material_mut();
     egui::ComboBox::from_id_salt("material")
@@ -831,11 +823,7 @@ fn selection(ui: &mut Ui, session: &mut Session) {
                 session.rotate_selection(axis, false);
             }
         });
-        ui.label(
-            RichText::new("CCW (right-hand rule)")
-                .small()
-                .color(Color32::from_gray(120)),
-        );
+        ui.label(RichText::new("CCW (right-hand rule)").small().color(DIM));
         axis_buttons(ui, "CW", |axis| {
             if object {
                 session.rotate_object(axis, true);
@@ -843,7 +831,7 @@ fn selection(ui: &mut Ui, session: &mut Session) {
                 session.rotate_selection(axis, true);
             }
         });
-        ui.label(RichText::new("CW").small().color(Color32::from_gray(120)));
+        ui.label(RichText::new("CW").small().color(DIM));
         ui.separator();
         section(ui, "Flip");
         axis_buttons(ui, "Flip", |axis| {
@@ -861,14 +849,14 @@ fn selection(ui: &mut Ui, session: &mut Session) {
         ui.label(
             RichText::new(format!("{scope} · {} selected", session.picked.len()))
                 .small()
-                .color(Color32::from_gray(120)),
+                .color(DIM),
         );
         let hint = if object {
             "Drag empty space to select. X Y Z rotate the selection. Shift flips."
         } else {
             "⌘-drag moves it. Paste lands on the hovered face."
         };
-        ui.label(RichText::new(hint).small().color(Color32::from_gray(120)));
+        ui.label(RichText::new(hint).small().color(DIM));
     });
 }
 

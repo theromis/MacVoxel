@@ -155,7 +155,7 @@ impl eframe::App for Shell {
                 ui.label(
                     RichText::new(&self.session.status)
                         .small()
-                        .color(Color32::from_gray(150)),
+                        .color(Color32::from_rgb(196, 206, 220)),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let n = self.session.voxel_count();
@@ -391,30 +391,123 @@ fn parse_port(text: &str) -> Result<u16, String> {
         .map_err(|_| format!("port `{text}` is not a number"))
 }
 
+/// Load a system UI sans close to Godot's editor font (Inter). San Francisco
+/// is the macOS UI face; the others are regular single-face fallbacks.
+/// Collections are skipped so a hairline weight is not picked by index.
+/// Nothing is vendored or downloaded. Returns false when no face is present,
+/// in which case the theme just uses a larger default size.
+fn install_ui_font(ctx: &egui::Context) -> bool {
+    const CANDIDATES: &[&str] = &[
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Geneva.ttf",
+        "/System/Library/Fonts/Supplemental/Verdana.ttf",
+    ];
+    for path in CANDIDATES {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        // TrueType outlines. egui panics on a face ab_glyph cannot parse.
+        if bytes.len() < 12 || bytes[0..4] != [0, 1, 0, 0] {
+            continue;
+        }
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "UI".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            family.insert(0, "UI".to_owned());
+        }
+        ctx.set_fonts(fonts);
+        return true;
+    }
+    false
+}
+
 fn apply_theme(ctx: &egui::Context) {
+    let font_loaded = install_ui_font(ctx);
+
+    // Godot 4 default dark: blue-gray base, accent ~#4591fb.
+    let panel = Color32::from_rgb(44, 51, 62);
+    let window = Color32::from_rgb(36, 42, 52);
+    let recessed = Color32::from_rgb(26, 31, 40);
+    let faint = Color32::from_rgb(54, 62, 76);
+    let button = Color32::from_rgb(62, 71, 86);
+    let button_hover = Color32::from_rgb(80, 92, 110);
+    let border = Color32::from_rgb(118, 132, 154);
+    let border_soft = Color32::from_rgb(86, 98, 116);
+    let text = Color32::from_rgb(230, 234, 242);
+    let text_strong = Color32::from_rgb(246, 248, 252);
+    let accent = Color32::from_rgb(69, 145, 251);
+
     let mut visuals = Visuals::dark();
-    visuals.window_fill = Color32::from_rgb(28, 28, 30);
-    visuals.panel_fill = Color32::from_rgb(32, 32, 36);
-    visuals.extreme_bg_color = Color32::from_rgb(20, 20, 22);
-    visuals.faint_bg_color = Color32::from_rgb(44, 44, 48);
-    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(32, 32, 36);
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(48, 48, 54);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(64, 64, 72);
-    visuals.widgets.active.bg_fill = Color32::from_rgb(48, 96, 168);
-    visuals.widgets.open.bg_fill = Color32::from_rgb(42, 42, 48);
-    visuals.selection.bg_fill = Color32::from_rgb(48, 110, 190);
-    visuals.hyperlink_color = Color32::from_rgb(130, 176, 255);
+    visuals.override_text_color = Some(text);
+    visuals.window_fill = window;
+    visuals.panel_fill = panel;
+    visuals.extreme_bg_color = recessed;
+    visuals.faint_bg_color = faint;
+    visuals.code_bg_color = recessed;
+    visuals.hyperlink_color = Color32::from_rgb(148, 196, 255);
     visuals.window_corner_radius = egui::CornerRadius::ZERO;
+    visuals.window_stroke = egui::Stroke::new(1.0_f32, border_soft);
+    visuals.menu_corner_radius = egui::CornerRadius::same(3);
+    visuals.slider_trailing_fill = true;
+
+    let radius = egui::CornerRadius::same(3);
+    visuals.widgets.noninteractive.bg_fill = panel;
+    visuals.widgets.noninteractive.weak_bg_fill = panel;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, border_soft);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, text);
+    visuals.widgets.noninteractive.corner_radius = radius;
+
+    visuals.widgets.inactive.bg_fill = button;
+    visuals.widgets.inactive.weak_bg_fill = button;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, border);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, text_strong);
+    visuals.widgets.inactive.corner_radius = radius;
+
+    visuals.widgets.hovered.bg_fill = button_hover;
+    visuals.widgets.hovered.weak_bg_fill = button_hover;
+    visuals.widgets.hovered.bg_stroke =
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(168, 182, 204));
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
+    visuals.widgets.hovered.corner_radius = radius;
+    visuals.widgets.hovered.expansion = 0.0;
+
+    visuals.widgets.active.bg_fill = accent;
+    visuals.widgets.active.weak_bg_fill = accent;
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(140, 190, 255));
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
+    visuals.widgets.active.corner_radius = radius;
+    visuals.widgets.active.expansion = 0.0;
+
+    visuals.widgets.open.bg_fill = Color32::from_rgb(48, 56, 70);
+    visuals.widgets.open.weak_bg_fill = button;
+    visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0_f32, border);
+    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, text_strong);
+    visuals.widgets.open.corner_radius = radius;
+
+    visuals.selection.bg_fill = accent;
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 5.0);
     style.spacing.button_padding = egui::vec2(8.0, 3.0);
+    // Godot's editor default is 14. Without a UI face, go larger so the
+    // built-in font stays readable.
+    let (body, small, mono) = if font_loaded {
+        (14.0, 12.0, 13.0)
+    } else {
+        (16.0, 13.0, 14.0)
+    };
     for (kind, size) in [
-        (egui::TextStyle::Body, 13.0),
-        (egui::TextStyle::Button, 13.0),
-        (egui::TextStyle::Small, 11.0),
-        (egui::TextStyle::Monospace, 12.0),
+        (egui::TextStyle::Body, body),
+        (egui::TextStyle::Button, body),
+        (egui::TextStyle::Heading, body + 2.0),
+        (egui::TextStyle::Small, small),
+        (egui::TextStyle::Monospace, mono),
     ] {
         if let Some(font) = style.text_styles.get_mut(&kind) {
             font.size = size;

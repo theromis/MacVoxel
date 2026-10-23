@@ -171,7 +171,7 @@ pub fn show(
             egui::Align2::CENTER_CENTER,
             "empty",
             egui::FontId::proportional(14.0),
-            egui::Color32::from_gray(140),
+            egui::Color32::from_rgb(214, 220, 230),
         );
     }
 
@@ -230,13 +230,32 @@ pub fn show(
 }
 
 fn hud_frame(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+    let chip = egui::Color32::from_rgb(70, 80, 96);
+    let label = egui::Color32::from_rgb(244, 246, 250);
+    let accent = egui::Color32::from_rgb(69, 145, 251);
     egui::Frame::NONE
-        .fill(egui::Color32::from_black_alpha(170))
+        .fill(chip)
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_rgb(176, 188, 206),
+        ))
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::same(4))
         .show(ui, |ui| {
-            ui.horizontal(|ui| body(ui));
+            let visuals = ui.visuals_mut();
+            visuals.override_text_color = Some(label);
+            visuals.selection.bg_fill = accent;
+            visuals.selection.stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
+            visuals.widgets.inactive.fg_stroke.color = label;
+            visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
+            visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
+            visuals.widgets.noninteractive.fg_stroke.color = label;
+            visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+            visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(92, 104, 124);
+            visuals.widgets.active.weak_bg_fill = accent;
+            visuals.widgets.active.bg_fill = accent;
             ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| body(ui));
         });
 }
 

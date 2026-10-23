@@ -184,6 +184,13 @@ pub struct Volume {
     /// means the box is just the occupied span.
     pub box_min: Cell,
     pub dims: (i32, i32, i32),
+    /// Orientation from the file, kept so a save can write `_r` again.
+    /// Identity means the cells already are the model that gets saved.
+    pub rot: [[i32; 3]; 3],
+    /// World position of the model center. Moves with the object's translation.
+    pub pivot: Cell,
+    /// File SIZE that `rot` was applied to. `(0, 0, 0)` saves an identity `_r`.
+    pub model_dims: (i32, i32, i32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -502,6 +509,9 @@ impl Session {
             translation: (0, 0, 0),
             box_min: (0, 0, 0),
             dims: (0, 0, 0),
+            rot: ROT_IDENTITY,
+            pivot: (0, 0, 0),
+            model_dims: (0, 0, 0),
         });
         session.frame_camera();
         session
@@ -867,6 +877,9 @@ impl Session {
             translation: (0, 0, 0),
             box_min: (0, 0, 0),
             dims: (0, 0, 0),
+            rot: ROT_IDENTITY,
+            pivot: (0, 0, 0),
+            model_dims: (0, 0, 0),
         });
         self.selected = 0;
         self.focus_object();
@@ -927,6 +940,9 @@ impl Session {
                 translation: object.translation,
                 box_min: object.box_min,
                 dims: object.dims,
+                rot: object.rot,
+                pivot: object.pivot,
+                model_dims: object.model_dims,
             });
         }
         if self.objects.is_empty() {
@@ -936,6 +952,9 @@ impl Session {
                 translation: (0, 0, 0),
                 box_min: (0, 0, 0),
                 dims: (0, 0, 0),
+                rot: ROT_IDENTITY,
+                pivot: (0, 0, 0),
+                model_dims: (0, 0, 0),
             });
         }
         self.selected = 0;
@@ -970,6 +989,9 @@ impl Session {
             translation: (0, 0, 0),
             box_min: (0, 0, 0),
             dims: (0, 0, 0),
+            rot: ROT_IDENTITY,
+            pivot: (0, 0, 0),
+            model_dims: (0, 0, 0),
         });
         self.selected = 0;
         self.focus_object();
@@ -1296,6 +1318,9 @@ impl Session {
             translation,
             box_min: (0, 0, 0),
             dims: (0, 0, 0),
+            rot: ROT_IDENTITY,
+            pivot: (0, 0, 0),
+            model_dims: (0, 0, 0),
         });
         self.selected = self.objects.len() - 1;
         self.focus_object();
@@ -1306,12 +1331,26 @@ impl Session {
     pub fn duplicate_object(&mut self) {
         self.commit();
         self.checkpoint();
+        let source = self.active();
+        let translation = beside(source);
+        let delta = (
+            translation.0 - source.translation.0,
+            translation.1 - source.translation.1,
+            translation.2 - source.translation.2,
+        );
         let copy = Volume {
-            name: format!("{} copy", self.active().name),
-            cells: self.active().cells.clone(),
-            translation: beside(self.active()),
-            box_min: self.active().box_min,
-            dims: self.active().dims,
+            name: format!("{} copy", source.name),
+            cells: source.cells.clone(),
+            translation,
+            box_min: source.box_min,
+            dims: source.dims,
+            rot: source.rot,
+            pivot: (
+                source.pivot.0 + delta.0,
+                source.pivot.1 + delta.1,
+                source.pivot.2 + delta.2,
+            ),
+            model_dims: source.model_dims,
         };
         self.objects.insert(self.selected + 1, copy);
         self.selected += 1;
@@ -1469,6 +1508,9 @@ impl Session {
                 translation: (0, 0, 0),
                 box_min: (0, 0, 0),
                 dims: (0, 0, 0),
+                rot: ROT_IDENTITY,
+                pivot: (0, 0, 0),
+                model_dims: (0, 0, 0),
             });
         }
         self.selected = self.selected.min(self.objects.len() - 1);
@@ -2094,6 +2136,7 @@ impl Session {
                 let q = rot90(p, axis, clockwise);
                 (q.0 + pivot.0, q.1 + pivot.1, q.2 + pivot.2)
             },
+            axis_matrix(axis, clockwise),
             &format!("Rotated the object 90° {verb} about {name}."),
         );
     }
@@ -2107,11 +2150,17 @@ impl Session {
                 Axis::Y => (c.0, pivot.1 * 2 - c.1, c.2),
                 Axis::Z => (c.0, c.1, pivot.2 * 2 - c.2),
             },
+            mirror_matrix(axis),
             &format!("Flipped the object across {name}."),
         );
     }
 
-    fn transform_object(&mut self, map: impl Fn(Cell, Cell) -> Cell, status: &str) {
+    fn transform_object(
+        &mut self,
+        map: impl Fn(Cell, Cell) -> Cell,
+        turn: [[i32; 3]; 3],
+        status: &str,
+    ) {
         let members: Vec<usize> = self
             .object_selection
             .iter()
@@ -2166,7 +2215,18 @@ impl Session {
         }
         self.checkpoint();
         for (index, next) in rewritten {
-            self.objects[index].cells = next;
+            let volume = &mut self.objects[index];
+            volume.cells = next;
+            if volume.model_dims != (0, 0, 0) {
+                let delta = [
+                    volume.pivot.0 - pivot.0,
+                    volume.pivot.1 - pivot.1,
+                    volume.pivot.2 - pivot.2,
+                ];
+                let spun = rot_apply(turn, delta);
+                volume.pivot = (pivot.0 + spun[0], pivot.1 + spun[1], pivot.2 + spun[2]);
+                volume.rot = rot_mul(turn, volume.rot);
+            }
         }
         self.clear_picked();
         self.commit();
@@ -2442,7 +2502,13 @@ impl Session {
             .iter()
             .copied()
             .filter(|member| *member < self.objects.len())
-            .map(|member| (member, self.objects[member].translation))
+            .map(|member| {
+                (
+                    member,
+                    self.objects[member].translation,
+                    self.objects[member].pivot,
+                )
+            })
             .collect();
         self.object_drag = Some(ObjectDrag {
             index,
@@ -2505,9 +2571,12 @@ impl Session {
         if !drag.changed {
             self.checkpoint();
         }
-        for (member, base) in &drag.bases {
+        for (member, base, pivot) in &drag.bases {
             if let Some(volume) = self.objects.get_mut(*member) {
                 volume.translation = (base.0 + delta.0, base.1 + delta.1, base.2 + delta.2);
+                if volume.model_dims != (0, 0, 0) {
+                    volume.pivot = (pivot.0 + delta.0, pivot.1 + delta.1, pivot.2 + delta.2);
+                }
             }
         }
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
@@ -2587,6 +2656,11 @@ impl Session {
         let volume = self.active_mut();
         volume.box_min = min;
         volume.dims = (dims[0], dims[1], dims[2]);
+        // The margin lives in baked cell space, so the file rotation no longer
+        // describes these voxels.
+        volume.rot = ROT_IDENTITY;
+        volume.model_dims = (0, 0, 0);
+        volume.pivot = (0, 0, 0);
         self.commit();
     }
 
@@ -2947,7 +3021,7 @@ struct ObjectDrag {
     anchor: Vec3,
     normal: Vec3,
     base: Cell,
-    bases: Vec<(usize, Cell)>,
+    bases: Vec<(usize, Cell, Cell)>,
     changed: bool,
 }
 
@@ -3552,19 +3626,26 @@ struct LoadedObject {
     translation: Cell,
     box_min: Cell,
     dims: (i32, i32, i32),
+    rot: [[i32; 3]; 3],
+    pivot: Cell,
+    model_dims: (i32, i32, i32),
 }
 
 struct Loaded {
+    // Read by the .vox tests. The editor applies `objects` instead.
+    #[cfg_attr(not(test), allow(dead_code))]
     cells: HashMap<Cell, u8>,
     objects: Vec<LoadedObject>,
     palette: Option<[[u8; 4]; 256]>,
     materials: [Material; 256],
+    #[cfg_attr(not(test), allow(dead_code))]
     model_count: usize,
 }
 
 /// Single-volume MagicaVoxel file, version 150. The grid is shifted so its
 /// minimum corner is the origin. Empty volumes and any axis longer than 256
 /// are refused. Voxels are sorted so two saves of the same volume match.
+#[cfg_attr(not(test), allow(dead_code))]
 fn save_vox(
     cells: &HashMap<Cell, u8>,
     palette: &[[u8; 4]; 256],
@@ -3636,6 +3717,7 @@ fn save_scene(
         voxels: Vec<(i32, i32, i32, u8)>,
         dims: [i32; 3],
         leaf_t: [i32; 3],
+        rot: [[i32; 3]; 3],
     }
     let mut packed = Vec::new();
     for object in objects {
@@ -3646,6 +3728,21 @@ fn save_scene(
             .map(|(cell, index)| (cell.0, cell.1, cell.2, *index))
             .collect();
         if voxels.is_empty() {
+            continue;
+        }
+        if let Some(file_voxels) = unbake_model(object) {
+            let dims = [
+                object.model_dims.0,
+                object.model_dims.1,
+                object.model_dims.2,
+            ];
+            packed.push(Packed {
+                name: object.name.clone(),
+                voxels: file_voxels,
+                dims,
+                leaf_t: [object.pivot.0, object.pivot.1, object.pivot.2],
+                rot: object.rot,
+            });
             continue;
         }
         let Some((min, dims)) = resolved_box(object) else {
@@ -3673,6 +3770,7 @@ fn save_scene(
                 object.translation.1 + min.1 + half[1],
                 object.translation.2 + min.2 + half[2],
             ],
+            rot: ROT_IDENTITY,
         });
     }
     if packed.is_empty() {
@@ -3698,7 +3796,11 @@ fn save_scene(
     for index in 0..packed.len() {
         kids.push((2 + index * 2) as i32);
     }
-    push_chunk(&mut children, b"nTRN", &trn_body(0, 1, [0, 0, 0], ""));
+    push_chunk(
+        &mut children,
+        b"nTRN",
+        &trn_body(0, 1, [0, 0, 0], ROT_IDENTITY, ""),
+    );
     push_chunk(&mut children, b"nGRP", &grp_body(1, &kids));
     for (index, model) in packed.iter().enumerate() {
         let trn = (2 + index * 2) as i32;
@@ -3706,7 +3808,7 @@ fn save_scene(
         push_chunk(
             &mut children,
             b"nTRN",
-            &trn_body(trn, shp, model.leaf_t, &model.name),
+            &trn_body(trn, shp, model.leaf_t, model.rot, &model.name),
         );
         push_chunk(&mut children, b"nSHP", &shp_body(shp, index as i32));
     }
@@ -3738,7 +3840,7 @@ fn push_dict(out: &mut Vec<u8>, pairs: &[(&str, &str)]) {
     }
 }
 
-fn trn_body(id: i32, child: i32, t: [i32; 3], name: &str) -> Vec<u8> {
+fn trn_body(id: i32, child: i32, t: [i32; 3], rot: [[i32; 3]; 3], name: &str) -> Vec<u8> {
     let mut body = Vec::new();
     push_i32(&mut body, id);
     if name.is_empty() {
@@ -3750,13 +3852,59 @@ fn trn_body(id: i32, child: i32, t: [i32; 3], name: &str) -> Vec<u8> {
     push_i32(&mut body, -1);
     push_i32(&mut body, -1);
     push_i32(&mut body, 1);
-    if t == [0, 0, 0] {
-        push_dict(&mut body, &[]);
-    } else {
-        let text = format!("{} {} {}", t[0], t[1], t[2]);
-        push_dict(&mut body, &[("_t", &text)]);
+    let translation = format!("{} {} {}", t[0], t[1], t[2]);
+    let byte = rot_to_byte(rot).to_string();
+    let mut frame: Vec<(&str, &str)> = Vec::new();
+    if t != [0, 0, 0] {
+        frame.push(("_t", &translation));
     }
+    if !rot_is_identity(rot) {
+        frame.push(("_r", &byte));
+    }
+    push_dict(&mut body, &frame);
     body
+}
+
+/// File-space voxels for a rotated model. `None` when the orientation is
+/// identity, or when a later edit no longer fits the original SIZE.
+fn unbake_model(object: &Volume) -> Option<Vec<(i32, i32, i32, u8)>> {
+    if rot_is_identity(object.rot) || object.model_dims == (0, 0, 0) {
+        return None;
+    }
+    let half = [
+        object.model_dims.0 / 2,
+        object.model_dims.1 / 2,
+        object.model_dims.2 / 2,
+    ];
+    let inverse = rot_transpose(object.rot);
+    let mut voxels = Vec::new();
+    for (cell, slot) in &object.cells {
+        if *slot == 0 {
+            continue;
+        }
+        let delta = [
+            cell.0 + object.translation.0 - object.pivot.0,
+            cell.1 + object.translation.1 - object.pivot.1,
+            cell.2 + object.translation.2 - object.pivot.2,
+        ];
+        let spun = rot_apply(inverse, delta);
+        let local = [spun[0] + half[0], spun[1] + half[1], spun[2] + half[2]];
+        if local[0] < 0
+            || local[1] < 0
+            || local[2] < 0
+            || local[0] >= object.model_dims.0
+            || local[1] >= object.model_dims.1
+            || local[2] >= object.model_dims.2
+        {
+            return None;
+        }
+        voxels.push((local[0], local[1], local[2], *slot));
+    }
+    if voxels.is_empty() {
+        return None;
+    }
+    voxels.sort_unstable();
+    Some(voxels)
 }
 
 fn grp_body(id: i32, children: &[i32]) -> Vec<u8> {
@@ -4020,6 +4168,64 @@ fn rot_apply(matrix: [[i32; 3]; 3], v: [i32; 3]) -> [i32; 3] {
     ]
 }
 
+fn rot_transpose(matrix: [[i32; 3]; 3]) -> [[i32; 3]; 3] {
+    let mut out = [[0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            out[j][i] = matrix[i][j];
+        }
+    }
+    out
+}
+
+fn rot_is_identity(matrix: [[i32; 3]; 3]) -> bool {
+    matrix == ROT_IDENTITY
+}
+
+fn rot_to_byte(matrix: [[i32; 3]; 3]) -> u8 {
+    let mut c0 = 0;
+    let mut c1 = 1;
+    let mut s0 = 1;
+    let mut s1 = 1;
+    let mut s2 = 1;
+    for column in 0..3 {
+        if matrix[0][column] != 0 {
+            c0 = column;
+            s0 = matrix[0][column];
+        }
+        if matrix[1][column] != 0 {
+            c1 = column;
+            s1 = matrix[1][column];
+        }
+        if matrix[2][column] != 0 {
+            s2 = matrix[2][column];
+        }
+    }
+    let sign = |value: i32, bit: u8| if value < 0 { 1 << bit } else { 0 };
+    (c0 as u8) | ((c1 as u8) << 2) | sign(s0, 4) | sign(s1, 5) | sign(s2, 6)
+}
+
+fn axis_matrix(axis: Axis, clockwise: bool) -> [[i32; 3]; 3] {
+    match (axis, clockwise) {
+        (Axis::Z, false) => [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+        (Axis::Z, true) => [[0, 1, 0], [-1, 0, 0], [0, 0, 1]],
+        (Axis::X, false) => [[1, 0, 0], [0, 0, -1], [0, 1, 0]],
+        (Axis::X, true) => [[1, 0, 0], [0, 0, 1], [0, -1, 0]],
+        (Axis::Y, false) => [[0, 0, 1], [0, 1, 0], [-1, 0, 0]],
+        (Axis::Y, true) => [[0, 0, -1], [0, 1, 0], [1, 0, 0]],
+    }
+}
+
+fn mirror_matrix(axis: Axis) -> [[i32; 3]; 3] {
+    let mut matrix = ROT_IDENTITY;
+    match axis {
+        Axis::X => matrix[0][0] = -1,
+        Axis::Y => matrix[1][1] = -1,
+        Axis::Z => matrix[2][2] = -1,
+    }
+    matrix
+}
+
 fn parse_trn(body: &[u8]) -> Option<VoxNode> {
     let mut cursor = body;
     let id = take_i32(&mut cursor)?;
@@ -4171,7 +4377,14 @@ fn place_models(
             );
         }
         let boxed = size_box_world(*dims, half, placement.world_t, placement.world_r);
-        world.push((placement.name, cells, placement.world_t, boxed));
+        world.push((
+            placement.name,
+            cells,
+            placement.world_t,
+            boxed,
+            placement.world_r,
+            *dims,
+        ));
     }
     if world.is_empty() {
         return vec![LoadedObject {
@@ -4180,46 +4393,70 @@ fn place_models(
             translation: (0, 0, 0),
             box_min: (0, 0, 0),
             dims: (0, 0, 0),
+            rot: ROT_IDENTITY,
+            pivot: (0, 0, 0),
+            model_dims: (0, 0, 0),
         }];
     }
     let shift0 = world
         .iter()
-        .find_map(|(_, cells, _, _)| display_shift(cells))
+        .find_map(|(_, cells, _, _, _, _)| display_shift(cells))
         .unwrap_or((0, 0, 0));
     world
         .into_iter()
-        .map(|(name, cells, anchor, (box_min, dims))| {
-            let shift = display_shift(&cells).unwrap_or((0, 0, 0));
-            let local = cells
-                .into_iter()
-                .map(|(cell, color)| {
+        .map(
+            |(name, cells, anchor, (box_min, dims), world_r, file_dims)| {
+                let shift = display_shift(&cells).unwrap_or((0, 0, 0));
+                let local = cells
+                    .into_iter()
+                    .map(|(cell, color)| {
+                        (
+                            (cell.0 + shift.0, cell.1 + shift.1, cell.2 + shift.2),
+                            color,
+                        )
+                    })
+                    .collect();
+                let translation = if shift == (0, 0, 0) && local_is_empty(&local) {
                     (
-                        (cell.0 + shift.0, cell.1 + shift.1, cell.2 + shift.2),
-                        color,
+                        anchor[0] + shift0.0,
+                        anchor[1] + shift0.1,
+                        anchor[2] + shift0.2,
                     )
-                })
-                .collect();
-            let translation = if shift == (0, 0, 0) && local_is_empty(&local) {
-                (
-                    anchor[0] + shift0.0,
-                    anchor[1] + shift0.1,
-                    anchor[2] + shift0.2,
-                )
-            } else {
-                (shift0.0 - shift.0, shift0.1 - shift.1, shift0.2 - shift.2)
-            };
-            LoadedObject {
-                name,
-                cells: local,
-                translation,
-                box_min: (
-                    box_min.0 + shift.0,
-                    box_min.1 + shift.1,
-                    box_min.2 + shift.2,
-                ),
-                dims,
-            }
-        })
+                } else {
+                    (shift0.0 - shift.0, shift0.1 - shift.1, shift0.2 - shift.2)
+                };
+                LoadedObject {
+                    name,
+                    cells: local,
+                    translation,
+                    box_min: (
+                        box_min.0 + shift.0,
+                        box_min.1 + shift.1,
+                        box_min.2 + shift.2,
+                    ),
+                    dims,
+                    rot: if rot_is_identity(world_r) {
+                        ROT_IDENTITY
+                    } else {
+                        world_r
+                    },
+                    pivot: if rot_is_identity(world_r) {
+                        (0, 0, 0)
+                    } else {
+                        (
+                            anchor[0] + shift0.0,
+                            anchor[1] + shift0.1,
+                            anchor[2] + shift0.2,
+                        )
+                    },
+                    model_dims: if rot_is_identity(world_r) {
+                        (0, 0, 0)
+                    } else {
+                        (file_dims[0], file_dims[1], file_dims[2])
+                    },
+                }
+            },
+        )
         .collect()
 }
 
@@ -4676,6 +4913,9 @@ mod tests {
             translation: (4, 0, 0),
             box_min: (0, 0, 0),
             dims: (0, 0, 0),
+            rot: ROT_IDENTITY,
+            pivot: (0, 0, 0),
+            model_dims: (0, 0, 0),
         });
         session.finish_object_band(
             &ObjectBand {
@@ -4708,6 +4948,9 @@ mod tests {
             translation: (5, 0, 0),
             box_min: (0, 0, 0),
             dims: (0, 0, 0),
+            rot: ROT_IDENTITY,
+            pivot: (0, 0, 0),
+            model_dims: (0, 0, 0),
         });
         session.object_selection = vec![0, 1];
         let down = (Vec3::new(0.5, 0.5, 5.0), Vec3::new(0.0, 0.0, -1.0));
@@ -4733,6 +4976,9 @@ mod tests {
             translation: (4, 0, 0),
             box_min: (0, 0, 0),
             dims: (0, 0, 0),
+            rot: ROT_IDENTITY,
+            pivot: (0, 0, 0),
+            model_dims: (0, 0, 0),
         });
         session.object_selection = vec![0, 1];
         session.rotate_object(Axis::Z, false);
@@ -5257,6 +5503,9 @@ mod tests {
                 translation: (0, 0, 0),
                 box_min: (0, 0, 0),
                 dims: (0, 0, 0),
+                rot: ROT_IDENTITY,
+                pivot: (0, 0, 0),
+                model_dims: (0, 0, 0),
             },
             Volume {
                 name: "B".into(),
@@ -5264,6 +5513,9 @@ mod tests {
                 translation: (5, 0, 0),
                 box_min: (0, 0, 0),
                 dims: (0, 0, 0),
+                rot: ROT_IDENTITY,
+                pivot: (0, 0, 0),
+                model_dims: (0, 0, 0),
             },
         ];
         let bytes = save_scene(&objects, &default_palette(), &[Material::default(); 256]).unwrap();
@@ -5308,6 +5560,28 @@ mod tests {
         let object = &loaded.objects[0];
         let low = object.cells.iter().find(|(_, slot)| **slot == 3).unwrap().0;
         let high = object.cells.iter().find(|(_, slot)| **slot == 7).unwrap().0;
+        assert_eq!((high.0 - low.0, high.1 - low.1, high.2 - low.2), (0, 1, 0));
+        assert_eq!(rot_to_byte(object.rot), 8);
+        let bytes = save_scene(
+            &[Volume {
+                name: object.name.clone(),
+                cells: object.cells.clone(),
+                translation: object.translation,
+                box_min: object.box_min,
+                dims: object.dims,
+                rot: object.rot,
+                pivot: object.pivot,
+                model_dims: object.model_dims,
+            }],
+            &default_palette(),
+            &[Material::default(); 256],
+        )
+        .unwrap();
+        let again = load_vox(&bytes).expect("resaved rotation");
+        let saved = &again.objects[0];
+        assert_eq!(rot_to_byte(saved.rot), 8);
+        let low = saved.cells.iter().find(|(_, slot)| **slot == 3).unwrap().0;
+        let high = saved.cells.iter().find(|(_, slot)| **slot == 7).unwrap().0;
         assert_eq!((high.0 - low.0, high.1 - low.1, high.2 - low.2), (0, 1, 0));
     }
 

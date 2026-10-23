@@ -79,6 +79,7 @@ struct Built {
 }
 
 /// glTF Y-up positions of every exposed corner. Used by the export test.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn scene_positions(session: &Session) -> Vec<[f32; 3]> {
     let built = build(session);
     let mut out = Vec::with_capacity(built.positions.len() / 3);
