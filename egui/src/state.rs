@@ -311,9 +311,16 @@ pub struct Session {
     stroke: Option<Stroke>,
     stroke_serial: u32,
     grab: Grab,
-    pending: Option<Vec<Volume>>,
-    undo: Vec<Vec<Volume>>,
-    redo: Vec<Vec<Volume>>,
+    /// Slots highlighted in the palette. The active slot is always one of them.
+    pub palette_slots: HashSet<u8>,
+    color_clipboard: Option<[u8; 4]>,
+    palette_press: Option<(i32, i32)>,
+    palette_current: Option<(i32, i32)>,
+    palette_shift: bool,
+    pub palette_anchor: u8,
+    pending: Option<Snapshot>,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
 }
 
 const IDLE: &str = "Right-drag orbits, scroll zooms, left-drag edits with the active tool. Path tracing stays in the Metal app.";
@@ -410,6 +417,12 @@ impl Session {
             stroke: None,
             stroke_serial: 1,
             grab: Grab::None,
+            palette_slots: HashSet::from([36]),
+            color_clipboard: None,
+            palette_press: None,
+            palette_current: None,
+            palette_shift: false,
+            palette_anchor: 36,
             pending: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -475,6 +488,243 @@ impl Session {
         }
         self.palette[slot as usize] = [rgb[0], rgb[1], rgb[2], 255];
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+    }
+
+    pub fn palette_drag(&self) -> Option<((i32, i32), (i32, i32))> {
+        Some((self.palette_press?, self.palette_current?))
+    }
+
+    pub fn begin_palette_drag(&mut self, cell: (i32, i32), shift: bool) {
+        self.palette_press = Some(cell);
+        self.palette_current = Some(cell);
+        self.palette_shift = shift;
+    }
+
+    pub fn update_palette_drag(&mut self, cell: (i32, i32)) {
+        if self.palette_press.is_some() {
+            self.palette_current = Some(cell);
+        }
+    }
+
+    pub fn finish_palette_drag(&mut self) {
+        let Some(start) = self.palette_press.take() else {
+            return;
+        };
+        let cell = self.palette_current.take().unwrap_or(start);
+        let shift = self.palette_shift;
+        if start == cell {
+            let slot = palette_slot_at(cell.0, cell.1);
+            if slot != 0 {
+                self.select_palette_slot(slot, shift);
+            }
+        } else {
+            self.select_palette_range(start.0, start.1, cell.0, cell.1, shift);
+        }
+    }
+
+    pub fn select_palette_slot(&mut self, slot: u8, extend: bool) {
+        if slot == 0 {
+            return;
+        }
+        if !extend {
+            self.palette_slots.clear();
+            self.palette_slots.insert(slot);
+        } else if !self.palette_slots.remove(&slot) {
+            self.palette_slots.insert(slot);
+        } else if self.palette_slots.is_empty() {
+            self.palette_slots.insert(slot);
+        }
+        self.active_slot = slot;
+    }
+
+    pub fn select_palette_range(&mut self, c0: i32, r0: i32, c1: i32, r1: i32, shift: bool) {
+        if !shift {
+            self.palette_slots.clear();
+        }
+        let min_c = c0.min(c1);
+        let max_c = c0.max(c1);
+        let min_r = r0.min(r1);
+        let max_r = r0.max(r1);
+        for row in min_r..=max_r {
+            for col in min_c..=max_c {
+                let slot = palette_slot_at(col, row);
+                if slot == 0 {
+                    continue;
+                }
+                if shift {
+                    if !self.palette_slots.remove(&slot) {
+                        self.palette_slots.insert(slot);
+                    }
+                } else {
+                    self.palette_slots.insert(slot);
+                }
+            }
+        }
+        let end = palette_slot_at(c1, r1);
+        if end != 0 {
+            self.palette_slots.insert(end);
+            self.active_slot = end;
+        }
+    }
+
+    pub fn note_palette_anchor(&mut self, slot: u8) {
+        if slot != 0 {
+            self.palette_anchor = slot;
+        }
+    }
+
+    fn ensure_palette_anchor(&mut self, anchor: u8) {
+        if anchor == 0 {
+            return;
+        }
+        if !self.palette_slots.contains(&anchor) {
+            self.palette_slots.clear();
+            self.palette_slots.insert(anchor);
+            self.active_slot = anchor;
+        }
+    }
+
+    pub fn palette_action_count(&self, anchor: u8) -> usize {
+        if anchor == 0 {
+            return 0;
+        }
+        if self.palette_slots.contains(&anchor) {
+            self.palette_slots.len()
+        } else {
+            1
+        }
+    }
+
+    pub fn has_color_clipboard(&self) -> bool {
+        self.color_clipboard.is_some()
+    }
+
+    pub fn copy_palette_color(&mut self, slot: u8) {
+        if slot == 0 {
+            return;
+        }
+        self.color_clipboard = Some(self.palette[slot as usize]);
+        self.status = format!("Copied palette {slot}.");
+    }
+
+    pub fn paste_palette_color(&mut self, anchor: u8) {
+        let Some(color) = self.color_clipboard else {
+            return;
+        };
+        self.ensure_palette_anchor(anchor);
+        self.checkpoint();
+        for slot in self.palette_slots.iter().copied() {
+            if slot != 0 {
+                self.palette[slot as usize] = color;
+            }
+        }
+        self.commit();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.status = "Pasted the copied color.".into();
+    }
+
+    pub fn make_palette_gradient(&mut self, anchor: u8) {
+        self.ensure_palette_anchor(anchor);
+        let mut indices: Vec<u8> = self
+            .palette_slots
+            .iter()
+            .copied()
+            .filter(|s| *s != 0)
+            .collect();
+        indices.sort_unstable();
+        let Some(&lo) = indices.first() else {
+            return;
+        };
+        let Some(&hi) = indices.last() else {
+            return;
+        };
+        if hi.saturating_sub(lo) < 2 {
+            return;
+        }
+        let c0 = self.palette[lo as usize];
+        let c1 = self.palette[hi as usize];
+        let span = (hi - lo) as f32;
+        self.checkpoint();
+        for slot in indices {
+            if slot == lo || slot == hi {
+                continue;
+            }
+            let t = (slot - lo) as f32 / span;
+            self.palette[slot as usize] = lerp_color(c0, c1, t);
+        }
+        self.commit();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.status = format!("Gradient from {lo} to {hi}.");
+    }
+
+    pub fn select_voxels_by_color(&mut self, anchor: u8) {
+        self.ensure_palette_anchor(anchor);
+        let slots = self.palette_slots.clone();
+        let matched = self
+            .active()
+            .cells
+            .iter()
+            .filter(|(_, slot)| slots.contains(*slot))
+            .map(|(cell, _)| *cell)
+            .collect();
+        self.set_picked(matched);
+    }
+
+    pub fn paint_picked_with_color(&mut self, anchor: u8) {
+        if self.picked.is_empty() {
+            return;
+        }
+        self.ensure_palette_anchor(anchor);
+        if self.palette_slots.len() != 1 {
+            return;
+        }
+        let Some(slot) = self.palette_slots.iter().copied().find(|slot| *slot != 0) else {
+            return;
+        };
+        self.recolor_picked(|_| slot);
+    }
+
+    pub fn paint_picked_with_random_colors(&mut self, anchor: u8) {
+        if self.picked.is_empty() {
+            return;
+        }
+        self.ensure_palette_anchor(anchor);
+        let mut slots: Vec<u8> = self
+            .palette_slots
+            .iter()
+            .copied()
+            .filter(|s| *s != 0)
+            .collect();
+        slots.sort_unstable();
+        if slots.len() < 2 {
+            return;
+        }
+        self.recolor_picked(|cell| {
+            let h = (cell.0 as u32).wrapping_mul(73856093)
+                ^ (cell.1 as u32).wrapping_mul(19349663)
+                ^ (cell.2 as u32).wrapping_mul(83492791);
+            slots[(h as usize) % slots.len()]
+        });
+    }
+
+    fn recolor_picked(&mut self, mut choose: impl FnMut(Cell) -> u8) {
+        if self.picked.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let picked: Vec<Cell> = self.picked.iter().copied().collect();
+        {
+            let map = &mut self.active_mut().cells;
+            for cell in picked {
+                let slot = choose(cell);
+                if slot != 0 {
+                    map.insert(cell, slot);
+                }
+            }
+        }
+        self.commit();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.status = format!("Recolored {} voxels.", self.picked.len());
     }
 
     pub fn material_mut(&mut self) -> &mut Material {
@@ -712,15 +962,29 @@ impl Session {
         }
     }
 
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            objects: self.objects.clone(),
+            palette: self.palette,
+        }
+    }
+
+    fn restore(&mut self, snap: Snapshot) -> Snapshot {
+        Snapshot {
+            objects: std::mem::replace(&mut self.objects, snap.objects),
+            palette: std::mem::replace(&mut self.palette, snap.palette),
+        }
+    }
+
     fn checkpoint(&mut self) {
         if self.pending.is_none() {
-            self.pending = Some(self.objects.clone());
+            self.pending = Some(self.snapshot());
         }
     }
 
     fn commit(&mut self) {
         if let Some(prev) = self.pending.take() {
-            if prev != self.objects {
+            if prev.objects != self.objects || prev.palette != self.palette {
                 self.undo.push(prev);
                 self.redo.clear();
                 if self.undo.len() > 40 {
@@ -735,11 +999,13 @@ impl Session {
         let Some(prev) = self.undo.pop() else {
             return;
         };
-        let cur = std::mem::replace(&mut self.objects, prev);
-        self.redo.push(cur);
+        let cur = self.restore(prev);
         self.clamp_selection();
-        self.clear_picked();
+        if cur.objects != self.objects {
+            self.clear_picked();
+        }
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.redo.push(cur);
     }
 
     pub fn redo(&mut self) {
@@ -747,11 +1013,13 @@ impl Session {
         let Some(next) = self.redo.pop() else {
             return;
         };
-        let cur = std::mem::replace(&mut self.objects, next);
-        self.undo.push(cur);
+        let cur = self.restore(next);
         self.clamp_selection();
-        self.clear_picked();
+        if cur.objects != self.objects {
+            self.clear_picked();
+        }
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.undo.push(cur);
     }
 
     fn clamp_selection(&mut self) {
@@ -1746,6 +2014,12 @@ enum Cmd {
     Deselect,
 }
 
+#[derive(Clone, PartialEq)]
+struct Snapshot {
+    objects: Vec<Volume>,
+    palette: [[u8; 4]; 256],
+}
+
 #[derive(Clone)]
 struct VoxelClipboard {
     origin: Cell,
@@ -1778,6 +2052,28 @@ fn rot90(p: Cell, axis: Axis, clockwise: bool) -> Cell {
         (Axis::Y, false) => (z, y, -x),
         (Axis::Y, true) => (-z, y, x),
     }
+}
+
+pub fn palette_slot_at(col: i32, row: i32) -> u8 {
+    if !(0..8).contains(&col) || !(0..32).contains(&row) {
+        return 0;
+    }
+    let n = (32 - 1 - row) * 8 + col + 1;
+    if (1..256).contains(&n) {
+        n as u8
+    } else {
+        0
+    }
+}
+
+fn lerp_color(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t + 0.5).clamp(0.0, 255.0) as u8;
+    [
+        mix(a[0], b[0]),
+        mix(a[1], b[1]),
+        mix(a[2], b[2]),
+        mix(a[3], b[3]),
+    ]
 }
 
 fn min_corner(cells: impl IntoIterator<Item = Cell>) -> Cell {
@@ -2660,6 +2956,73 @@ mod tests {
         assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
         session.paste_clipboard();
         assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
+    }
+
+    #[test]
+    fn palette_range_selects_the_rectangle() {
+        let mut session = Session::new();
+        session.select_palette_range(0, 31, 1, 30, false);
+        assert!(session.palette_slots.contains(&1));
+        assert!(session.palette_slots.contains(&2));
+        assert!(session.palette_slots.contains(&9));
+        assert!(session.palette_slots.contains(&10));
+        assert_eq!(session.palette_slots.len(), 4);
+        assert_eq!(session.active_slot, 10);
+    }
+
+    #[test]
+    fn paste_color_and_gradient_undo() {
+        let mut session = Session::new();
+        session.palette[1] = [0, 0, 0, 255];
+        session.palette[2] = [0, 0, 0, 255];
+        session.palette[3] = [255, 0, 0, 255];
+        session.palette_slots.clear();
+        session.palette_slots.insert(1);
+        session.palette_slots.insert(2);
+        session.palette_slots.insert(3);
+        session.copy_palette_color(3);
+        session.paste_palette_color(1);
+        assert_eq!(session.palette[1][0], 255);
+        assert_eq!(session.palette[2][0], 255);
+        session.undo();
+        assert_eq!(session.palette[1][0], 0);
+        assert_eq!(session.palette[2][0], 0);
+        session.make_palette_gradient(1);
+        assert_eq!(session.palette[2][0], 128);
+        assert_eq!(session.palette[1][0], 0);
+        assert_eq!(session.palette[3][0], 255);
+    }
+
+    #[test]
+    fn select_voxels_by_color_matches_the_chosen_slots() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 1);
+        session.active_mut().cells.insert((1, 0, 0), 2);
+        session.active_mut().cells.insert((2, 0, 0), 1);
+        session.palette_slots.clear();
+        session.palette_slots.insert(1);
+        session.select_voxels_by_color(1);
+        assert!(session.picked.contains(&(0, 0, 0)));
+        assert!(session.picked.contains(&(2, 0, 0)));
+        assert!(!session.picked.contains(&(1, 0, 0)));
+        session.palette_slots.clear();
+        session.palette_slots.insert(9);
+        session.paint_picked_with_color(9);
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&9));
+        assert_eq!(session.active().cells.get(&(2, 0, 0)), Some(&9));
+        session.undo();
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&1));
+        session.picked.insert((0, 0, 0));
+        session.picked.insert((2, 0, 0));
+        session.palette_slots.clear();
+        session.palette_slots.insert(1);
+        session.palette_slots.insert(2);
+        session.paint_picked_with_random_colors(1);
+        let a = session.active().cells[&(0, 0, 0)];
+        let b = session.active().cells[&(2, 0, 0)];
+        assert!(a == 1 || a == 2);
+        assert!(b == 1 || b == 2);
     }
 
     #[test]
