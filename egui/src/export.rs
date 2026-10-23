@@ -229,6 +229,7 @@ fn encode(session: &Session, options: &MeshExport) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+#[cfg(test)]
 fn build(session: &Session) -> Built {
     build_with(
         session,
