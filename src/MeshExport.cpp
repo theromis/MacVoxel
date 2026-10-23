@@ -505,6 +505,107 @@ bool MergeQuads(std::vector<Quad>* quads, std::string* error) {
     return true;
 }
 
+struct IVec3 {
+    int32_t x = 0;
+    int32_t y = 0;
+    int32_t z = 0;
+};
+
+IVec3 QuadCorner(const Quad& quad, int corner) {
+    const int su = (corner == 1 || corner == 2) ? quad.w : 0;
+    const int sv = (corner == 2 || corner == 3) ? quad.h : 0;
+    return IVec3{
+        quad.x + kCorner[quad.face][0][0] + kTangentU[quad.face][0] * su +
+            kTangentV[quad.face][0] * sv,
+        quad.y + kCorner[quad.face][0][1] + kTangentU[quad.face][1] * su +
+            kTangentV[quad.face][1] * sv,
+        quad.z + kCorner[quad.face][0][2] + kTangentU[quad.face][2] * su +
+            kTangentV[quad.face][2] * sv,
+    };
+}
+
+int32_t Comp(IVec3 v, int axis) {
+    if (axis == 0)
+        return v.x;
+    if (axis == 1)
+        return v.y;
+    return v.z;
+}
+
+// A merged quad's edge can carry a corner of a neighbouring face in its
+// open span (different slot, or a step). Cut the quad on those parameters
+// so every such corner is a vertex of the pieces, not a T-junction.
+// Cutting one face adds vertices on the edge it shares with the next face,
+// so repeat until a pass adds nothing.
+bool SplitTJunctions(std::vector<Quad>* quads, std::string* error) {
+    const size_t limit = std::max<size_t>(quads->size() * 4, 8);
+    for (size_t pass = 0; pass < limit; ++pass) {
+        std::map<std::pair<int, int32_t>, std::vector<IVec3>> on_plane;
+        for (const Quad& quad : *quads) {
+            for (int c = 0; c < 4; ++c) {
+                const IVec3 v = QuadCorner(quad, c);
+                on_plane[{0, v.x}].push_back(v);
+                on_plane[{1, v.y}].push_back(v);
+                on_plane[{2, v.z}].push_back(v);
+            }
+        }
+        std::vector<Quad> split;
+        split.reserve(quads->size());
+        bool grew = false;
+        for (const Quad& quad : *quads) {
+            const int u_axis = AxisOf(kTangentU[quad.face]);
+            const int v_axis = AxisOf(kTangentV[quad.face]);
+            const int n_axis = quad.face / 2;
+            const IVec3 c0 = QuadCorner(quad, 0);
+            const auto found = on_plane.find({n_axis, Comp(c0, n_axis)});
+            std::vector<int32_t> u_splits{0, quad.w};
+            std::vector<int32_t> v_splits{0, quad.h};
+            if (found != on_plane.end()) {
+                for (const IVec3& p : found->second) {
+                    const int32_t u = Comp(p, u_axis) - Comp(c0, u_axis);
+                    const int32_t v = Comp(p, v_axis) - Comp(c0, v_axis);
+                    if (u < 0 || u > quad.w || v < 0 || v > quad.h)
+                        continue;
+                    if ((v == 0 || v == quad.h) && u > 0 && u < quad.w)
+                        u_splits.push_back(u);
+                    if ((u == 0 || u == quad.w) && v > 0 && v < quad.h)
+                        v_splits.push_back(v);
+                }
+            }
+            std::sort(u_splits.begin(), u_splits.end());
+            std::sort(v_splits.begin(), v_splits.end());
+            u_splits.erase(std::unique(u_splits.begin(), u_splits.end()), u_splits.end());
+            v_splits.erase(std::unique(v_splits.begin(), v_splits.end()), v_splits.end());
+            if (u_splits.size() > 2 || v_splits.size() > 2)
+                grew = true;
+            for (size_t j = 0; j + 1 < v_splits.size(); ++j) {
+                for (size_t i = 0; i + 1 < u_splits.size(); ++i) {
+                    const int32_t u0 = u_splits[i];
+                    const int32_t v0 = v_splits[j];
+                    const int32_t du = u_splits[i + 1] - u0;
+                    const int32_t dv = v_splits[j + 1] - v0;
+                    if (du <= 0 || dv <= 0)
+                        return Fail(error, "internal mesh junction error");
+                    IVec3 origin{
+                        c0.x + kTangentU[quad.face][0] * u0 + kTangentV[quad.face][0] * v0 -
+                            kCorner[quad.face][0][0],
+                        c0.y + kTangentU[quad.face][1] * u0 + kTangentV[quad.face][1] * v0 -
+                            kCorner[quad.face][0][1],
+                        c0.z + kTangentU[quad.face][2] * u0 + kTangentV[quad.face][2] * v0 -
+                            kCorner[quad.face][0][2],
+                    };
+                    split.push_back(
+                        Quad{origin.x, origin.y, origin.z, quad.face, quad.palette, du, dv});
+                }
+            }
+        }
+        *quads = std::move(split);
+        if (!grew)
+            return true;
+    }
+    return Fail(error, "internal mesh junction error");
+}
+
 // Palette slots are sRGB 8-bit. The PNG stores those bytes unchanged:
 // glTF baseColorTexture is sRGB, and Blender imports it with an sRGB
 // colorspace, so the swatch matches the palette.
@@ -716,8 +817,12 @@ bool ExportSceneGlb(Document& doc, const std::string& path, MeshColorMode mode,
         std::vector<Quad> quads;
         if (!CollectQuads(flat, &quads, error))
             return false;
-        if (merge && !MergeQuads(&quads, error))
-            return false;
+        if (merge) {
+            if (!MergeQuads(&quads, error))
+                return false;
+            if (!SplitTJunctions(&quads, error))
+                return false;
+        }
         const std::vector<uint8_t> glb = BuildGlb(quads, doc.palette, mode, stats, error);
         if (glb.empty())
             return false;

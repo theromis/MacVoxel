@@ -259,6 +259,13 @@ Json SBool(const char* desc) {
     return j;
 }
 
+Json SNumber(const char* desc) {
+    Json j = Json::object();
+    j.set("type", Json::str("number"));
+    j.set("description", Json::str(desc));
+    return j;
+}
+
 Json Required(std::initializer_list<const char*> keys) {
     Json a = Json::array();
     for (const char* k : keys) a.push(Json::str(k));
@@ -341,7 +348,14 @@ Json ToolList() {
     render.set("samples", SInt("Path-trace samples, 1..128. Default 16."));
     render.set("bounces", SInt("Max bounces, 0..8. Default 4."));
     render.set("seed", SInt("Sampling seed. Default 1."));
-    render.set("denoise", SBool("Run Open Image Denoise before writing. Default false."));
+    render.set("denoise", SBool("Run Open Image Denoise before writing. Default true."));
+    render.set("yaw", SNumber("Orbit yaw in degrees. Omit to keep the framing angle (30)."));
+    render.set("pitch",
+               SNumber("Orbit pitch in degrees, -90..90. 90 looks straight down. "
+                       "Omit to keep the framing angle (25)."));
+    render.set("distance",
+               SNumber("Multiple of the framing distance, greater than 0 and at most 100. "
+                       "Default 1."));
 
     Json tools = Json::array();
     tools.push(Tool("new_document",
@@ -408,7 +422,8 @@ Json ToolList() {
     tools.push(Tool("redo", "Redo the last undone edit.", Json::object(), Json::array()));
     tools.push(Tool("render",
                     "Path-trace the whole scene to a PNG. Blocks until the file is "
-                    "written. The camera frames the scene.",
+                    "written. The camera frames the scene; yaw, pitch, and distance "
+                    "orbit that frame.",
                     std::move(render), Required({"path"})));
     Json mesh = Json::object();
     mesh.set("path", SString("glTF binary (.glb) file to write"));
@@ -982,6 +997,22 @@ void FitCamera(Camera* camera, const Document& doc) {
     camera->Frame(target, static_cast<float>(extent));
 }
 
+// Missing key leaves *present false. Present non-numbers are an error.
+bool ArgNumber(const Json& args, const char* key, double* out, bool* present, std::string* error) {
+    const Json* v = args.find(key);
+    if (v == nullptr) {
+        *present = false;
+        return true;
+    }
+    *present = true;
+    if (!v->is_number() || !std::isfinite(v->number())) {
+        *error = std::string(key) + " must be a number";
+        return false;
+    }
+    *out = v->number();
+    return true;
+}
+
 int32_t ArgIntOr(const Json& args, const char* key, int32_t fallback, int32_t lo, int32_t hi,
                  std::string* error) {
     const Json* v = args.find(key);
@@ -1009,11 +1040,22 @@ Json Render(Session* session, const Json& args) {
     if (!error.empty()) return ToolError(error);
     const int32_t seed = ArgIntOr(args, "seed", 1, 0, INT32_MAX, &error);
     if (!error.empty()) return ToolError(error);
-    bool denoise = false;
+    bool denoise = true;
     if (const Json* d = args.find("denoise")) {
         if (!d->is_bool()) return ToolError("denoise must be a boolean");
         denoise = d->boolean();
     }
+    bool yaw_set = false, pitch_set = false, distance_set = false;
+    double yaw_deg = 0, pitch_deg = 0, distance_mul = 1;
+    if (!ArgNumber(args, "yaw", &yaw_deg, &yaw_set, &error) ||
+        !ArgNumber(args, "pitch", &pitch_deg, &pitch_set, &error) ||
+        !ArgNumber(args, "distance", &distance_mul, &distance_set, &error)) {
+        return ToolError(error);
+    }
+    if (pitch_set && (pitch_deg < -90.0 || pitch_deg > 90.0))
+        return ToolError("pitch is out of range");
+    if (distance_set && (!(distance_mul > 0.0) || distance_mul > 100.0))
+        return ToolError("distance is out of range");
 
     Document& doc = session->ctx.document;
     doc.SyncActiveModel();
@@ -1032,6 +1074,11 @@ Json Render(Session* session, const Json& args) {
         }
         Camera camera;
         FitCamera(&camera, doc);
+        constexpr double kDeg = 3.14159265358979323846 / 180.0;
+        if (yaw_set) camera.yaw = static_cast<float>(yaw_deg * kDeg);
+        if (pitch_set) camera.pitch = static_cast<float>(pitch_deg * kDeg);
+        if (distance_set)
+            camera.distance = static_cast<float>(static_cast<double>(camera.distance) * distance_mul);
         NSError* nerr = nil;
         const CGSize size = CGSizeMake(static_cast<CGFloat>(width), static_cast<CGFloat>(height));
         if (![session->gpu.renderer renderHeadlessSamples:static_cast<uint32_t>(samples)

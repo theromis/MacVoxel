@@ -30,7 +30,17 @@ simd::float4x4 Camera::ViewMatrix() const {
     const simd::float3 eye = Position();
     const simd::float3 up_world{0.0f, 1.0f, 0.0f};
     const simd::float3 f = simd::normalize(target - eye);
-    const simd::float3 r = simd::normalize(simd::cross(f, up_world));
+    simd::float3 r = simd::cross(f, up_world);
+    // Pitch ±90 looks straight along world Y, so world up is parallel to
+    // the view axis and the cross product vanishes. Yaw still picks which
+    // way is screen-up. The orbit clamp never reaches this; MCP can.
+    if (simd::dot(r, r) < 1.0e-12f) {
+        const float sy = std::sin(yaw);
+        const float cy = std::cos(yaw);
+        r = (f.y < 0.0f) ? simd::float3{cy, 0.0f, -sy} : simd::float3{-cy, 0.0f, sy};
+    } else {
+        r = simd::normalize(r);
+    }
     const simd::float3 u = simd::cross(r, f);
 
     simd::float4x4 m;

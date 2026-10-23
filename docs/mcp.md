@@ -108,14 +108,21 @@ or the other, not both.
 - `palette`: 256 strings, `#rrggbbaa`, index 0 first
 
 `render` blocks until the PNG is written. Defaults are 256×256, 16 samples,
-4 bounces, seed 1, denoising off. Limits are 1..1024 pixels, 1..128 samples,
-0..8 bounces. The camera frames the scene. An empty scene is an error.
+4 bounces, seed 1, denoising on. Limits are 1..1024 pixels, 1..128 samples,
+0..8 bounces. `denoise` false writes the raw samples; the editor's own export
+is unchanged. The camera frames the scene (30° yaw, 25° pitch, distance that
+fits it). `yaw` and `pitch` are degrees around that target; omit either to
+keep the framing angle. Pitch 90 looks straight down, and pitch is limited to
+-90..90. `distance` multiplies the framing distance (greater than 0, at most
+100, default 1). An empty scene is an error.
 
 `export_mesh` writes every solid voxel of every object, exposed faces only.
 `merge` defaults to false, which writes one quad per exposed face. `true`
 greedy-merges coplanar faces that share a palette slot into larger quads, so
 a flat run of the same color becomes one rectangle instead of a quad per voxel.
-The default stays one quad per face, so existing output does not change.
+Edges of those quads are then split where a corner of a neighbouring face
+lands in the middle, so the mesh has no T-junctions. The default stays one
+quad per face, so existing output does not change.
 `vertexColors` defaults to false:
 
 - **false.** One material. A 256-wide palette texture, and each face's UVs

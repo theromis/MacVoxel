@@ -146,6 +146,8 @@ def main():
             tmp = Path(tmp)
             check_palette(session)
             check_merge(session, tmp)
+            check_junctions(session, tmp)
+            check_camera(session, tmp)
             check_reload(session, tmp)
     finally:
         proc.stdin.close()
@@ -210,6 +212,122 @@ def check_merge(session, tmp):
         raise SystemExit(
             f"different colors merged to {split['triangles']} triangles, want 20"
         )
+
+
+def glb_triangles(path):
+    data = Path(path).read_bytes()
+    if data[:4] != b"glTF":
+        raise SystemExit(f"{path} is not a glb")
+    off = 12
+    json_len = struct.unpack_from("<I", data, off)[0]
+    meta = json.loads(data[off + 8 : off + 8 + json_len])
+    off += 8 + json_len
+    bin_len = struct.unpack_from("<I", data, off)[0]
+    blob = data[off + 8 : off + 8 + bin_len]
+
+    def view_bytes(accessor):
+        view = meta["bufferViews"][accessor["bufferView"]]
+        start = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+        return start
+
+    pos = meta["accessors"][0]
+    count = pos["count"]
+    start = view_bytes(pos)
+    floats = struct.unpack_from("<" + "f" * (count * 3), blob, start)
+    verts = []
+    for i in range(0, count * 3, 3):
+        # glTF (gx, gz, -gy) → grid (gx, gy, gz)
+        verts.append(
+            (round(floats[i]), round(-floats[i + 2]), round(floats[i + 1]))
+        )
+    idx = meta["accessors"][3]
+    istart = view_bytes(idx)
+    n = idx["count"]
+    if idx["componentType"] == 5125:
+        indices = struct.unpack_from("<" + "I" * n, blob, istart)
+    elif idx["componentType"] == 5123:
+        indices = struct.unpack_from("<" + "H" * n, blob, istart)
+    else:
+        raise SystemExit(f"unexpected index type {idx['componentType']}")
+    tris = []
+    for i in range(0, n, 3):
+        tris.append((indices[i], indices[i + 1], indices[i + 2]))
+    return verts, tris
+
+
+def on_open_segment(a, b, v):
+    ab = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+    av = (v[0] - a[0], v[1] - a[1], v[2] - a[2])
+    cross = (
+        ab[1] * av[2] - ab[2] * av[1],
+        ab[2] * av[0] - ab[0] * av[2],
+        ab[0] * av[1] - ab[1] * av[0],
+    )
+    if cross != (0, 0, 0):
+        return False
+    dot = ab[0] * av[0] + ab[1] * av[1] + ab[2] * av[2]
+    ab2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]
+    return 0 < dot < ab2
+
+
+def check_junctions(session, tmp):
+    # Three voxels in a row and one sitting on the middle. The merged top
+    # is one long quad; the upper voxel's corners land mid-edge.
+    session.tool("new_document")
+    session.tool(
+        "set_voxels",
+        {
+            "cells": [
+                {"x": 0, "y": 0, "z": 0, "palette": 1},
+                {"x": 1, "y": 0, "z": 0, "palette": 1},
+                {"x": 2, "y": 0, "z": 0, "palette": 1},
+                {"x": 1, "y": 0, "z": 1, "palette": 2},
+            ]
+        },
+    )
+    session.tool("export_mesh", {"path": str(tmp / "bank.glb")})
+    session.tool("export_mesh", {"path": str(tmp / "bank-merge.glb"), "merge": True})
+    verts, tris = glb_triangles(tmp / "bank-merge.glb")
+    points = set(verts)
+    for tri in tris:
+        for edge in ((0, 1), (1, 2), (2, 0)):
+            a = verts[tri[edge[0]]]
+            b = verts[tri[edge[1]]]
+            for v in points:
+                if v != a and v != b and on_open_segment(a, b, v):
+                    raise SystemExit(f"T-junction: {v} lies on {a}–{b}")
+
+
+def check_camera(session, tmp):
+    session.tool("new_document")
+    session.tool(
+        "set_voxels",
+        {
+            "cells": [
+                {"x": 0, "y": 0, "z": 0, "palette": 1},
+                {"x": 1, "y": 0, "z": 0, "palette": 1},
+                {"x": 2, "y": 0, "z": 0, "palette": 1},
+                {"x": 0, "y": 1, "z": 0, "palette": 1},
+            ]
+        },
+    )
+    common = {
+        "width": 64,
+        "height": 64,
+        "samples": 4,
+        "bounces": 1,
+        "seed": 1,
+        "denoise": False,
+    }
+    session.tool("render", {"path": str(tmp / "yaw0.png"), "yaw": 0, **common})
+    session.tool("render", {"path": str(tmp / "yaw180.png"), "yaw": 180, **common})
+    if png_pixels(tmp / "yaw0.png") == png_pixels(tmp / "yaw180.png"):
+        raise SystemExit("yaw 0 and yaw 180 rendered the same image")
+    session.tool(
+        "render", {"path": str(tmp / "down.png"), "pitch": 90, **common}
+    )
+    if png_pixels(tmp / "down.png") == png_pixels(tmp / "yaw0.png"):
+        raise SystemExit("pitch 90 matched the side view")
 
 
 def save_box(session, path, palette, color):
