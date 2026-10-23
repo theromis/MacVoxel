@@ -1,0 +1,12 @@
+[package]
+name = "macvoxel-egui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "egui shell preview for MacVoxel. Does not link the C++/Metal editor."
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+glam = "0.29"
+rfd = "0.15"

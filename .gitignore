@@ -34,3 +34,6 @@ compile_commands.json
 
 # Agent memos
 old-memos/
+
+# egui shell preview (cargo)
+egui/target/
