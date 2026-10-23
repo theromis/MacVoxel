@@ -692,8 +692,13 @@ fn selection(ui: &mut Ui, session: &mut Session) {
         ui.separator();
         section(ui, "Flip");
         axis_buttons(ui, "Flip", |axis| session.flip_selection(axis));
+        let scope = if session.picked.is_empty() {
+            "Whole object"
+        } else {
+            "Selection"
+        };
         ui.label(
-            RichText::new("Whole object in this preview")
+            RichText::new(format!("{scope} · {} selected", session.picked.len()))
                 .small()
                 .color(Color32::from_gray(120)),
         );

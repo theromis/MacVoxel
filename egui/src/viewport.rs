@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use glam::{Mat4, Vec3, Vec4};
 
 use crate::gpu::{self, SceneGpu, SharedGpu};
-use crate::state::{EditorMode, LineMode, RenderMode, Session, Tool, ToolDrag};
+use crate::state::{Cell, EditorMode, LineMode, RenderMode, Session, Tool, ToolDrag};
 
 pub struct ViewCache {
     gpu: Option<SharedGpu>,
@@ -139,6 +139,23 @@ pub fn show(
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(22, 24, 28));
     }
 
+    if session.tool == Tool::Marquee && pointer.button_down(egui::PointerButton::Primary) {
+        if let (Some(a), Some(b)) = (cache.anchor, aim) {
+            let band = egui::Rect::from_two_pos(a, b);
+            painter.rect_filled(
+                band,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(255, 220, 80, 28),
+            );
+            painter.rect_stroke(
+                band,
+                0.0,
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(255, 220, 80)),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+
     if session.active().cells.is_empty() {
         painter.text(
             rect.center(),
@@ -162,7 +179,12 @@ pub fn show(
         });
     });
 
-    if matches!(session.hover, Some(_)) && session.tool == crate::state::Tool::Brush {
+    if matches!(session.hover, Some(_))
+        && matches!(
+            session.tool,
+            Tool::Brush | Tool::Marquee | Tool::BoxSelect | Tool::FloodSelect
+        )
+    {
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
     }
 }
@@ -215,12 +237,14 @@ fn tool_drag(
         return ToolDrag {
             rays: Vec::new(),
             face_steps: 1,
+            marquee: None,
         };
     };
     let Some(aim) = aim else {
         return ToolDrag {
             rays: Vec::new(),
             face_steps: 1,
+            marquee: None,
         };
     };
     let face_steps = if let Some((cell, axis, sign)) = session.stroke_face() {
@@ -233,7 +257,46 @@ fn tool_drag(
     } else {
         Vec::new()
     };
-    ToolDrag { rays, face_steps }
+    let marquee = if session.tool == Tool::Marquee {
+        Some(marquee_cells(session, rect, anchor, aim))
+    } else {
+        None
+    };
+    ToolDrag {
+        rays,
+        face_steps,
+        marquee,
+    }
+}
+
+fn marquee_cells(session: &Session, rect: egui::Rect, a: egui::Pos2, b: egui::Pos2) -> Vec<Cell> {
+    let min_x = a.x.min(b.x);
+    let max_x = a.x.max(b.x);
+    let min_y = a.y.min(b.y);
+    let max_y = a.y.max(b.y);
+    // A click, not a drag, clears the selection.
+    if max_x - min_x < 2.0 && max_y - min_y < 2.0 {
+        return Vec::new();
+    }
+    let aspect = rect.width() / rect.height().max(1.0);
+    let vp = projection(aspect) * view_matrix(session);
+    let mut picked = Vec::new();
+    for cell in session.active().cells.keys().copied() {
+        let center = Vec3::new(
+            cell.0 as f32 + 0.5,
+            cell.1 as f32 + 0.5,
+            cell.2 as f32 + 0.5,
+        );
+        let Some(ndc) = to_ndc(vp, center) else {
+            continue;
+        };
+        let sx = rect.min.x + (ndc.x * 0.5 + 0.5) * rect.width();
+        let sy = rect.min.y + (1.0 - (ndc.y * 0.5 + 0.5)) * rect.height();
+        if sx >= min_x && sx <= max_x && sy >= min_y && sy <= max_y {
+            picked.push(cell);
+        }
+    }
+    picked
 }
 
 fn sample_rays(
@@ -311,4 +374,35 @@ fn ray_through(session: &Session, rect: egui::Rect, pos: egui::Pos2) -> (Vec3, V
     let a = unproject(0.0);
     let b = unproject(1.0);
     (a, b - a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marquee_contains_the_cell_under_its_projection() {
+        let session = Session::new();
+        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let cell = session.active().cells.keys().copied().next().unwrap();
+        let aspect = rect.width() / rect.height();
+        let vp = projection(aspect) * view_matrix(&session);
+        let center = Vec3::new(
+            cell.0 as f32 + 0.5,
+            cell.1 as f32 + 0.5,
+            cell.2 as f32 + 0.5,
+        );
+        let ndc = to_ndc(vp, center).unwrap();
+        let sx = rect.min.x + (ndc.x * 0.5 + 0.5) * rect.width();
+        let sy = rect.min.y + (1.0 - (ndc.y * 0.5 + 0.5)) * rect.height();
+        let hit = marquee_cells(
+            &session,
+            rect,
+            egui::pos2(sx - 4.0, sy - 4.0),
+            egui::pos2(sx + 4.0, sy + 4.0),
+        );
+        assert!(hit.contains(&cell));
+        let click = marquee_cells(&session, rect, egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        assert!(click.is_empty());
+    }
 }

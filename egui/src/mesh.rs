@@ -4,7 +4,7 @@
 //! occupancy changes (a shared face appears or disappears). Camera motion
 //! does not touch this data.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::state::Cell;
 
@@ -93,6 +93,25 @@ pub fn mesh_chunk(
                 continue;
             }
             push_quad(&mut mesh, *cell, face, *rgb, 0.0);
+        }
+    }
+    mesh
+}
+
+/// Boundary of a selection: faces that touch air or an unselected cell.
+pub fn selection_shell(cells: &HashMap<Cell, u8>, picked: &HashSet<Cell>) -> Mesh {
+    let mut mesh = Mesh::default();
+    for cell in picked {
+        if !cells.contains_key(cell) {
+            continue;
+        }
+        for face in 0..6 {
+            let (dx, dy, dz) = OFFSETS[face];
+            let neighbor = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+            if picked.contains(&neighbor) {
+                continue;
+            }
+            push_quad(&mut mesh, *cell, face, [255, 214, 90], 0.03);
         }
     }
     mesh
@@ -275,6 +294,17 @@ mod tests {
 
     fn white(_: u8) -> [u8; 3] {
         [255, 255, 255]
+    }
+
+    #[test]
+    fn selection_shell_drops_the_face_between_two_picked_cells() {
+        let mut cells = HashMap::new();
+        cells.insert((0, 0, 0), 1);
+        cells.insert((1, 0, 0), 1);
+        let mut picked = HashSet::new();
+        picked.insert((0, 0, 0));
+        picked.insert((1, 0, 0));
+        assert_eq!(selection_shell(&cells, &picked).face_count(), 10);
     }
 
     #[test]

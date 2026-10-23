@@ -185,6 +185,7 @@ pub enum Grab {
     Orbit,
     Pan,
     Paint,
+    Select,
 }
 
 #[derive(Clone, Copy)]
@@ -196,6 +197,9 @@ pub struct Hit {
 pub struct ToolDrag {
     pub rays: Vec<(Vec3, Vec3)>,
     pub face_steps: i32,
+    /// Occupied cells inside a marquee, computed on release. `None` when
+    /// the gesture is not a marquee.
+    pub marquee: Option<Vec<Cell>>,
 }
 
 struct Stroke {
@@ -295,6 +299,12 @@ pub struct Session {
     pub mesh_epoch: u64,
     pub status: String,
     pub hover: Option<Hit>,
+    /// Occupied cells of the active object chosen by Marquee, Box Select,
+    /// or Flood Select. Rotate, flip, and delete act on this set when it
+    /// is not empty.
+    pub picked: HashSet<Cell>,
+    pub selection_epoch: u64,
+    select_anchor: Option<Cell>,
     stroke: Option<Stroke>,
     stroke_serial: u32,
     grab: Grab,
@@ -389,6 +399,9 @@ impl Session {
             mesh_epoch: 1,
             status: IDLE.into(),
             hover: None,
+            picked: HashSet::new(),
+            selection_epoch: 1,
+            select_anchor: None,
             stroke: None,
             stroke_serial: 1,
             grab: Grab::None,
@@ -510,6 +523,7 @@ impl Session {
         self.undo.clear();
         self.redo.clear();
         self.pending = None;
+        self.clear_picked();
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
         self.frame_camera();
         self.status = IDLE.into();
@@ -553,6 +567,7 @@ impl Session {
                 self.undo.clear();
                 self.redo.clear();
                 self.pending = None;
+                self.clear_picked();
                 self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
                 self.frame_camera();
                 self.status = if models > 1 {
@@ -688,6 +703,7 @@ impl Session {
         if index < self.objects.len() && index != self.selected {
             self.selected = index;
             self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+            self.clear_picked();
         }
     }
 
@@ -717,6 +733,7 @@ impl Session {
         let cur = std::mem::replace(&mut self.objects, prev);
         self.redo.push(cur);
         self.clamp_selection();
+        self.clear_picked();
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
     }
 
@@ -728,6 +745,7 @@ impl Session {
         let cur = std::mem::replace(&mut self.objects, next);
         self.undo.push(cur);
         self.clamp_selection();
+        self.clear_picked();
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
     }
 
@@ -774,6 +792,9 @@ impl Session {
                 if self.status_is_blocked() {
                     self.status = IDLE.into();
                 }
+            } else if self.can_select() {
+                self.grab = Grab::Select;
+                self.begin_select(ray);
             } else {
                 self.grab = Grab::None;
                 self.status = self.blocked_reason();
@@ -784,6 +805,7 @@ impl Session {
             Grab::Orbit if secondary_down => self.orbit(delta.x, delta.y),
             Grab::Pan if middle_down || primary_down => self.pan(delta.x, delta.y),
             Grab::Paint if primary_down => self.apply_stroke(ray, drag),
+            Grab::Select if primary_down => self.drag_select(ray),
             _ => {}
         }
 
@@ -792,6 +814,10 @@ impl Session {
             self.apply_stroke(ray, drag);
             self.stroke = None;
             self.commit();
+            self.grab = Grab::None;
+        }
+        if primary_released && self.grab == Grab::Select {
+            self.finish_select(ray, drag);
             self.grab = Grab::None;
         }
         if !secondary_down && self.grab == Grab::Orbit {
@@ -807,6 +833,14 @@ impl Session {
                 self.hover = raycast(&self.active().cells, origin, dir);
             }
         }
+    }
+
+    fn can_select(&self) -> bool {
+        matches!(
+            self.tool,
+            Tool::Marquee | Tool::BoxSelect | Tool::FloodSelect
+        ) && self.editor_mode == EditorMode::Model
+            && self.render_mode == RenderMode::Edit
     }
 
     fn can_edit(&self) -> bool {
@@ -1234,18 +1268,21 @@ impl Session {
     }
 
     pub fn rotate_selection(&mut self, axis: Axis, clockwise: bool) {
+        if !self.picked.is_empty() {
+            let pivot = min_corner(self.picked.iter().copied());
+            self.map_picked(|c| {
+                let p = (c.0 - pivot.0, c.1 - pivot.1, c.2 - pivot.2);
+                let q = rot90(p, axis, clockwise);
+                (q.0 + pivot.0, q.1 + pivot.1, q.2 + pivot.2)
+            });
+            return;
+        }
         if self.active().cells.is_empty() {
             return;
         }
         self.checkpoint();
         let cells = std::mem::take(&mut self.active_mut().cells);
-        let pivot = cells.keys().copied().next().unwrap_or((0, 0, 0));
-        let mut pivot = pivot;
-        for c in cells.keys() {
-            pivot.0 = pivot.0.min(c.0);
-            pivot.1 = pivot.1.min(c.1);
-            pivot.2 = pivot.2.min(c.2);
-        }
+        let pivot = min_corner(cells.keys().copied());
         let mut next = HashMap::with_capacity(cells.len());
         for (c, v) in cells {
             let p = (c.0 - pivot.0, c.1 - pivot.1, c.2 - pivot.2);
@@ -1258,33 +1295,41 @@ impl Session {
     }
 
     pub fn flip_selection(&mut self, axis: Axis) {
+        if !self.picked.is_empty() {
+            let (min, max) = extents(self.picked.iter().copied());
+            self.map_picked(|c| mirror(c, axis, min, max));
+            return;
+        }
         if self.active().cells.is_empty() {
             return;
         }
         self.checkpoint();
         let cells = std::mem::take(&mut self.active_mut().cells);
-        let mut min = (i32::MAX, i32::MAX, i32::MAX);
-        let mut max = (i32::MIN, i32::MIN, i32::MIN);
-        for c in cells.keys() {
-            min.0 = min.0.min(c.0);
-            min.1 = min.1.min(c.1);
-            min.2 = min.2.min(c.2);
-            max.0 = max.0.max(c.0);
-            max.1 = max.1.max(c.1);
-            max.2 = max.2.max(c.2);
-        }
+        let (min, max) = extents(cells.keys().copied());
         let mut next = HashMap::with_capacity(cells.len());
         for (c, v) in cells {
-            let q = match axis {
-                Axis::X => (min.0 + max.0 - c.0, c.1, c.2),
-                Axis::Y => (c.0, min.1 + max.1 - c.1, c.2),
-                Axis::Z => (c.0, c.1, min.2 + max.2 - c.2),
-            };
-            next.insert(q, v);
+            next.insert(mirror(c, axis, min, max), v);
         }
         self.active_mut().cells = next;
         self.commit();
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+    }
+
+    pub fn delete_picked(&mut self) {
+        if self.picked.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let picked = std::mem::take(&mut self.picked);
+        {
+            let map = &mut self.active_mut().cells;
+            for cell in &picked {
+                map.remove(cell);
+            }
+        }
+        self.commit();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.note_selection();
     }
 
     pub fn brush_cell_count(&self) -> i32 {
@@ -1340,6 +1385,8 @@ impl Session {
                 cmd = Some(Cmd::Tool(Tool::Mutator));
             } else if i.key_pressed(egui::Key::M) {
                 cmd = Some(Cmd::Tool(Tool::Marquee));
+            } else if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
+                cmd = Some(Cmd::DeletePicked);
             }
         });
         match cmd {
@@ -1357,8 +1404,127 @@ impl Session {
                 };
             }
             Some(Cmd::Tool(tool)) => self.tool = tool,
+            Some(Cmd::DeletePicked) => self.delete_picked(),
             None => {}
         }
+    }
+
+    fn clear_picked(&mut self) {
+        if self.picked.is_empty() {
+            return;
+        }
+        self.picked.clear();
+        self.selection_epoch = self.selection_epoch.wrapping_add(1);
+    }
+
+    fn set_picked(&mut self, next: HashSet<Cell>) {
+        if next == self.picked {
+            return;
+        }
+        self.picked = next;
+        self.note_selection();
+    }
+
+    fn note_selection(&mut self) {
+        self.selection_epoch = self.selection_epoch.wrapping_add(1);
+        let n = self.picked.len();
+        self.status = if n == 0 {
+            IDLE.into()
+        } else {
+            format!("{n} voxels selected.")
+        };
+    }
+
+    fn begin_select(&mut self, ray: Option<(Vec3, Vec3)>) {
+        match self.tool {
+            Tool::FloodSelect => {
+                if let Some(hit) = self.hit_cell(ray) {
+                    self.flood_at(hit);
+                } else {
+                    self.set_picked(HashSet::new());
+                }
+            }
+            Tool::BoxSelect => {
+                self.select_anchor = self.hit_cell(ray);
+                if self.select_anchor.is_none() {
+                    self.set_picked(HashSet::new());
+                } else {
+                    self.drag_box(ray);
+                }
+            }
+            Tool::Marquee => {}
+            _ => {}
+        }
+    }
+
+    fn drag_select(&mut self, ray: Option<(Vec3, Vec3)>) {
+        if self.tool == Tool::BoxSelect {
+            self.drag_box(ray);
+        }
+    }
+
+    fn finish_select(&mut self, ray: Option<(Vec3, Vec3)>, drag: &ToolDrag) {
+        match self.tool {
+            Tool::Marquee => {
+                if let Some(cells) = &drag.marquee {
+                    self.set_picked(cells.iter().copied().collect());
+                }
+            }
+            Tool::BoxSelect => self.drag_box(ray),
+            _ => {}
+        }
+        self.select_anchor = None;
+    }
+
+    fn drag_box(&mut self, ray: Option<(Vec3, Vec3)>) {
+        let Some(anchor) = self.select_anchor else {
+            return;
+        };
+        let Some(end) = self.hit_cell(ray) else {
+            return;
+        };
+        self.set_picked(cells_in_aabb(&self.active().cells, anchor, end));
+    }
+
+    fn flood_at(&mut self, seed: Cell) {
+        let Some(&slot) = self.active().cells.get(&seed) else {
+            self.set_picked(HashSet::new());
+            return;
+        };
+        self.set_picked(flood_same(&self.active().cells, seed, slot));
+    }
+
+    fn hit_cell(&self, ray: Option<(Vec3, Vec3)>) -> Option<Cell> {
+        let (origin, dir) = ray?;
+        raycast(&self.active().cells, origin, dir).map(|hit| hit.cell)
+    }
+
+    fn map_picked(&mut self, mut map: impl FnMut(Cell) -> Cell) {
+        if self.picked.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let cells = std::mem::take(&mut self.active_mut().cells);
+        let picked = std::mem::take(&mut self.picked);
+        let mut next = HashMap::with_capacity(cells.len());
+        for (cell, slot) in &cells {
+            if !picked.contains(cell) {
+                next.insert(*cell, *slot);
+            }
+        }
+        let mut moved = HashSet::with_capacity(picked.len());
+        for (cell, slot) in cells {
+            if picked.contains(&cell) {
+                let at = map(cell);
+                next.insert(at, slot);
+                moved.insert(at);
+            }
+        }
+        self.active_mut().cells = next;
+        self.picked = moved;
+        self.commit();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.note_selection();
     }
 }
 
@@ -1371,6 +1537,7 @@ enum Cmd {
     SaveAs,
     Tab,
     Tool(Tool),
+    DeletePicked,
 }
 
 fn ensure_vox_extension(path: PathBuf) -> PathBuf {
@@ -1390,6 +1557,83 @@ fn rot90(p: Cell, axis: Axis, clockwise: bool) -> Cell {
         (Axis::Y, false) => (z, y, -x),
         (Axis::Y, true) => (-z, y, x),
     }
+}
+
+fn min_corner(cells: impl IntoIterator<Item = Cell>) -> Cell {
+    let mut corner = (i32::MAX, i32::MAX, i32::MAX);
+    for c in cells {
+        corner.0 = corner.0.min(c.0);
+        corner.1 = corner.1.min(c.1);
+        corner.2 = corner.2.min(c.2);
+    }
+    corner
+}
+
+fn extents(cells: impl IntoIterator<Item = Cell>) -> (Cell, Cell) {
+    let mut min = (i32::MAX, i32::MAX, i32::MAX);
+    let mut max = (i32::MIN, i32::MIN, i32::MIN);
+    for c in cells {
+        min.0 = min.0.min(c.0);
+        min.1 = min.1.min(c.1);
+        min.2 = min.2.min(c.2);
+        max.0 = max.0.max(c.0);
+        max.1 = max.1.max(c.1);
+        max.2 = max.2.max(c.2);
+    }
+    (min, max)
+}
+
+fn mirror(c: Cell, axis: Axis, min: Cell, max: Cell) -> Cell {
+    match axis {
+        Axis::X => (min.0 + max.0 - c.0, c.1, c.2),
+        Axis::Y => (c.0, min.1 + max.1 - c.1, c.2),
+        Axis::Z => (c.0, c.1, min.2 + max.2 - c.2),
+    }
+}
+
+fn cells_in_aabb(cells: &HashMap<Cell, u8>, a: Cell, b: Cell) -> HashSet<Cell> {
+    let min = (a.0.min(b.0), a.1.min(b.1), a.2.min(b.2));
+    let max = (a.0.max(b.0), a.1.max(b.1), a.2.max(b.2));
+    cells
+        .keys()
+        .copied()
+        .filter(|c| {
+            c.0 >= min.0
+                && c.0 <= max.0
+                && c.1 >= min.1
+                && c.1 <= max.1
+                && c.2 >= min.2
+                && c.2 <= max.2
+        })
+        .collect()
+}
+
+fn flood_same(cells: &HashMap<Cell, u8>, seed: Cell, slot: u8) -> HashSet<Cell> {
+    let mut seen = HashSet::new();
+    let mut out = HashSet::new();
+    let mut queue = vec![seed];
+    seen.insert(seed);
+    const STEPS: [Cell; 6] = [
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ];
+    while let Some(cell) = queue.pop() {
+        out.insert(cell);
+        for (dx, dy, dz) in STEPS {
+            let next = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+            if !seen.insert(next) {
+                continue;
+            }
+            if cells.get(&next).copied() == Some(slot) {
+                queue.push(next);
+            }
+        }
+    }
+    out
 }
 
 fn face_axis(normal: Cell) -> (i32, i32) {
@@ -2054,6 +2298,62 @@ mod tests {
         let loaded = load_vox(&file).expect("vox");
         assert_eq!(loaded.model_count, 1);
         assert_eq!(loaded.cells.get(&(0, 0, 0)), Some(&36));
+    }
+
+    #[test]
+    fn flood_select_stops_at_a_different_color() {
+        let mut cells = HashMap::new();
+        cells.insert((0, 0, 0), 4);
+        cells.insert((1, 0, 0), 4);
+        cells.insert((2, 0, 0), 9);
+        let picked = flood_same(&cells, (0, 0, 0), 4);
+        assert_eq!(picked.len(), 2);
+        assert!(!picked.contains(&(2, 0, 0)));
+    }
+
+    #[test]
+    fn box_select_keeps_occupied_cells_inside_the_aabb() {
+        let mut cells = HashMap::new();
+        cells.insert((0, 0, 0), 1);
+        cells.insert((1, 0, 0), 1);
+        cells.insert((3, 0, 0), 1);
+        let picked = cells_in_aabb(&cells, (0, 0, 0), (1, 0, 0));
+        assert!(picked.contains(&(0, 0, 0)));
+        assert!(picked.contains(&(1, 0, 0)));
+        assert!(!picked.contains(&(3, 0, 0)));
+    }
+
+    #[test]
+    fn rotate_selection_leaves_the_rest_of_the_volume() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 4);
+        session.active_mut().cells.insert((1, 0, 0), 1);
+        session.active_mut().cells.insert((2, 0, 0), 5);
+        session.picked.insert((1, 0, 0));
+        session.picked.insert((2, 0, 0));
+        let before = session.voxel_count();
+        session.rotate_selection(Axis::Z, true);
+        assert_eq!(session.voxel_count(), before);
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
+        assert!(!session.picked.contains(&(0, 0, 0)));
+        assert_eq!(session.active().cells.get(&(1, -1, 0)), Some(&5));
+        assert!(session.picked.contains(&(1, -1, 0)));
+    }
+
+    #[test]
+    fn delete_picked_removes_only_the_selection() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 4);
+        session.active_mut().cells.insert((1, 0, 0), 5);
+        session.picked.insert((1, 0, 0));
+        session.delete_picked();
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
+        assert!(!session.active().cells.contains_key(&(1, 0, 0)));
+        assert!(session.picked.is_empty());
+        session.undo();
+        assert_eq!(session.active().cells.get(&(1, 0, 0)), Some(&5));
     }
 
     #[test]

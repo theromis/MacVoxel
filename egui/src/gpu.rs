@@ -47,6 +47,8 @@ pub struct SceneGpu {
     grid_key: Option<(i32, i32, i32, i32, i32, i32)>,
     hover: Option<GpuMesh>,
     hover_key: Option<(crate::state::Cell, crate::state::Cell)>,
+    selection: Option<GpuMesh>,
+    selection_key: Option<(u64, u64)>,
     epoch: u64,
 }
 
@@ -106,6 +108,8 @@ impl SceneGpu {
             grid_key: None,
             hover: None,
             hover_key: None,
+            selection: None,
+            selection_key: None,
             epoch: 0,
         }
     }
@@ -149,6 +153,7 @@ impl SceneGpu {
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
         self.sync_hover(device, session);
+        self.sync_selection(device, session);
     }
 
     fn sync_chunks(&mut self, device: &wgpu::Device, session: &Session) {
@@ -220,6 +225,16 @@ impl SceneGpu {
         self.hover = upload(device, &built, 0);
     }
 
+    fn sync_selection(&mut self, device: &wgpu::Device, session: &Session) {
+        let key = (session.selection_epoch, session.mesh_epoch);
+        if self.selection_key == Some(key) {
+            return;
+        }
+        self.selection_key = Some(key);
+        let built = mesh::selection_shell(&session.active().cells, &session.picked);
+        self.selection = upload(device, &built, 0);
+    }
+
     pub fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("voxels"),
@@ -249,6 +264,10 @@ impl SceneGpu {
         }
         if let Some(grid) = &self.grid {
             draw(&mut pass, grid);
+        }
+        if let Some(selection) = &self.selection {
+            pass.set_pipeline(&self.highlight_pipeline);
+            draw(&mut pass, selection);
         }
         if let Some(hover) = &self.hover {
             pass.set_pipeline(&self.highlight_pipeline);
