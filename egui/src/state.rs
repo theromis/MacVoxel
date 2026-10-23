@@ -4,7 +4,7 @@
 //! C++ core are not linked: brush strokes edit this in-memory volume so the
 //! shell can be tried on its own.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use glam::Vec3;
@@ -187,9 +187,25 @@ pub enum Grab {
     Paint,
 }
 
+#[derive(Clone, Copy)]
 pub struct Hit {
     pub cell: Cell,
     pub normal: Cell,
+}
+
+pub struct ToolDrag {
+    pub rays: Vec<(Vec3, Vec3)>,
+    pub face_steps: i32,
+}
+
+struct Stroke {
+    anchor: Hit,
+    base: HashMap<Cell, u8>,
+    seeds: Vec<Cell>,
+    axis: i32,
+    sign: i32,
+    id: u32,
+    key: Option<(Cell, i32, u64)>,
 }
 
 pub struct Session {
@@ -279,13 +295,15 @@ pub struct Session {
     pub mesh_epoch: u64,
     pub status: String,
     pub hover: Option<Hit>,
+    stroke: Option<Stroke>,
+    stroke_serial: u32,
     grab: Grab,
     pending: Option<Vec<Volume>>,
     undo: Vec<Vec<Volume>>,
     redo: Vec<Vec<Volume>>,
 }
 
-const IDLE: &str = "egui preview. Right-drag orbits, scroll zooms, left-drag paints with Brush. The SwiftUI app is unchanged.";
+const IDLE: &str = "Right-drag orbits, scroll zooms, left-drag edits with the active tool. Path tracing stays in the Metal app.";
 
 impl Session {
     pub fn new() -> Self {
@@ -371,6 +389,8 @@ impl Session {
             mesh_epoch: 1,
             status: IDLE.into(),
             hover: None,
+            stroke: None,
+            stroke_serial: 1,
             grab: Grab::None,
             pending: None,
             undo: Vec::new(),
@@ -735,6 +755,7 @@ impl Session {
         delta: glam::Vec2,
         scroll: f32,
         ray: Option<(Vec3, Vec3)>,
+        drag: &ToolDrag,
     ) {
         if inside && scroll.abs() > 0.0 {
             self.distance = (self.distance * (1.0 - scroll * 0.0014)).clamp(2.0, 2000.0);
@@ -747,9 +768,12 @@ impl Session {
         } else if primary_pressed && inside {
             if space {
                 self.grab = Grab::Pan;
-            } else if self.can_paint() {
+            } else if self.can_edit() {
                 self.grab = Grab::Paint;
                 self.checkpoint();
+                if self.status_is_blocked() {
+                    self.status = IDLE.into();
+                }
             } else {
                 self.grab = Grab::None;
                 self.status = self.blocked_reason();
@@ -759,17 +783,14 @@ impl Session {
         match self.grab {
             Grab::Orbit if secondary_down => self.orbit(delta.x, delta.y),
             Grab::Pan if middle_down || primary_down => self.pan(delta.x, delta.y),
-            Grab::Paint if primary_down => {
-                if let Some((origin, dir)) = ray {
-                    if let Some(hit) = raycast(&self.active().cells, origin, dir) {
-                        self.stamp(hit);
-                    }
-                }
-            }
+            Grab::Paint if primary_down => self.apply_stroke(ray, drag),
             _ => {}
         }
 
         if primary_released && self.grab == Grab::Paint {
+            // The release frame is not "down", but it carries the end of the drag.
+            self.apply_stroke(ray, drag);
+            self.stroke = None;
             self.commit();
             self.grab = Grab::None;
         }
@@ -788,23 +809,52 @@ impl Session {
         }
     }
 
-    fn can_paint(&self) -> bool {
-        self.tool == Tool::Brush
+    fn can_edit(&self) -> bool {
+        self.edits_voxels()
             && self.editor_mode == EditorMode::Model
             && self.render_mode == RenderMode::Edit
     }
 
+    fn edits_voxels(&self) -> bool {
+        matches!(
+            self.tool,
+            Tool::Brush
+                | Tool::Line
+                | Tool::Circle
+                | Tool::Square
+                | Tool::Box
+                | Tool::Face
+                | Tool::Generator
+                | Tool::Mutator
+        )
+    }
+
+    fn status_is_blocked(&self) -> bool {
+        self.status.contains("does not edit")
+            || self.status.contains("Path tracing stays")
+            || self.status.contains("Object-mode")
+    }
+
     fn blocked_reason(&self) -> String {
         if self.render_mode == RenderMode::Render {
-            "Render mode in this preview keeps the shaded voxels. Path tracing stays in the Metal app.".into()
+            "Render mode keeps the shaded voxels. Path tracing stays in the Metal app.".into()
         } else if self.editor_mode == EditorMode::Object {
             "Object-mode gizmos are not in this preview.".into()
         } else {
             format!(
-                "{} options are live. Only Brush edits voxels in this preview.",
+                "{} does not edit voxels in this preview yet.",
                 self.tool.name()
             )
         }
+    }
+
+    /// Anchor of a face stroke, so the viewport can turn mouse movement
+    /// into an extrusion distance.
+    pub fn stroke_face(&self) -> Option<(Cell, i32, i32)> {
+        self.stroke
+            .as_ref()
+            .filter(|_| self.tool == Tool::Face)
+            .map(|stroke| (stroke.anchor.cell, stroke.axis, stroke.sign))
     }
 
     fn orbit(&mut self, dx: f32, dy: f32) {
@@ -823,6 +873,317 @@ impl Session {
         let up = right.cross(forward).normalize_or_zero();
         let scale = self.distance * 0.0022;
         self.target += right * dx * scale + up * -dy * scale;
+    }
+
+    fn apply_stroke(&mut self, ray: Option<(Vec3, Vec3)>, drag: &ToolDrag) {
+        let Some((origin, dir)) = ray else {
+            return;
+        };
+        if self.tool == Tool::Brush {
+            if let Some(hit) = raycast(&self.active().cells, origin, dir) {
+                self.stamp(hit);
+            }
+        } else {
+            self.preview_tool(origin, dir, &drag.rays, drag.face_steps);
+        }
+    }
+
+    fn preview_tool(&mut self, origin: Vec3, dir: Vec3, rays: &[(Vec3, Vec3)], face_steps: i32) {
+        let hit = self.pick_for_stroke(origin, dir);
+        let Some(hit) = hit else {
+            return;
+        };
+        if self.stroke.is_none() {
+            self.begin_stroke(hit);
+        }
+        let Some(stroke) = self.stroke.as_ref() else {
+            return;
+        };
+        let end = self.place(hit);
+        let stamp = self.drag_stamp();
+        if stroke.key == Some((end, face_steps, stamp)) {
+            return;
+        }
+        let anchor = self.place(stroke.anchor);
+        let axis = stroke.axis;
+        let sign = stroke.sign;
+        let seeds = stroke.seeds.clone();
+        let base = stroke.base.clone();
+        let stroke_id = stroke.id;
+        let centers = match self.tool {
+            Tool::Line if self.line_mode == LineMode::Project && !rays.is_empty() => {
+                self.project_line(&base, rays)
+            }
+            Tool::Line => crate::tools::bresenham(anchor, end),
+            Tool::Circle => {
+                crate::tools::circle(anchor, end, axis, self.circle_fill, self.circle_even)
+            }
+            Tool::Square => {
+                crate::tools::square(anchor, end, axis, self.square_fill, self.square_even)
+            }
+            Tool::Box => crate::tools::cube(anchor, end, self.box_fill),
+            Tool::Face => {
+                let steps = if self.tool_mode == ToolMode::Add {
+                    if face_steps == 0 {
+                        1
+                    } else {
+                        face_steps
+                    }
+                } else {
+                    face_steps.abs().max(1)
+                };
+                let outward = self.tool_mode == ToolMode::Add && steps > 0;
+                let n = steps.abs();
+                crate::tools::extrude(&seeds, axis, sign, n, outward)
+            }
+            Tool::Generator => Vec::new(),
+            Tool::Mutator => {
+                let offsets = footprint(self.brush_size, self.brush_shape, self.brush_3d);
+                let mapped = map_footprint(&offsets, axis);
+                crate::tools::foliage(
+                    &base,
+                    hit.cell,
+                    &mapped,
+                    self.foliage_seed.clamp(1, 255) as u8,
+                    self.foliage_density.clamp(0.0, 1.0),
+                    stroke_id,
+                )
+            }
+            _ => Vec::new(),
+        };
+        let edits = if self.tool == Tool::Generator {
+            let min = (
+                anchor.0.min(end.0),
+                anchor.1.min(end.1),
+                anchor.2.min(end.2),
+            );
+            let max = (
+                anchor.0.max(end.0),
+                anchor.1.max(end.1),
+                anchor.2.max(end.2),
+            );
+            {
+                let gen = self.gen_params();
+                let filled = crate::tools::generate(min, max, &gen);
+                if filled.is_empty()
+                    && (max.0 - min.0 + 1) as i64
+                        * (max.1 - min.1 + 1) as i64
+                        * (max.2 - min.2 + 1) as i64
+                        > 200_000
+                {
+                    self.status = "That box is too large to fill in this preview.".into();
+                }
+                filled
+            }
+        } else if self.tool == Tool::Mutator {
+            let seed = self.foliage_seed.clamp(1, 255) as u8;
+            centers.into_iter().map(|cell| (cell, seed)).collect()
+        } else if self.tool == Tool::Face {
+            centers
+                .into_iter()
+                .map(|cell| {
+                    let slot = if self.tool_mode == ToolMode::Add && face_steps < 0 {
+                        0
+                    } else if self.face_with == FaceWith::Geometry
+                        && self.tool_mode == ToolMode::Add
+                    {
+                        let back = match axis {
+                            0 => (-sign, 0, 0),
+                            1 => (0, -sign, 0),
+                            _ => (0, 0, -sign),
+                        };
+                        let mut cursor = cell;
+                        for _ in 0..64 {
+                            if seeds.iter().any(|seed| *seed == cursor) {
+                                break;
+                            }
+                            cursor = crate::tools::add(cursor, back);
+                        }
+                        base.get(&cursor).copied().unwrap_or(self.active_slot)
+                    } else {
+                        self.paint_slot()
+                    };
+                    (cell, slot)
+                })
+                .collect()
+        } else {
+            let expanded = expand_centers(
+                &centers,
+                &footprint(self.brush_size, self.brush_shape, self.brush_3d),
+                axis,
+            );
+            expanded
+                .into_iter()
+                .map(|cell| (cell, self.paint_slot()))
+                .collect()
+        };
+        self.write_preview(base, edits);
+        if let Some(stroke) = self.stroke.as_mut() {
+            stroke.key = Some((end, face_steps, stamp));
+        }
+    }
+
+    fn begin_stroke(&mut self, hit: Hit) {
+        let (axis, sign) = face_axis(hit.normal);
+        let base = self.active().cells.clone();
+        let seeds = if self.tool == Tool::Face {
+            let match_color = if self.face_extrude == FaceExtrude::Color {
+                base.get(&hit.cell).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            crate::tools::flood_face(&base, hit.cell, axis, sign, match_color, self.face_eight)
+        } else {
+            Vec::new()
+        };
+        self.stroke_serial = self.stroke_serial.wrapping_add(1);
+        self.stroke = Some(Stroke {
+            anchor: hit,
+            base,
+            seeds,
+            axis,
+            sign,
+            id: self.stroke_serial,
+            key: None,
+        });
+    }
+
+    fn pick_for_stroke(&self, origin: Vec3, dir: Vec3) -> Option<Hit> {
+        let hit = if let Some(stroke) = &self.stroke {
+            raycast(&stroke.base, origin, dir)
+        } else {
+            raycast(&self.active().cells, origin, dir)
+        };
+        if hit.is_some() {
+            return hit;
+        }
+        let anchor = self.stroke.as_ref().map(|stroke| stroke.anchor)?;
+        plane_hit(origin, dir, anchor)
+    }
+
+    fn project_line(&self, base: &HashMap<Cell, u8>, rays: &[(Vec3, Vec3)]) -> Vec<Cell> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for (origin, dir) in rays {
+            let Some(hit) = raycast(base, *origin, *dir) else {
+                continue;
+            };
+            let cell = self.place(hit);
+            if seen.insert(cell) {
+                out.push(cell);
+            }
+        }
+        out
+    }
+
+    fn place(&self, hit: Hit) -> Cell {
+        match self.tool_mode {
+            ToolMode::Add => crate::tools::add(hit.cell, hit.normal),
+            ToolMode::Remove | ToolMode::Paint => hit.cell,
+        }
+    }
+
+    fn paint_slot(&self) -> u8 {
+        match self.tool_mode {
+            ToolMode::Remove => 0,
+            ToolMode::Add | ToolMode::Paint => self.active_slot,
+        }
+    }
+
+    fn write_preview(&mut self, base: HashMap<Cell, u8>, edits: Vec<(Cell, u8)>) {
+        let mut next = base.clone();
+        let mode = if self.tool == Tool::Mutator {
+            ToolMode::Add
+        } else {
+            self.tool_mode
+        };
+        for (cell, slot) in edits {
+            match mode {
+                ToolMode::Add => {
+                    if slot == 0 {
+                        next.remove(&cell);
+                    } else if !base.contains_key(&cell) {
+                        next.insert(cell, slot);
+                    }
+                }
+                ToolMode::Remove => {
+                    next.remove(&cell);
+                }
+                ToolMode::Paint => {
+                    if base.contains_key(&cell) && slot != 0 {
+                        next.insert(cell, slot);
+                    }
+                }
+            }
+        }
+        if next != self.active().cells {
+            self.active_mut().cells = next;
+            self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        }
+    }
+
+    fn gen_params(&self) -> crate::tools::Gen {
+        crate::tools::Gen {
+            kind: self.generator,
+            axis: self.gen_axis,
+            apex_at_max: self.apex_at_max,
+            palette: self.active_slot,
+            torus_tube: self.torus_tube,
+            helix_turns: self.helix_turns,
+            helix_radius: self.helix_radius,
+            helix_tube: self.helix_tube,
+            helix_cw: self.helix_cw,
+            noise_scale: self.noise_scale,
+            noise_threshold: self.noise_threshold,
+            noise_octaves: self.noise_octaves,
+            noise_seed: self.noise_seed as u32,
+            perlin_lo: self.perlin_lo,
+            perlin_hi: self.perlin_hi,
+            tree_depth: self.tree_depth,
+            tree_wildness: self.tree_wildness,
+            tree_trunk: self.tree_trunk,
+            tree_leaf: self.tree_leaf,
+            tree_seed: self.tree_seed as u32,
+            conifer_tiers: self.conifer_tiers,
+            conifer_ragged: self.conifer_ragged,
+            conifer_clump: self.conifer_clump,
+            conifer_trunk: self.conifer_trunk,
+            conifer_crown: self.conifer_crown,
+            conifer_needle: self.conifer_needle,
+            conifer_seed: self.conifer_seed as u32,
+        }
+    }
+
+    fn drag_stamp(&self) -> u64 {
+        let mode = match self.tool_mode {
+            ToolMode::Add => 1u64,
+            ToolMode::Remove => 2,
+            ToolMode::Paint => 3,
+        };
+        let mut h = mode;
+        h = h
+            .wrapping_mul(16777619)
+            .wrapping_add(self.brush_size as u64);
+        h = h
+            .wrapping_mul(16777619)
+            .wrapping_add(self.active_slot as u64);
+        h = h
+            .wrapping_mul(16777619)
+            .wrapping_add(self.circle_fill as u64);
+        h = h.wrapping_mul(16777619).wrapping_add(self.box_fill as u64);
+        h = h
+            .wrapping_mul(16777619)
+            .wrapping_add(self.foliage_seed as u64);
+        h = h
+            .wrapping_mul(16777619)
+            .wrapping_add(self.generator.name().len() as u64);
+        h = h
+            .wrapping_mul(16777619)
+            .wrapping_add(self.tree_depth as u64);
+        h = h
+            .wrapping_mul(16777619)
+            .wrapping_add(self.noise_seed as u64);
+        h
     }
 
     fn stamp(&mut self, hit: Hit) {
@@ -1029,6 +1390,92 @@ fn rot90(p: Cell, axis: Axis, clockwise: bool) -> Cell {
         (Axis::Y, false) => (z, y, -x),
         (Axis::Y, true) => (-z, y, x),
     }
+}
+
+fn face_axis(normal: Cell) -> (i32, i32) {
+    if normal.0 != 0 {
+        (0, normal.0.signum())
+    } else if normal.1 != 0 {
+        (1, normal.1.signum())
+    } else {
+        (2, normal.2.signum())
+    }
+}
+
+fn plane_hit(origin: Vec3, dir: Vec3, anchor: Hit) -> Option<Hit> {
+    let dir = dir.normalize_or_zero();
+    if dir.length_squared() < 1e-8 {
+        return None;
+    }
+    let (axis, sign) = face_axis(anchor.normal);
+    let along = match axis {
+        0 => origin.x,
+        1 => origin.y,
+        _ => origin.z,
+    };
+    let component = match axis {
+        0 => dir.x,
+        1 => dir.y,
+        _ => dir.z,
+    };
+    if component.abs() < 1e-6 {
+        return None;
+    }
+    let plane = match axis {
+        0 => anchor.cell.0 as f32 + if sign > 0 { 1.0 } else { 0.0 },
+        1 => anchor.cell.1 as f32 + if sign > 0 { 1.0 } else { 0.0 },
+        _ => anchor.cell.2 as f32 + if sign > 0 { 1.0 } else { 0.0 },
+    };
+    let t = (plane - along) / component;
+    if t < 0.0 {
+        return None;
+    }
+    let point = origin + dir * t;
+    let mut cell = (
+        point.x.floor() as i32,
+        point.y.floor() as i32,
+        point.z.floor() as i32,
+    );
+    let solid = if sign > 0 {
+        plane as i32 - 1
+    } else {
+        plane as i32
+    };
+    match axis {
+        0 => cell.0 = solid,
+        1 => cell.1 = solid,
+        _ => cell.2 = solid,
+    }
+    Some(Hit {
+        cell,
+        normal: anchor.normal,
+    })
+}
+
+fn map_footprint(offsets: &[Cell], axis: i32) -> Vec<Cell> {
+    offsets
+        .iter()
+        .map(|(u, v, w)| match axis {
+            0 => (*w, *u, *v),
+            1 => (*u, *w, *v),
+            _ => (*u, *v, *w),
+        })
+        .collect()
+}
+
+fn expand_centers(centers: &[Cell], offsets: &[Cell], axis: i32) -> Vec<Cell> {
+    let mapped = map_footprint(offsets, axis);
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for center in centers {
+        for delta in &mapped {
+            let cell = crate::tools::add(*center, *delta);
+            if seen.insert(cell) {
+                out.push(cell);
+            }
+        }
+    }
+    out
 }
 
 fn footprint(size: i32, shape: BrushShape, three_d: bool) -> Vec<Cell> {
@@ -1607,6 +2054,23 @@ mod tests {
         let loaded = load_vox(&file).expect("vox");
         assert_eq!(loaded.model_count, 1);
         assert_eq!(loaded.cells.get(&(0, 0, 0)), Some(&36));
+    }
+
+    #[test]
+    fn line_drag_adds_voxels_and_undoes() {
+        let mut session = Session::new();
+        let before = session.voxel_count();
+        session.tool = Tool::Line;
+        session.tool_mode = ToolMode::Add;
+        session.checkpoint();
+        let dir = Vec3::new(0.0, 1.0, -0.35);
+        session.preview_tool(Vec3::new(0.5, -30.0, 10.0), dir, &[], 1);
+        session.preview_tool(Vec3::new(5.5, -30.0, 10.0), dir, &[], 1);
+        assert!(session.voxel_count() > before);
+        session.stroke = None;
+        session.commit();
+        session.undo();
+        assert_eq!(session.voxel_count(), before);
     }
 
     #[test]

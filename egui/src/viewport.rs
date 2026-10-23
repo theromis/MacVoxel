@@ -7,11 +7,12 @@ use std::sync::{Arc, Mutex};
 use glam::{Mat4, Vec3, Vec4};
 
 use crate::gpu::{self, SceneGpu, SharedGpu};
-use crate::state::{EditorMode, RenderMode, Session};
+use crate::state::{EditorMode, LineMode, RenderMode, Session, Tool, ToolDrag};
 
 pub struct ViewCache {
     gpu: Option<SharedGpu>,
     texture: Option<egui::TextureId>,
+    anchor: Option<egui::Pos2>,
 }
 
 impl ViewCache {
@@ -19,6 +20,7 @@ impl ViewCache {
         Self {
             gpu: None,
             texture: None,
+            anchor: None,
         }
     }
 
@@ -71,12 +73,16 @@ pub fn show(
         0.0
     };
     // Keep casting while a stroke is dragged past the widget edge.
-    let aim = hover.or_else(|| {
-        pointer
-            .hover_pos()
-            .filter(|_| pointer.button_down(egui::PointerButton::Primary))
-    });
+    // A fast drag can arrive as press plus release, with the end position
+    // only on the release frame. Keep aiming at that position.
+    let aiming = pointer.button_down(egui::PointerButton::Primary)
+        || pointer.button_released(egui::PointerButton::Primary);
+    let aim = hover.or_else(|| pointer.latest_pos().filter(|_| aiming));
     let ray = aim.map(|p| ray_through(session, rect, p));
+    if pointer.button_pressed(egui::PointerButton::Primary) && hover.is_some() {
+        cache.anchor = hover;
+    }
+    let drag = tool_drag(session, rect, cache.anchor, aim);
     session.pointer(
         hover.is_some(),
         pointer.button_down(egui::PointerButton::Primary),
@@ -90,7 +96,11 @@ pub fn show(
         glam::Vec2::new(pointer.delta().x, pointer.delta().y),
         scroll,
         ray,
+        &drag,
     );
+    if pointer.button_released(egui::PointerButton::Primary) {
+        cache.anchor = None;
+    }
 
     let painter = ui.painter().with_clip_rect(rect);
     if let Some(rs) = render_state {
@@ -193,6 +203,100 @@ fn gpu_view_proj(session: &Session, aspect: f32) -> Mat4 {
         Vec4::new(0.0, 0.0, 0.5, 1.0),
     );
     clip * projection(aspect) * view_matrix(session)
+}
+
+fn tool_drag(
+    session: &Session,
+    rect: egui::Rect,
+    anchor: Option<egui::Pos2>,
+    aim: Option<egui::Pos2>,
+) -> ToolDrag {
+    let Some(anchor) = anchor else {
+        return ToolDrag {
+            rays: Vec::new(),
+            face_steps: 1,
+        };
+    };
+    let Some(aim) = aim else {
+        return ToolDrag {
+            rays: Vec::new(),
+            face_steps: 1,
+        };
+    };
+    let face_steps = if let Some((cell, axis, sign)) = session.stroke_face() {
+        face_drag_steps(session, rect, anchor, aim, cell, axis, sign)
+    } else {
+        1
+    };
+    let rays = if session.tool == Tool::Line && session.line_mode == LineMode::Project {
+        sample_rays(session, rect, anchor, aim)
+    } else {
+        Vec::new()
+    };
+    ToolDrag { rays, face_steps }
+}
+
+fn sample_rays(
+    session: &Session,
+    rect: egui::Rect,
+    a: egui::Pos2,
+    b: egui::Pos2,
+) -> Vec<(Vec3, Vec3)> {
+    let steps = ((a.x - b.x).abs().max((a.y - b.y).abs()) * 2.0).clamp(1.0, 256.0) as i32;
+    let mut rays = Vec::with_capacity(steps as usize + 1);
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let p = egui::pos2(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+        rays.push(ray_through(session, rect, p));
+    }
+    rays
+}
+
+fn face_drag_steps(
+    session: &Session,
+    rect: egui::Rect,
+    anchor: egui::Pos2,
+    aim: egui::Pos2,
+    cell: crate::state::Cell,
+    axis: i32,
+    sign: i32,
+) -> i32 {
+    let aspect = rect.width() / rect.height().max(1.0);
+    let vp = projection(aspect) * view_matrix(session);
+    let center = Vec3::new(
+        cell.0 as f32 + 0.5,
+        cell.1 as f32 + 0.5,
+        cell.2 as f32 + 0.5,
+    );
+    let normal = match axis {
+        0 => Vec3::new(sign as f32, 0.0, 0.0),
+        1 => Vec3::new(0.0, sign as f32, 0.0),
+        _ => Vec3::new(0.0, 0.0, sign as f32),
+    };
+    let Some(a) = to_ndc(vp, center) else {
+        return 1;
+    };
+    let Some(b) = to_ndc(vp, center + normal) else {
+        return 1;
+    };
+    let dir = b - a;
+    let len2 = dir.dot(dir);
+    if len2 < 1e-8 {
+        return 1;
+    }
+    let drag = glam::Vec2::new(
+        (aim.x - anchor.x) / rect.width().max(1.0) * 2.0,
+        -(aim.y - anchor.y) / rect.height().max(1.0) * 2.0,
+    );
+    ((drag.x * dir.x + drag.y * dir.y) / len2).round() as i32
+}
+
+fn to_ndc(vp: Mat4, p: Vec3) -> Option<glam::Vec2> {
+    let c = vp * Vec4::new(p.x, p.y, p.z, 1.0);
+    if c.w <= 0.05 {
+        return None;
+    }
+    Some(glam::Vec2::new(c.x / c.w, c.y / c.w))
 }
 
 fn ray_through(session: &Session, rect: egui::Rect, pos: egui::Pos2) -> (Vec3, Vec3) {

@@ -15,6 +15,7 @@ mod mesh;
 mod native_menu;
 mod panels;
 mod state;
+mod tools;
 mod viewport;
 
 use std::path::PathBuf;
