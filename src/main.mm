@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 
 #include "CliRender.h"
+#include "McpServer.h"
 #include "VoxRoundTrip.h"
 
 #include <cstring>
@@ -17,6 +18,9 @@ int main(int argc, const char* argv[]) {
     }
     if (argc >= 2 && std::strcmp(argv[1], "voxrt") == 0) {
         return macvoxel::RunVoxRoundTrip(argc - 1, argv + 1);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "mcp") == 0) {
+        return macvoxel::RunMcp(argc - 1, argv + 1);
     }
 
     MacVoxelRunApp();

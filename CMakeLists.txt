@@ -74,6 +74,8 @@ set(APP_SOURCES
     src/MutatorTool.cpp
     src/OverlayDraw.cpp
     src/LiftEngine.mm
+    src/Json.cpp
+    src/McpServer.mm
     src/ShapeTool.cpp
     src/ToolRegistry.cpp
     src/XformHandleController.cpp
