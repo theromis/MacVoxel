@@ -42,9 +42,9 @@ the application menu bar. Elsewhere those commands are not in the window yet.
 
 ## MCP
 
-`macvoxel-egui mcp` edits a document over stdin/stdout. Connected to a window
-it can also screenshot and click. It has no render tool. Details are in
-[docs/mcp.md](docs/mcp.md).
+`macvoxel-egui mcp` edits a document over stdin/stdout. `render` path-traces
+a PNG in that process. Connected to a window it can also screenshot and
+click. Details are in [docs/mcp.md](docs/mcp.md).
 
 ```sh
 cargo build

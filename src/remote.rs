@@ -10,6 +10,80 @@ use crate::state::Session;
 
 pub const NO_WINDOW: &str = "No window. Start the editor with `macvoxel-egui --control PORT`, then `macvoxel-egui mcp --connect 127.0.0.1:PORT`. Add `--launch` to open the window.";
 
+fn render_scene(session: &mut Session, params: &Value) -> Result<Value, String> {
+    let path = req_str(params, "path")?;
+    if path.is_empty() {
+        return Err("path is empty".into());
+    }
+    let width = opt_i32_range(params, "width", 256, 1, 1024)?;
+    let height = opt_i32_range(params, "height", 256, 1, 1024)?;
+    let samples = opt_i32_range(params, "samples", 16, 1, 128)?;
+    let bounces = opt_i32_range(params, "bounces", 4, 0, 8)?;
+    let seed = opt_i32_range(params, "seed", 1, 0, i32::MAX)?;
+    let denoise = opt_bool(params, "denoise")?.unwrap_or(true);
+    let yaw = opt_f64(params, "yaw")?;
+    let pitch = opt_f64(params, "pitch")?;
+    let distance = opt_f64(params, "distance")?;
+    if let Some(pitch) = pitch {
+        if !(-90.0..=90.0).contains(&pitch) {
+            return Err("pitch is out of range".into());
+        }
+    }
+    if let Some(distance) = distance {
+        if !(distance > 0.0) || distance > 100.0 {
+            return Err("distance is out of range".into());
+        }
+    }
+    let voxels = session.objects.iter().filter(|object| !object.hidden).fold(
+        0usize,
+        |count, object| {
+            count + object.cells.values().filter(|slot| **slot != 0).count()
+        },
+    );
+    if voxels == 0 {
+        return Err("document has no voxels".into());
+    }
+
+    let saved_yaw = session.yaw;
+    let saved_pitch = session.pitch;
+    let saved_distance = session.distance;
+    let saved_target = session.target;
+    let saved_bounces = session.max_bounces;
+    let saved_aces = session.aces;
+    let saved_denoise = session.denoise;
+    session.frame_camera();
+    session.yaw = (yaw.unwrap_or(30.0) as f32).to_radians();
+    session.pitch = (pitch.unwrap_or(25.0) as f32).to_radians();
+    if let Some(scale) = distance {
+        session.distance *= scale as f32;
+    }
+    session.max_bounces = bounces;
+    session.aces = true;
+    session.denoise = denoise;
+    let image = crate::trace::render_still(
+        session,
+        width as u32,
+        height as u32,
+        samples as u32,
+        seed as u32,
+    );
+    let written = crate::trace::write_png(Path::new(&path), &image, session);
+    session.yaw = saved_yaw;
+    session.pitch = saved_pitch;
+    session.distance = saved_distance;
+    session.target = saved_target;
+    session.max_bounces = saved_bounces;
+    session.aces = saved_aces;
+    session.denoise = saved_denoise;
+    written?;
+    Ok(json!({
+        "path": path,
+        "width": width,
+        "height": height,
+        "samples": samples
+    }))
+}
+
 pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Value, String> {
     let params = if params.is_null() {
         Value::Object(Map::new())
@@ -136,6 +210,43 @@ pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Valu
             session.redo();
             Ok(json!({"canUndo": session.can_undo(), "canRedo": session.can_redo()}))
         }
+        "rig.add" => {
+            let name = req_str(&params, "name")?;
+            let parent = opt_str(&params, "parent")?;
+            let pivot = req_vec3(&params, "pivot")?;
+            let rotation = opt_vec4(&params, "rotation")?;
+            session.add_bone(&name, parent.as_deref(), pivot, rotation)?;
+            Ok(json!({"name": name, "count": session.skeleton.bones.len()}))
+        }
+        "rig.set" => {
+            let name = req_str(&params, "name")?;
+            let parent = parent_update(&params)?;
+            let pivot = opt_vec3(&params, "pivot")?;
+            let rotation = opt_vec4(&params, "rotation")?;
+            let rename = opt_str(&params, "rename")?;
+            session.set_bone(&name, parent, pivot, rotation, rename.as_deref())?;
+            let current = rename.unwrap_or(name);
+            Ok(json!({"name": current}))
+        }
+        "rig.remove" => {
+            let name = req_str(&params, "name")?;
+            session.remove_bone(&name)?;
+            Ok(json!({"removed": name}))
+        }
+        "rig.bind" => {
+            let index = req_i32(&params, "index")?;
+            if index < 0 {
+                return Err(format!(
+                    "object index {index} is out of range ({} objects)",
+                    session.objects.len()
+                ));
+            }
+            let bone = bind_name(&params)?;
+            session.bind_object(index as usize, bone.as_deref())?;
+            Ok(json!({"index": index, "bone": bone}))
+        }
+        "rig.list" => Ok(bones_json(session)),
+        "render" => render_scene(session, &params),
         "mesh.export" => {
             let path = req_str(&params, "path")?;
             let merge = opt_bool(&params, "merge")?.unwrap_or(false);
@@ -186,10 +297,20 @@ const METHODS: &[(&str, &str, &str)] = &[
     ("edit.undo", "", "Undo the last edit"),
     ("edit.redo", "", "Redo the last undone edit"),
     (
+        "render",
+        "path, width?, height?, samples?, bounces?, seed?, denoise?, yaw?, pitch?, distance?",
+        "Path-trace the scene to a PNG. width and height default to 256 (1..1024). samples defaults to 16 (1..128). bounces defaults to 4 (0..8). denoise defaults to true. yaw 30 and pitch 25 degrees frame the scene when omitted.",
+    ),
+    (
         "mesh.export",
         "path, merge?, vertexColors?",
-        "Write a glTF 2.0 .glb of every object. merge defaults to false. vertexColors defaults to false (palette texture).",
+        "Write a glTF 2.0 .glb of every object. merge defaults to false. vertexColors defaults to false (palette texture). A skeleton writes a rigid skin.",
     ),
+    ("rig.add", "name, pivot, parent?, rotation?", "Add a bone. rotation is [x, y, z, w]"),
+    ("rig.set", "name, parent?, pivot?, rotation?, rename?", "Change a bone. parent null makes a root"),
+    ("rig.remove", "name", "Delete a bone. Objects bound to it become unbound"),
+    ("rig.bind", "index, bone", "Bind an object. bone null unbinds"),
+    ("rig.list", "", "Bones with parent, pivot, rotation, and bound objects"),
     (
         "ui.screenshot",
         "region?, x?, y?, width?, height?, path?",
@@ -224,6 +345,7 @@ fn inspect(session: &Session) -> Value {
                 "voxels": object.cells.len(),
                 "bounds": bounds_json(object.cells.keys().copied()),
                 "translation": [object.translation.0, object.translation.1, object.translation.2],
+                "bone": object.bone,
             })
         })
         .collect();
@@ -243,6 +365,7 @@ fn inspect(session: &Session) -> Value {
         "canUndo": session.can_undo(),
         "canRedo": session.can_redo(),
         "objects": objects,
+        "bones": bone_rows(session),
         "palette": (0..256).map(|i| hex_color(session.palette[i])).collect::<Vec<_>>(),
     })
 }
@@ -364,12 +487,127 @@ pub fn req_str(value: &Value, key: &str) -> Result<String, String> {
     opt_str(value, key)?.ok_or_else(|| format!("missing string {key}"))
 }
 
+fn opt_i32_range(value: &Value, key: &str, fallback: i32, lo: i32, hi: i32) -> Result<i32, String> {
+    match value.get(key) {
+        None => Ok(fallback),
+        Some(found) => {
+            let Some(number) = as_i32(found) else {
+                return Err(format!("{key} is out of range"));
+            };
+            if number < lo || number > hi {
+                return Err(format!("{key} is out of range"));
+            }
+            Ok(number)
+        }
+    }
+}
+
+fn opt_f64(value: &Value, key: &str) -> Result<Option<f64>, String> {
+    match value.get(key) {
+        None => Ok(None),
+        Some(found) => {
+            let Some(number) = found.as_f64() else {
+                return Err(format!("{key} must be a number"));
+            };
+            if !number.is_finite() {
+                return Err(format!("{key} must be a number"));
+            }
+            Ok(Some(number))
+        }
+    }
+}
+
 fn opt_bool(value: &Value, key: &str) -> Result<Option<bool>, String> {
     match value.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(flag)) => Ok(Some(*flag)),
         Some(_) => Err(format!("{key} must be a boolean")),
     }
+}
+
+fn bones_json(session: &Session) -> Value {
+    json!({"bones": bone_rows(session)})
+}
+
+fn bone_rows(session: &Session) -> Vec<Value> {
+    session
+        .skeleton
+        .bones
+        .iter()
+        .map(|bone| {
+            let objects: Vec<usize> = session
+                .objects
+                .iter()
+                .enumerate()
+                .filter(|(_, object)| object.bone.as_deref() == Some(bone.name.as_str()))
+                .map(|(index, _)| index)
+                .collect();
+            json!({
+                "name": bone.name,
+                "parent": bone.parent,
+                "pivot": bone.pivot,
+                "rotation": bone.rotation,
+                "objects": objects,
+            })
+        })
+        .collect()
+}
+
+fn parent_update(value: &Value) -> Result<Option<Option<String>>, String> {
+    match value.get("parent") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(text)) => Ok(Some(Some(text.clone()))),
+        Some(_) => Err("parent must be a bone name or null".into()),
+    }
+}
+
+fn bind_name(value: &Value) -> Result<Option<String>, String> {
+    match value.get("bone") {
+        None => Err("missing bone".into()),
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err("bone must be a name or null".into()),
+    }
+}
+
+fn req_vec3(value: &Value, key: &str) -> Result<[f32; 3], String> {
+    let found = value.get(key).ok_or_else(|| format!("missing {key}"))?;
+    as_vec(found, 3).ok_or_else(|| format!("{key} must be [x, y, z]"))
+        .map(|v| [v[0], v[1], v[2]])
+}
+
+fn opt_vec3(value: &Value, key: &str) -> Result<Option<[f32; 3]>, String> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(found) => as_vec(found, 3)
+            .map(|v| Some([v[0], v[1], v[2]]))
+            .ok_or_else(|| format!("{key} must be [x, y, z]")),
+    }
+}
+
+fn opt_vec4(value: &Value, key: &str) -> Result<Option<[f32; 4]>, String> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(found) => as_vec(found, 4)
+            .map(|v| Some([v[0], v[1], v[2], v[3]]))
+            .ok_or_else(|| format!("{key} must be [x, y, z, w]")),
+    }
+}
+
+fn as_vec(value: &Value, len: usize) -> Option<Vec<f32>> {
+    let array = value.as_array()?;
+    if array.len() != len {
+        return None;
+    }
+    array
+        .iter()
+        .map(|item| {
+            let number = item.as_f64()?;
+            let number = number as f32;
+            number.is_finite().then_some(number)
+        })
+        .collect()
 }
 
 pub fn opt_str(value: &Value, key: &str) -> Result<Option<String>, String> {

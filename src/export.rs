@@ -85,12 +85,18 @@ struct Built {
     /// Vertex colors (`VEC4`) or texture coordinates (`VEC2`).
     extra: Vec<f32>,
     indices: Vec<u32>,
+    /// Four joint indices per vertex. Empty when the document has no bones,
+    /// so the rigid exporter does not read it.
+    joints: Vec<u16>,
     min: [f32; 3],
     max: [f32; 3],
     blend: bool,
 }
 
 fn encode(session: &Session, options: &MeshExport) -> Result<Vec<u8>, String> {
+    if !session.skeleton.bones.is_empty() {
+        return encode_skinned(session, options);
+    }
     let built = build_with(session, options);
     let quads = (built.indices.len() / 6) as u32;
     if quads == 0 {
@@ -229,6 +235,215 @@ fn encode(session: &Session, options: &MeshExport) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+fn encode_skinned(session: &Session, options: &MeshExport) -> Result<Vec<u8>, String> {
+    for object in &session.objects {
+        if object.hidden || object.cells.values().all(|slot| *slot == 0) {
+            continue;
+        }
+        session.skeleton.joint_or_root(object.bone.as_deref())?;
+    }
+    let built = build_with(session, options);
+    let quads = (built.indices.len() / 6) as u32;
+    if quads == 0 {
+        return Err("Nothing to export.".into());
+    }
+    let verts = (built.positions.len() / 3) as u32;
+    let poses = crate::rig::bind_pose(&session.skeleton)?;
+    let pos_bytes = built.positions.len() * 4;
+    let nrm_bytes = built.normals.len() * 4;
+    let extra_bytes = built.extra.len() * 4;
+    let joint_bytes = built.joints.len() * 2;
+    let weight_bytes = verts as usize * 16;
+    let idx_bytes = built.indices.len() * 4;
+    let ibm_bytes = poses.len() * 64;
+    let png = if options.vertex_colors {
+        Vec::new()
+    } else {
+        palette_png(&session.palette)?
+    };
+    let mut bin = Vec::new();
+    push_f32s(&mut bin, &built.positions);
+    push_f32s(&mut bin, &built.normals);
+    push_f32s(&mut bin, &built.extra);
+    for joint in &built.joints {
+        bin.extend_from_slice(&joint.to_le_bytes());
+    }
+    for _ in 0..verts {
+        push_f32s(&mut bin, &[1.0, 0.0, 0.0, 0.0]);
+    }
+    for index in &built.indices {
+        bin.extend_from_slice(&index.to_le_bytes());
+    }
+    for pose in &poses {
+        push_f32s(&mut bin, &pose.inverse_bind);
+    }
+    let image_off = bin.len();
+    bin.extend_from_slice(&png);
+    pad(&mut bin, 0);
+
+    let nrm_off = pos_bytes;
+    let extra_off = nrm_off + nrm_bytes;
+    let joint_off = extra_off + extra_bytes;
+    let weight_off = joint_off + joint_bytes;
+    let idx_off = weight_off + weight_bytes;
+    let ibm_off = idx_off + idx_bytes;
+    let color_name = if options.vertex_colors {
+        "COLOR_0"
+    } else {
+        "TEXCOORD_0"
+    };
+    let extra_type = if options.vertex_colors {
+        "VEC4"
+    } else {
+        "VEC2"
+    };
+    let alpha = if built.blend { "BLEND" } else { "OPAQUE" };
+    let material_name = if options.vertex_colors {
+        "voxel-vertex-color"
+    } else {
+        "voxel-palette"
+    };
+    let mut material = json!({
+        "name": material_name,
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+            "metallicFactor": 0.0,
+            "roughnessFactor": 1.0
+        },
+        "alphaMode": alpha
+    });
+    if !options.vertex_colors {
+        material["pbrMetallicRoughness"]["baseColorTexture"] = json!({"index": 0});
+    }
+    let mut attributes = serde_json::Map::new();
+    attributes.insert("POSITION".into(), json!(0));
+    attributes.insert("NORMAL".into(), json!(1));
+    attributes.insert(color_name.into(), json!(2));
+    attributes.insert("JOINTS_0".into(), json!(3));
+    attributes.insert("WEIGHTS_0".into(), json!(4));
+
+    let mut nodes = vec![json!({"name": "voxels", "mesh": 0, "skin": 0})];
+    for (index, pose) in poses.iter().enumerate() {
+        let mut node = json!({
+            "name": session.skeleton.bones[index].name,
+            "translation": pose.translation,
+            "rotation": pose.rotation
+        });
+        let children: Vec<usize> = session
+            .skeleton
+            .child_indices(index)
+            .into_iter()
+            .map(|child| child + 1)
+            .collect();
+        if !children.is_empty() {
+            node["children"] = json!(children);
+        }
+        nodes.push(node);
+    }
+    let mut scene_nodes = vec![0usize];
+    let roots: Vec<usize> = session
+        .skeleton
+        .root_indices()
+        .into_iter()
+        .map(|index| index + 1)
+        .collect();
+    scene_nodes.extend(roots.iter().copied());
+    let joints: Vec<usize> = (1..=session.skeleton.bones.len()).collect();
+    let mut skin = json!({
+        "joints": joints,
+        "inverseBindMatrices": 6
+    });
+    if let Some(root) = roots.first() {
+        skin["skeleton"] = json!(root);
+    }
+
+    let mut root = json!({
+        "asset": {"version": "2.0", "generator": "MacVoxel"},
+        "scene": 0,
+        "scenes": [{"nodes": scene_nodes}],
+        "nodes": nodes,
+        "skins": [skin],
+        "materials": [material],
+        "meshes": [{
+            "name": "voxels",
+            "primitives": [{
+                "attributes": attributes,
+                "indices": 5,
+                "material": 0,
+                "mode": 4
+            }]
+        }],
+        "accessors": [
+            {
+                "bufferView": 0,
+                "componentType": 5126,
+                "count": verts,
+                "type": "VEC3",
+                "min": built.min,
+                "max": built.max
+            },
+            {"bufferView": 1, "componentType": 5126, "count": verts, "type": "VEC3"},
+            {"bufferView": 2, "componentType": 5126, "count": verts, "type": extra_type},
+            {"bufferView": 3, "componentType": 5123, "count": verts, "type": "VEC4"},
+            {"bufferView": 4, "componentType": 5126, "count": verts, "type": "VEC4"},
+            {
+                "bufferView": 5,
+                "componentType": 5125,
+                "count": built.indices.len(),
+                "type": "SCALAR"
+            },
+            {
+                "bufferView": 6,
+                "componentType": 5126,
+                "count": poses.len(),
+                "type": "MAT4"
+            }
+        ],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": pos_bytes, "target": 34962},
+            {"buffer": 0, "byteOffset": nrm_off, "byteLength": nrm_bytes, "target": 34962},
+            {"buffer": 0, "byteOffset": extra_off, "byteLength": extra_bytes, "target": 34962},
+            {"buffer": 0, "byteOffset": joint_off, "byteLength": joint_bytes, "target": 34962},
+            {"buffer": 0, "byteOffset": weight_off, "byteLength": weight_bytes, "target": 34962},
+            {"buffer": 0, "byteOffset": idx_off, "byteLength": idx_bytes, "target": 34963},
+            {"buffer": 0, "byteOffset": ibm_off, "byteLength": ibm_bytes}
+        ],
+        "buffers": [{"byteLength": bin.len()}]
+    });
+    if !options.vertex_colors {
+        root["textures"] = json!([{"sampler": 0, "source": 0}]);
+        root["samplers"] = json!([{
+            "magFilter": 9728,
+            "minFilter": 9728,
+            "wrapS": 33071,
+            "wrapT": 33071
+        }]);
+        root["images"] = json!([{"bufferView": 7, "mimeType": "image/png"}]);
+        root["bufferViews"]
+            .as_array_mut()
+            .expect("buffer views")
+            .push(json!({
+                "buffer": 0,
+                "byteOffset": image_off,
+                "byteLength": png.len()
+            }));
+    }
+    let mut json_bytes = serde_json::to_vec(&root).map_err(|err| err.to_string())?;
+    pad(&mut json_bytes, b' ');
+    let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(b"glTF");
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"JSON");
+    out.extend_from_slice(&json_bytes);
+    out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"BIN\0");
+    out.extend_from_slice(&bin);
+    Ok(out)
+}
+
 #[cfg(test)]
 fn build(session: &Session) -> Built {
     build_with(
@@ -246,6 +461,7 @@ fn build_with(session: &Session, options: &MeshExport) -> Built {
         normals: Vec::new(),
         extra: Vec::new(),
         indices: Vec::new(),
+        joints: Vec::new(),
         min: [f32::MAX; 3],
         max: [f32::MIN; 3],
         blend: false,
@@ -255,17 +471,26 @@ fn build_with(session: &Session, options: &MeshExport) -> Built {
         if object.hidden {
             continue;
         }
+        let bone = if session.skeleton.bones.is_empty() {
+            0
+        } else {
+            session
+                .skeleton
+                .joint_or_root(object.bone.as_deref())
+                .unwrap_or(0)
+        };
         for mut quad in merged_quads(&object.cells, options.merge) {
             quad.cell = (
                 quad.cell.0 + object.translation.0,
                 quad.cell.1 + object.translation.1,
                 quad.cell.2 + object.translation.2,
             );
+            quad.bone = bone;
             quads.push(quad);
         }
     }
     if options.merge {
-        quads = split_junctions(quads);
+        quads = split_per_bone(quads);
     }
     for quad in quads {
         let rgba = session.palette[quad.slot as usize];
@@ -294,6 +519,9 @@ fn build_with(session: &Session, options: &MeshExport) -> Built {
             } else {
                 built.extra.extend_from_slice(&uv);
             }
+            if !session.skeleton.bones.is_empty() {
+                built.joints.extend_from_slice(&[quad.bone, 0, 0, 0]);
+            }
         }
         built
             .indices
@@ -306,12 +534,14 @@ fn build_with(session: &Session, options: &MeshExport) -> Built {
     built
 }
 
+#[derive(Clone, Copy)]
 struct GreedyQuad {
     face: usize,
     cell: Cell,
     w: i32,
     h: i32,
     slot: u8,
+    bone: u16,
 }
 
 /// Plane axis, then the two in-plane axes. Width grows along `u`.
@@ -390,6 +620,7 @@ fn merged_quads(cells: &std::collections::HashMap<Cell, u8>, merge: bool) -> Vec
                 w,
                 h,
                 slot,
+                bone: 0,
             });
         }
     }
@@ -497,6 +728,7 @@ fn split_junctions(quads: Vec<GreedyQuad>) -> Vec<GreedyQuad> {
                         w: du,
                         h: dv,
                         slot: quad.slot,
+                        bone: quad.bone,
                     });
                 }
             }
@@ -507,6 +739,30 @@ fn split_junctions(quads: Vec<GreedyQuad>) -> Vec<GreedyQuad> {
         }
     }
     quads
+}
+
+/// Split T-junctions inside one bone. A single bone keeps the input order
+/// and calls the same splitter the rigid export uses.
+fn split_per_bone(quads: Vec<GreedyQuad>) -> Vec<GreedyQuad> {
+    let mut ids = Vec::new();
+    for quad in &quads {
+        if !ids.contains(&quad.bone) {
+            ids.push(quad.bone);
+        }
+    }
+    if ids.len() <= 1 {
+        return split_junctions(quads);
+    }
+    let mut out = Vec::new();
+    for id in ids {
+        let group: Vec<GreedyQuad> = quads
+            .iter()
+            .copied()
+            .filter(|quad| quad.bone == id)
+            .collect();
+        out.extend(split_junctions(group));
+    }
+    out
 }
 
 fn y_up(p: [f32; 3]) -> [f32; 3] {
@@ -734,6 +990,7 @@ mod tests {
             model_dims: (0, 0, 0),
             hidden: true,
             file: None,
+            bone: None,
         });
         assert_eq!(build(&session).indices.len() / 6, 6);
     }

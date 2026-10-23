@@ -264,7 +264,7 @@ pub fn trace_rows(image: &mut Image, session: &Session, rows: u32) -> bool {
         let sample = image.samples;
         for x in 0..image.width {
             let (color, albedo) =
-                shade_pixel(&world, &shade, image.width, image.height, x, y, sample);
+                shade_pixel(&world, &shade, image.width, image.height, x, y, sample, 0);
             store_pixel(image, &shade, x, y, sample, color, albedo);
         }
         image.row += 1;
@@ -277,6 +277,29 @@ pub fn trace_rows(image: &mut Image, session: &Session, rows: u32) -> bool {
     image.samples > finished_before
 }
 
+/// Path-trace a finished frame. `seed` is mixed into the sampler; `0` matches
+/// one sample of [`trace_rows`].
+pub fn render_still(session: &Session, width: u32, height: u32, samples: u32, seed: u32) -> Image {
+    let mut image = Image::new(width, height);
+    if width == 0 || height == 0 || samples == 0 {
+        return image;
+    }
+    let world = build_world(session);
+    let shade = Shade::from_session(session);
+    for sample in 0..samples {
+        for y in 0..height {
+            for x in 0..width {
+                let (color, albedo) =
+                    shade_pixel(&world, &shade, width, height, x, y, sample, seed);
+                store_pixel(&mut image, &shade, x, y, sample, color, albedo);
+            }
+        }
+        image.row = 0;
+        image.samples = sample + 1;
+    }
+    image
+}
+
 fn shade_pixel(
     world: &World,
     shade: &Shade,
@@ -285,8 +308,9 @@ fn shade_pixel(
     x: u32,
     y: u32,
     sample: u32,
+    seed: u32,
 ) -> ([f32; 3], [f32; 3]) {
-    let mut rng = Rng(hash(x, y, sample));
+    let mut rng = Rng(hash(x, y, sample).wrapping_add(seed));
     let center = primary_dir(width, height, x, y, shade.eye, shade.target, &mut rng);
     let (origin, dir) = lens_ray(shade, shade.eye, shade.target, center, &mut rng);
     let color = radiance(world, shade, origin, dir, 0, &mut rng);

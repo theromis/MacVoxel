@@ -3,8 +3,8 @@
 //! `macvoxel-egui mcp` edits an in-process document and has no window.
 //! `macvoxel-egui mcp --connect 127.0.0.1:PORT` drives an editor started with
 //! `--control PORT`. `--launch` opens that editor when the port is closed.
-//! Screenshots exist only on the connected window. The window path-traces in
-//! Render mode. This server has no render tool.
+//! Screenshots exist only on the connected window. `render` path-traces a PNG
+//! in this process. The window path-traces in Render mode on the GPU.
 
 use std::io::{self, BufRead, Write};
 use std::process::{Command, Stdio};
@@ -279,7 +279,7 @@ fn dispatch(
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": "MacVoxel", "version": "0.1.0"},
-                "instructions": "Edits apply to the active object, in that object's local cells. screenshot, screenshot_viewport, screenshot_region, ui_inspect, and ui_click need an editor started with --control and this server started with --connect. The window path-traces in Render mode. This server has no render tool."
+                "instructions": "Edits apply to the active object, in that object's local cells. render path-traces a PNG in this process. screenshot, screenshot_viewport, screenshot_region, ui_inspect, and ui_click need an editor started with --control and this server started with --connect. The window path-traces in Render mode."
             }),
         ));
     }
@@ -336,8 +336,14 @@ fn map_tool(name: &str, args: &Value) -> Result<(String, Value), String> {
         "get_voxels" => "voxel.get_box",
         "set_palette" => "palette.set",
         "set_active_object" => "object.set_active",
+        "add_bone" => "rig.add",
+        "set_bone" => "rig.set",
+        "remove_bone" => "rig.remove",
+        "bind_object" => "rig.bind",
+        "list_bones" => "rig.list",
         "undo" => "edit.undo",
         "redo" => "edit.redo",
+        "render" => "render",
         "screenshot" => "ui.screenshot",
         "screenshot_viewport" => "ui.screenshot",
         "screenshot_region" => "ui.screenshot",
@@ -440,8 +446,41 @@ fn tools() -> Vec<Value> {
             "entries": {"type": "array", "description": "Batch of {index,r,g,b,a?}. Omit when passing index."}
         }), &[]),
         tool("set_active_object", "Edit a different object from inspect_document.", json!({"index": int_prop("Object index")}), &["index"]),
+        tool("add_bone", "Add a bone. One undo step. parent is omitted for a root.", json!({
+            "name": str_prop("Unique bone name"),
+            "parent": {"type": ["string", "null"], "description": "Parent bone name. Omit or null for a root."},
+            "pivot": vec3_prop("World pivot [x, y, z] in voxel coordinates"),
+            "rotation": vec4_prop("Quaternion [x, y, z, w] in voxel space. Defaults to identity.")
+        }), &["name", "pivot"]),
+        tool("set_bone", "Change a bone's parent, pivot, rotation, or name. One undo step. Omit a field to leave it. parent null makes a root.", json!({
+            "name": str_prop("Bone to edit"),
+            "parent": {"type": ["string", "null"], "description": "Parent bone. null makes a root. Omit to leave the parent."},
+            "pivot": vec3_prop("World pivot [x, y, z]"),
+            "rotation": vec4_prop("Quaternion [x, y, z, w]"),
+            "rename": str_prop("New unique name")
+        }), &["name"]),
+        tool("remove_bone", "Delete a bone. Objects bound to it become unbound. Children keep its parent. One undo step.", json!({
+            "name": str_prop("Bone to delete")
+        }), &["name"]),
+        tool("bind_object", "Bind an object to one bone, or unbind it. One undo step. An unbound object follows the skeleton root at export.", json!({
+            "index": int_prop("Object index from inspect_document"),
+            "bone": {"type": ["string", "null"], "description": "Bone name. null unbinds."}
+        }), &["index", "bone"]),
+        tool("list_bones", "Bones with parent, pivot, rotation, and the object indices bound to each.", json!({}), &[]),
         tool("undo", "Undo the last edit.", json!({}), &[]),
         tool("redo", "Redo the last undone edit.", json!({}), &[]),
+        tool("render", "Path-trace the whole scene to a PNG. Blocks until the file is written. The camera frames the scene; yaw, pitch, and distance orbit that frame.", json!({
+            "path": str_prop("PNG file to write"),
+            "width": int_prop("Pixels, 1..1024. Default 256."),
+            "height": int_prop("Pixels, 1..1024. Default 256."),
+            "samples": int_prop("Path-trace samples, 1..128. Default 16."),
+            "bounces": int_prop("Max bounces, 0..8. Default 4."),
+            "seed": int_prop("Sampling seed. Default 1."),
+            "denoise": {"type": "boolean", "description": "Edge-aware filter before writing. Default true. Open Image Denoise is not linked."},
+            "yaw": num_prop("Orbit yaw in degrees. Omit to keep the framing angle (30)."),
+            "pitch": num_prop("Orbit pitch in degrees, -90..90. 90 looks straight down. Omit to keep the framing angle (25)."),
+            "distance": num_prop("Multiple of the framing distance, greater than 0 and at most 100. Default 1.")
+        }), &["path"]),
         tool("screenshot", "PNG of the whole editor window. Only when connected to a window.", json!({"path": str_prop("Optional file to write")}), &[]),
         tool("screenshot_viewport", "PNG of the 3D viewport. Only when connected to a window.", json!({"path": str_prop("Optional file to write")}), &[]),
         tool("screenshot_region", "PNG of a rectangle in window points, origin at the top-left of the client area. Only when connected to a window.", json!({
@@ -456,7 +495,7 @@ fn tools() -> Vec<Value> {
             "x": num_prop("X in window points, origin at the top-left of the client area"),
             "y": num_prop("Y in window points, origin at the top-left of the client area")
         }), &["x", "y"]),
-        tool("export_mesh", "Write a glTF 2.0 .glb of every object. Exposed faces only. The default material is a 256-wide palette texture.", json!({
+        tool("export_mesh", "Write a glTF 2.0 .glb of every object. Exposed faces only. The default material is a 256-wide palette texture. A skeleton writes one rigid skin: each vertex belongs to one bone with weight 1.", json!({
             "path": str_prop("Where to write the .glb"),
             "merge": {"type": "boolean", "description": "Greedy-merge coplanar faces of one palette slot. Defaults to false."},
             "vertexColors": {"type": "boolean", "description": "Store a linear COLOR_0 on each vertex instead of the palette texture. Defaults to false."}
@@ -489,6 +528,26 @@ fn num_prop(description: &str) -> Value {
     json!({"type": "number", "description": description})
 }
 
+fn vec3_prop(description: &str) -> Value {
+    json!({
+        "type": "array",
+        "items": {"type": "number"},
+        "minItems": 3,
+        "maxItems": 3,
+        "description": description
+    })
+}
+
+fn vec4_prop(description: &str) -> Value {
+    json!({
+        "type": "array",
+        "items": {"type": "number"},
+        "minItems": 4,
+        "maxItems": 4,
+        "description": description
+    })
+}
+
 fn xyz_props() -> Value {
     json!({
         "x": int_prop("Local x of the active object"),
@@ -510,7 +569,7 @@ Screenshots need the editor:
   macvoxel-egui mcp --connect 127.0.0.1:7979
 
 --launch opens the editor with that control port when nothing is listening.
-The window path-traces in Render mode. This server has no render tool."
+render path-traces a PNG in this process. The window path-traces in Render mode."
     );
 }
 
@@ -562,5 +621,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reply["result"]["isError"], true);
+    }
+
+    #[test]
+    fn headless_render_writes_a_png_and_leaves_the_camera() {
+        let mut state = Proto::default();
+        let mut session = Session::new();
+        session.replace_empty();
+        session.objects[0].cells.insert((0, 0, 0), 4);
+        session.yaw = 1.25;
+        let path = std::env::temp_dir().join("macvoxel-egui-mcp-render.png");
+        let _ = std::fs::remove_file(&path);
+        dispatch(
+            &mut state,
+            &mut session,
+            None,
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        );
+        let reply = dispatch(
+            &mut state,
+            &mut session,
+            None,
+            &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "render", "arguments": {
+                "path": path.to_string_lossy(),
+                "width": 2,
+                "height": 2,
+                "samples": 1,
+                "bounces": 1,
+                "denoise": false
+            }}}),
+        )
+        .unwrap();
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+        assert!((session.yaw - 1.25).abs() < 1e-5);
+        let _ = std::fs::remove_file(&path);
+
+        let empty = dispatch(
+            &mut state,
+            &mut session,
+            None,
+            &json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "render", "arguments": {
+                "path": path.to_string_lossy(),
+                "pitch": 120
+            }}}),
+        )
+        .unwrap();
+        assert_eq!(empty["result"]["isError"], true);
+        let text = empty["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("pitch"), "{text}");
     }
 }

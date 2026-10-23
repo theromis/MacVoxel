@@ -205,6 +205,7 @@ pub fn show(
         paint_object_outlines(ui.painter().with_clip_rect(rect), session, rect);
         paint_gizmo(ui.painter().with_clip_rect(rect), session, rect);
     }
+    paint_bones(ui.painter().with_clip_rect(rect), session, rect);
 
     if session.active().cells.is_empty() {
         painter.text(
@@ -792,6 +793,37 @@ fn object_center(session: &Session) -> Option<Vec3> {
         (min.1 + max.1) as f32 * 0.5 + 0.5 + translation.1 as f32,
         (min.2 + max.2) as f32 * 0.5 + 0.5 + translation.2 as f32,
     ))
+}
+
+fn paint_bones(painter: egui::Painter, session: &Session, rect: egui::Rect) {
+    if session.skeleton.bones.is_empty() {
+        return;
+    }
+    for (index, bone) in session.skeleton.bones.iter().enumerate() {
+        let Some(at) = project_point(session, rect, Vec3::from_array(bone.pivot)) else {
+            continue;
+        };
+        let selected = session.selected_bone == Some(index);
+        let color = if selected {
+            egui::Color32::from_rgb(255, 196, 64)
+        } else {
+            egui::Color32::from_rgb(120, 170, 220)
+        };
+        if let Some(parent) = bone
+            .parent
+            .as_deref()
+            .and_then(|name| session.skeleton.index_of(name))
+            .map(|parent| &session.skeleton.bones[parent])
+        {
+            if let Some(from) = project_point(session, rect, Vec3::from_array(parent.pivot)) {
+                painter.line_segment(
+                    [from, at],
+                    egui::Stroke::new(if selected { 2.5_f32 } else { 1.5_f32 }, color),
+                );
+            }
+        }
+        painter.circle_filled(at, if selected { 5.0 } else { 3.5 }, color);
+    }
 }
 
 fn project_point(session: &Session, rect: egui::Rect, point: Vec3) -> Option<egui::Pos2> {

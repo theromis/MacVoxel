@@ -5,7 +5,7 @@ on stdin/stdout. It is the editor in this repository.
 
 | Server | Binary | Window | What an agent can do |
 |---|---|---|---|
-| MacVoxel | `macvoxel-egui` | optional | Edit voxels, export glTF. The window path-traces in Render mode. Screenshot, inspect, and click the live window when connected. MCP has no render tool. |
+| MacVoxel | `macvoxel-egui` | optional | Edit voxels, export glTF, and path-trace a PNG with `render`. Screenshot, inspect, and click the live window when connected. |
 
 ## Editor
 
@@ -129,6 +129,7 @@ tracer. A file with no scene graph still loads its first model.
 | `set_active_object` | `index` | Edit a different object from `inspect_document` |
 | `undo` | — | Undo the last edit |
 | `redo` | — | Redo the last undone edit |
+| `render` | `path` | Path-trace the scene to a PNG. `width` and `height` default to 256. `samples` defaults to 16. `bounces` defaults to 4. `denoise` defaults to true. `yaw` defaults to 30°, `pitch` to 25° |
 | `screenshot` | — | PNG of the whole editor window. Connected mode only |
 | `screenshot_viewport` | — | PNG of the 3D viewport, including its mode chips. Connected mode only |
 | `screenshot_region` | `x`, `y`, `width`, `height` | PNG of a rectangle in window points. Connected mode only |
@@ -178,6 +179,16 @@ along the track. A hit on a palette cell selects that slot. A point on no
 region is an error. Both tools need the connected window; headless they fail
 like the screenshots.
 
+`render` path-traces every visible object and writes a PNG. It does not need a
+window. `width` and `height` are 1..1024 and default to 256. `samples` is
+1..128 and defaults to 16. `bounces` is 0..8 and defaults to 4. `seed`
+defaults to 1. The camera frames the scene, then orbits: `yaw` defaults to
+30 degrees, `pitch` to 25 degrees (−90..90), and `distance` multiplies that
+framing distance (greater than 0, at most 100). The file is ACES tonemapped.
+`denoise` defaults to true and runs the editor's edge-aware filter. Open
+Image Denoise is not linked. An empty scene is an error. The call does not
+move the editor camera. The reply is `path`, `width`, `height`, and `samples`.
+
 `export_mesh` writes every solid voxel of every visible object, exposed faces
 only. Hidden objects are left out. `merge` defaults to false, one quad per
 exposed face. `true` greedy-merges coplanar faces that share a palette slot,
@@ -192,8 +203,8 @@ palette texture and always merges. An empty scene is an error.
 
 ### What this server does not do
 
-It has no render tool. Render mode in the window path-traces on the GPU;
-saving that frame is a window command. It does not drive every mouse tool
+Render mode in the window path-traces on the GPU; saving that frame is a
+window command. `render` is a separate CPU trace. It does not drive every mouse tool
 by name. `ui_click` hits the controls `ui_inspect` lists, including sliders
 and palette cells, plus a stamp in the viewport. Voxel changes also go
 through `set_voxel`, `set_voxels`, and `fill_box` on the active object.
@@ -201,7 +212,8 @@ Screenshots need the connected window.
 
 ## Legacy editor
 
-The Swift/Metal app in `legacy/` has its own headless MCP server, including a
-`render` tool. Build it from that directory (`cmake -B build`) and run
+The Swift/Metal app in `legacy/` has its own headless MCP server. Its `render`
+tool path-traces on Metal and can run Open Image Denoise. Build it from that
+directory (`cmake -B build`) and run
 `MacVoxel mcp`. It does not share a document with `macvoxel-egui`. See
 `legacy/README.md`.

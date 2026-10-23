@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use glam::Vec3;
 
+use crate::rig::Skeleton;
+
 pub type Cell = (i32, i32, i32);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -197,6 +199,9 @@ pub struct Volume {
     /// Leaf transform this object was loaded from. `None` for objects the
     /// editor created. Save uses it to write the original graph back.
     pub file: Option<FileLink>,
+    /// Bone this object is rigidly bound to. `None` follows the skeleton
+    /// root when the document has bones, and means no skin otherwise.
+    pub bone: Option<String>,
 }
 
 /// Where a loaded object sits in the `.vox` graph.
@@ -471,6 +476,9 @@ pub struct Session {
     /// Scene graph from the last opened `.vox`. Save writes it back, including
     /// groups, layers, hidden flags, and animation frames past the first.
     graph: Option<VoxGraph>,
+    pub skeleton: Skeleton,
+    /// Bone highlighted in the viewport. Not part of undo.
+    pub selected_bone: Option<usize>,
 
     pub editor_mode: EditorMode,
     pub render_mode: RenderMode,
@@ -599,6 +607,8 @@ impl Session {
             next_object: 2,
             path: None,
             graph: None,
+            skeleton: Skeleton::default(),
+            selected_bone: None,
             editor_mode: EditorMode::Model,
             render_mode: RenderMode::Edit,
             stochastic_gi: true,
@@ -668,6 +678,7 @@ impl Session {
             model_dims: (0, 0, 0),
             hidden: false,
             file: None,
+            bone: None,
         });
         session.frame_camera();
         session
@@ -1057,12 +1068,15 @@ impl Session {
             model_dims: (0, 0, 0),
             hidden: false,
             file: None,
+            bone: None,
         });
         self.selected = 0;
         self.focus_object();
         self.next_object = 2;
         self.path = None;
         self.graph = None;
+        self.skeleton = Skeleton::default();
+        self.selected_bone = None;
         self.palette = default_palette();
         self.materials = [Material::default(); 256];
         self.undo.clear();
@@ -1127,6 +1141,7 @@ impl Session {
                 model_dims: object.model_dims,
                 hidden: object.hidden,
                 file,
+                bone: object.bone,
             });
         }
         if self.objects.is_empty() {
@@ -1141,6 +1156,7 @@ impl Session {
                 model_dims: (0, 0, 0),
                 hidden: false,
                 file: None,
+            bone: None,
             });
         }
         self.selected = 0;
@@ -1149,6 +1165,8 @@ impl Session {
         self.palette = loaded.palette.unwrap_or_else(default_palette);
         self.materials = loaded.materials;
         self.graph = loaded.graph;
+        self.skeleton = loaded.skeleton;
+        self.selected_bone = None;
         self.path = Some(path.to_path_buf());
         self.undo.clear();
         self.redo.clear();
@@ -1181,12 +1199,15 @@ impl Session {
             model_dims: (0, 0, 0),
             hidden: false,
             file: None,
+            bone: None,
         });
         self.selected = 0;
         self.focus_object();
         self.next_object = 2;
         self.path = None;
         self.graph = None;
+        self.skeleton = Skeleton::default();
+        self.selected_bone = None;
         self.palette = default_palette();
         self.materials = [Material::default(); 256];
         self.undo.clear();
@@ -1313,6 +1334,7 @@ impl Session {
             &self.palette,
             &self.materials,
             self.graph.as_ref(),
+            &self.skeleton,
         ) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -1638,6 +1660,7 @@ impl Session {
             model_dims: (0, 0, 0),
             hidden: false,
             file: None,
+            bone: None,
         });
         self.selected = self.objects.len() - 1;
         self.focus_object();
@@ -1670,6 +1693,7 @@ impl Session {
             model_dims: source.model_dims,
             hidden: source.hidden,
             file: None,
+            bone: source.bone.clone(),
         };
         self.objects.insert(self.selected + 1, copy);
         self.selected += 1;
@@ -1699,6 +1723,160 @@ impl Session {
         self.checkpoint();
         self.active_mut().name = name;
         self.commit();
+    }
+
+    pub fn add_bone(
+        &mut self,
+        name: &str,
+        parent: Option<&str>,
+        pivot: [f32; 3],
+        rotation: Option<[f32; 4]>,
+    ) -> Result<(), String> {
+        let mut next = self.skeleton.clone();
+        next.add(name, parent, pivot, rotation)?;
+        self.checkpoint();
+        self.skeleton = next;
+        self.selected_bone = Some(self.skeleton.bones.len() - 1);
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_bone(
+        &mut self,
+        name: &str,
+        parent: Option<Option<String>>,
+        pivot: Option<[f32; 3]>,
+        rotation: Option<[f32; 4]>,
+        rename: Option<&str>,
+    ) -> Result<(), String> {
+        let mut next = self.skeleton.clone();
+        let renamed = next.set(name, parent, pivot, rotation, rename)?;
+        self.checkpoint();
+        self.skeleton = next;
+        if let Some(next_name) = renamed {
+            for object in &mut self.objects {
+                if object.bone.as_deref() == Some(name) {
+                    object.bone = Some(next_name.clone());
+                }
+            }
+            if let Some(index) = self.skeleton.index_of(&next_name) {
+                self.selected_bone = Some(index);
+            }
+        }
+        self.commit();
+        Ok(())
+    }
+
+    pub fn remove_bone(&mut self, name: &str) -> Result<(), String> {
+        let removed = self.skeleton.index_of(name);
+        let mut next = self.skeleton.clone();
+        next.remove(name)?;
+        self.checkpoint();
+        self.skeleton = next;
+        for object in &mut self.objects {
+            if object.bone.as_deref() == Some(name) {
+                object.bone = None;
+            }
+        }
+        if let Some(index) = self.selected_bone {
+            if Some(index) == removed {
+                self.selected_bone = None;
+            } else if removed.is_some_and(|gone| index > gone) {
+                self.selected_bone = Some(index - 1);
+            }
+        }
+        self.commit();
+        Ok(())
+    }
+
+    pub fn bind_object(&mut self, index: usize, bone: Option<&str>) -> Result<(), String> {
+        if index >= self.objects.len() {
+            return Err(format!(
+                "object index {index} is out of range ({} objects)",
+                self.objects.len()
+            ));
+        }
+        if let Some(name) = bone {
+            if self.skeleton.index_of(name).is_none() {
+                return Err(format!("unknown bone `{name}`"));
+            }
+        }
+        let next = bone.map(str::to_string);
+        if self.objects[index].bone == next {
+            return Ok(());
+        }
+        self.checkpoint();
+        self.objects[index].bone = next;
+        self.commit();
+        Ok(())
+    }
+
+    /// One undo step for a numeric pivot drag. The first change snapshots.
+    pub fn preview_bone_pivot(&mut self, index: usize, axis: usize, value: f32) {
+        if axis > 2 || !value.is_finite() {
+            return;
+        }
+        let Some(current) = self.skeleton.bones.get(index).map(|bone| bone.pivot[axis]) else {
+            return;
+        };
+        if current == value {
+            return;
+        }
+        self.checkpoint();
+        self.skeleton.bones[index].pivot[axis] = value;
+    }
+
+    pub fn finish_bone_edit(&mut self) {
+        self.commit();
+    }
+
+    pub fn fresh_bone_name(&self) -> String {
+        let mut number = 1;
+        loop {
+            let name = if number == 1 {
+                "Bone".to_string()
+            } else {
+                format!("Bone {number}")
+            };
+            if self.skeleton.index_of(&name).is_none() {
+                return name;
+            }
+            number += 1;
+        }
+    }
+
+    /// Centre of the active object's voxels, in world voxel coordinates.
+    pub fn active_bone_pivot(&self) -> [f32; 3] {
+        let object = self.active();
+        let mut any = false;
+        let mut min = [0; 3];
+        let mut max = [0; 3];
+        for (x, y, z) in object.cells.keys() {
+            if !any {
+                min = [*x, *y, *z];
+                max = [*x, *y, *z];
+                any = true;
+            } else {
+                min[0] = min[0].min(*x);
+                min[1] = min[1].min(*y);
+                min[2] = min[2].min(*z);
+                max[0] = max[0].max(*x);
+                max[1] = max[1].max(*y);
+                max[2] = max[2].max(*z);
+            }
+        }
+        if !any {
+            return [
+                object.translation.0 as f32,
+                object.translation.1 as f32,
+                object.translation.2 as f32,
+            ];
+        }
+        [
+            object.translation.0 as f32 + (min[0] + max[0] + 1) as f32 * 0.5,
+            object.translation.1 as f32 + (min[1] + max[1] + 1) as f32 * 0.5,
+            object.translation.2 as f32 + (min[2] + max[2] + 1) as f32 * 0.5,
+        ]
     }
 
     pub fn select_object(&mut self, index: usize) {
@@ -1765,6 +1943,7 @@ impl Session {
             palette: self.palette,
             materials: self.materials,
             graph: self.graph.clone(),
+            skeleton: self.skeleton.clone(),
         }
     }
 
@@ -1774,6 +1953,7 @@ impl Session {
             palette: std::mem::replace(&mut self.palette, snap.palette),
             materials: std::mem::replace(&mut self.materials, snap.materials),
             graph: std::mem::replace(&mut self.graph, snap.graph),
+            skeleton: std::mem::replace(&mut self.skeleton, snap.skeleton),
         }
     }
 
@@ -1789,6 +1969,7 @@ impl Session {
                 || prev.palette != self.palette
                 || prev.materials != self.materials
                 || prev.graph != self.graph
+                || prev.skeleton != self.skeleton
             {
                 self.undo.push(prev);
                 self.redo.clear();
@@ -1840,9 +2021,16 @@ impl Session {
                 model_dims: (0, 0, 0),
                 hidden: false,
                 file: None,
+            bone: None,
             });
         }
         self.selected = self.selected.min(self.objects.len() - 1);
+        if self
+            .selected_bone
+            .is_some_and(|index| index >= self.skeleton.bones.len())
+        {
+            self.selected_bone = None;
+        }
         self.object_selection
             .retain(|index| *index < self.objects.len());
         if !self.object_selection.contains(&self.selected) {
@@ -3399,6 +3587,7 @@ struct Snapshot {
     palette: [[u8; 4]; 256],
     materials: [Material; 256],
     graph: Option<VoxGraph>,
+    skeleton: Skeleton,
 }
 
 #[derive(Clone)]
@@ -4035,6 +4224,7 @@ struct LoadedObject {
     model_dims: (i32, i32, i32),
     hidden: bool,
     file: Option<FileLink>,
+    bone: Option<String>,
 }
 
 struct Loaded {
@@ -4042,6 +4232,7 @@ struct Loaded {
     palette: Option<[[u8; 4]; 256]>,
     materials: [Material; 256],
     graph: Option<VoxGraph>,
+    skeleton: Skeleton,
 }
 
 /// Graphless single-model writer. The editor saves a scene; these tests
@@ -4108,10 +4299,11 @@ fn save_document(
     palette: &[[u8; 4]; 256],
     materials: &[Material; 256],
     graph: Option<&VoxGraph>,
+    skeleton: &Skeleton,
 ) -> Result<Vec<u8>, String> {
     match graph {
-        Some(graph) => save_graph(objects, palette, materials, graph),
-        None => save_scene(objects, palette, materials),
+        Some(graph) => save_graph(objects, palette, materials, graph, skeleton),
+        None => save_scene(objects, palette, materials, skeleton),
     }
 }
 
@@ -4123,11 +4315,13 @@ fn save_graph(
     palette: &[[u8; 4]; 256],
     materials: &[Material; 256],
     graph: &VoxGraph,
+    skeleton: &Skeleton,
 ) -> Result<Vec<u8>, String> {
     let mut models = graph.models.clone();
     let mut nodes = graph.nodes.clone();
     let mut next_id = nodes.iter().map(|node| node.id).max().unwrap_or(0) + 1;
     let index_of = |nodes: &[VoxNode], id: i32| nodes.iter().position(|node| node.id == id);
+    let mut rig_saved: Vec<(i32, String, Option<String>)> = Vec::new();
 
     for object in objects {
         let Some(link) = &object.file else {
@@ -4142,6 +4336,7 @@ fn save_graph(
         if let Some(index) = index_of(&nodes, link.trn) {
             rewrite_leaf(&mut nodes[index], object, link, graph.shift, keep_rotation);
         }
+        rig_saved.push((link.trn, object.name.clone(), object.bone.clone()));
     }
 
     let mut added = Vec::new();
@@ -4171,6 +4366,7 @@ fn save_graph(
             keep_rotation,
         ));
         added.push(trn_id);
+        rig_saved.push((trn_id, object.name.clone(), object.bone.clone()));
     }
     if !added.is_empty() {
         let group_id = ensure_group(&mut nodes, &mut next_id);
@@ -4260,6 +4456,7 @@ fn save_graph(
     }
     push_rgba(&mut children, palette);
     push_matl(&mut children, materials);
+    push_rig(&mut children, &rig_saved, skeleton)?;
     Ok(wrap_vox(children))
 }
 
@@ -4609,6 +4806,7 @@ fn save_scene(
     objects: &[Volume],
     palette: &[[u8; 4]; 256],
     materials: &[Material; 256],
+    skeleton: &Skeleton,
 ) -> Result<Vec<u8>, String> {
     struct Packed {
         name: String,
@@ -4616,6 +4814,8 @@ fn save_scene(
         dims: [i32; 3],
         leaf_t: [i32; 3],
         rot: [[i32; 3]; 3],
+        trn: i32,
+        bone: Option<String>,
     }
     let mut packed = Vec::new();
     for object in objects {
@@ -4640,6 +4840,8 @@ fn save_scene(
                 dims,
                 leaf_t: [object.pivot.0, object.pivot.1, object.pivot.2],
                 rot: object.rot,
+                trn: (2 + packed.len() * 2) as i32,
+                bone: object.bone.clone(),
             });
             continue;
         }
@@ -4669,6 +4871,8 @@ fn save_scene(
                 object.translation.2 + min.2 + half[2],
             ],
             rot: ROT_IDENTITY,
+            trn: (2 + packed.len() * 2) as i32,
+            bone: object.bone.clone(),
         });
     }
     if packed.is_empty() {
@@ -4712,7 +4916,31 @@ fn save_scene(
     }
     push_rgba(&mut children, palette);
     push_matl(&mut children, materials);
+    let rig_saved: Vec<(i32, String, Option<String>)> = packed
+        .iter()
+        .map(|model| (model.trn, model.name.clone(), model.bone.clone()))
+        .collect();
+    push_rig(&mut children, &rig_saved, skeleton)?;
     Ok(wrap_vox(children))
+}
+
+fn push_rig(
+    children: &mut Vec<u8>,
+    saved: &[(i32, String, Option<String>)],
+    skeleton: &Skeleton,
+) -> Result<(), String> {
+    let objects: Vec<crate::rig::ObjectRef> = saved
+        .iter()
+        .map(|(trn, name, bone)| crate::rig::ObjectRef {
+            trn: *trn,
+            name,
+            bone: bone.as_deref(),
+        })
+        .collect();
+    if let Some(body) = crate::rig::encode_chunk(&objects, skeleton)? {
+        push_chunk(children, b"MVRG", &body);
+    }
+    Ok(())
 }
 
 fn wrap_vox(children: Vec<u8>) -> Vec<u8> {
@@ -4925,6 +5153,7 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
     let mut layers = Vec::new();
     let mut palette = None;
     let mut materials = [Material::default(); 256];
+    let mut rig: Option<(Skeleton, Vec<crate::rig::StoredBind>)> = None;
 
     while p + 12 <= end {
         let id = read_id(bytes, &mut p)?;
@@ -5003,6 +5232,11 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
             if let Some((slot, material)) = parse_matl(body) {
                 materials[slot] = material;
             }
+        } else if &id == b"MVRG" {
+            if rig.is_some() {
+                return Err("duplicate MVRG chunk".into());
+            }
+            rig = Some(crate::rig::decode_chunk(body)?);
         }
         p += content + children;
     }
@@ -5010,7 +5244,25 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
     if models.is_empty() {
         return Err("file has no models".into());
     }
-    let (objects, shift) = place_models(&models, &nodes);
+    let (mut objects, shift) = place_models(&models, &nodes);
+    let skeleton = if let Some((skeleton, binds)) = rig {
+        let view: Vec<(i32, &str)> = objects
+            .iter()
+            .map(|object| {
+                (
+                    object.file.as_ref().map(|link| link.trn).unwrap_or(-1),
+                    object.name.as_str(),
+                )
+            })
+            .collect();
+        let assigned = crate::rig::assign_bones(&view, &binds, &skeleton)?;
+        for (object, bone) in objects.iter_mut().zip(assigned) {
+            object.bone = bone;
+        }
+        skeleton
+    } else {
+        Skeleton::default()
+    };
     let graph = if order.is_empty() && layers.is_empty() {
         None
     } else {
@@ -5032,6 +5284,7 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
         palette,
         materials,
         graph,
+        skeleton,
     })
 }
 
@@ -5390,6 +5643,7 @@ fn place_models(
                 model_dims: (0, 0, 0),
                 hidden: false,
                 file: None,
+            bone: None,
             }],
             [0, 0, 0],
         );
@@ -5471,6 +5725,7 @@ fn place_models(
                         parent_t,
                         name: link_name,
                     }),
+                    bone: None,
                 }
             },
         )
@@ -5968,6 +6223,7 @@ mod tests {
             model_dims: (0, 0, 0),
             hidden: false,
             file: None,
+            bone: None,
         });
         session.finish_object_band(
             &ObjectBand {
@@ -6005,6 +6261,7 @@ mod tests {
             model_dims: (0, 0, 0),
             hidden: false,
             file: None,
+            bone: None,
         });
         session.object_selection = vec![0, 1];
         let down = (Vec3::new(0.5, 0.5, 5.0), Vec3::new(0.0, 0.0, -1.0));
@@ -6035,6 +6292,7 @@ mod tests {
             model_dims: (0, 0, 0),
             hidden: false,
             file: None,
+            bone: None,
         });
         session.object_selection = vec![0, 1];
         session.rotate_object(Axis::Z, false);
@@ -6162,7 +6420,12 @@ mod tests {
         session.active_mut().cells.clear();
         session.active_mut().cells.insert((0, 0, 0), 4);
         session.resize_active(0, 5);
-        let bytes = save_scene(&session.objects, &session.palette, &session.materials).unwrap();
+        let bytes = save_scene(
+            &session.objects,
+            &session.palette,
+            &session.materials,
+            &Skeleton::default(),
+        ).unwrap();
         let loaded = load_vox(&bytes).expect("scene");
         assert_eq!(loaded.objects[0].dims, (5, 1, 1));
         assert_eq!(loaded.objects[0].cells.get(&(0, 0, 0)), Some(&4));
@@ -6217,6 +6480,7 @@ mod tests {
             model_dims: src.model_dims,
             hidden: src.hidden,
             file: src.file.clone(),
+            bone: src.bone.clone(),
         };
         let stay = src
             .cells
@@ -6248,7 +6512,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(moved, stay);
-        let bytes = save_scene(&session.objects, &session.palette, &session.materials).unwrap();
+        let bytes = save_scene(
+            &session.objects,
+            &session.palette,
+            &session.materials,
+            &Skeleton::default(),
+        ).unwrap();
         let again = load_vox(&bytes).expect("saved");
         assert_eq!(again.objects[0].model_dims, (4, 2, 2));
         assert_eq!(rot_to_byte(again.objects[0].rot), 8);
@@ -6257,7 +6526,12 @@ mod tests {
         session.resize_active(2, 1);
         assert!(session.active().cells.values().all(|slot| *slot != 7));
         assert_eq!(rot_to_byte(session.active().rot), 8);
-        let bytes = save_scene(&session.objects, &session.palette, &session.materials).unwrap();
+        let bytes = save_scene(
+            &session.objects,
+            &session.palette,
+            &session.materials,
+            &Skeleton::default(),
+        ).unwrap();
         let shrunk = load_vox(&bytes).expect("shrunk");
         assert_eq!(rot_to_byte(shrunk.objects[0].rot), 8);
         assert_eq!(shrunk.objects[0].model_dims.2, 1);
@@ -6652,6 +6926,7 @@ mod tests {
                 model_dims: (0, 0, 0),
                 hidden: false,
                 file: None,
+            bone: None,
             },
             Volume {
                 name: "B".into(),
@@ -6664,9 +6939,16 @@ mod tests {
                 model_dims: (0, 0, 0),
                 hidden: false,
                 file: None,
+            bone: None,
             },
         ];
-        let bytes = save_scene(&objects, &default_palette(), &[Material::default(); 256]).unwrap();
+        let bytes = save_scene(
+            &objects,
+            &default_palette(),
+            &[Material::default(); 256],
+            &Skeleton::default(),
+        )
+        .unwrap();
         let loaded = load_vox(&bytes).expect("scene");
         assert_eq!(loaded.objects.len(), 2);
         assert_eq!(loaded.objects[0].name, "A");
@@ -6691,6 +6973,7 @@ mod tests {
             model_dims: object.model_dims,
             hidden: object.hidden,
             file,
+            bone: object.bone.clone(),
         }
     }
 
@@ -6786,6 +7069,7 @@ mod tests {
             &default_palette(),
             &[Material::default(); 256],
             loaded.graph.as_ref(),
+            &Skeleton::default(),
         )
         .unwrap();
         assert!(bytes.windows(4).any(|window| window == b"LAYR"));
@@ -6817,6 +7101,7 @@ mod tests {
             &default_palette(),
             &[Material::default(); 256],
             loaded.graph.as_ref(),
+            &Skeleton::default(),
         )
         .unwrap();
         let shifted = load_vox(&bytes).expect("moved");
@@ -6881,9 +7166,11 @@ mod tests {
                 model_dims: object.model_dims,
                 hidden: object.hidden,
                 file: object.file.clone(),
+                bone: object.bone.clone(),
             }],
             &default_palette(),
             &[Material::default(); 256],
+            &Skeleton::default(),
         )
         .unwrap();
         let again = load_vox(&bytes).expect("resaved rotation");

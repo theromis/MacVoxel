@@ -12,7 +12,7 @@
 //! the session is in-process and has no window. `--connect` drives an editor
 //! that was started with `--control`, which is where screenshots come from.
 //! `--launch` opens that editor. Render mode path-traces on the GPU
-//! through wgpu. MCP has no render tool.
+//! through wgpu. MCP `render` path-traces a PNG on the CPU.
 //!
 //! The Swift/Metal editor lives in `legacy/`. On macOS the File and Edit
 //! commands live on the application menu bar.
@@ -26,6 +26,7 @@ mod mesh;
 mod native_menu;
 mod panels;
 mod remote;
+mod rig;
 mod state;
 mod tools;
 mod trace;
