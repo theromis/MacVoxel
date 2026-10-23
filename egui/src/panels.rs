@@ -521,9 +521,15 @@ fn outliner(ui: &mut Ui, session: &mut Session) {
     let mut rename: Option<String> = None;
     let count = session.objects.len();
     for i in 0..count {
-        let selected = i == session.selected;
+        let chosen = session.object_selection.contains(&i);
+        let primary = i == session.selected;
         let name = session.objects[i].name.clone();
-        let resp = ui.selectable_label(selected, name.clone());
+        let label = if primary {
+            RichText::new(name.clone()).strong()
+        } else {
+            RichText::new(name.clone())
+        };
+        let resp = ui.selectable_label(chosen, label);
         if resp.clicked() {
             select = Some(i);
         }
@@ -537,7 +543,7 @@ fn outliner(ui: &mut Ui, session: &mut Session) {
                 ui.close_menu();
             }
         });
-        if selected {
+        if primary {
             let mut text = name.clone();
             // A quiet rename field under the selected row.
             if ui
@@ -858,7 +864,7 @@ fn selection(ui: &mut Ui, session: &mut Session) {
                 .color(Color32::from_gray(120)),
         );
         let hint = if object {
-            "X Y Z rotate the object. Shift flips it."
+            "Drag empty space to select. X Y Z rotate the selection. Shift flips."
         } else {
             "⌘-drag moves it. Paste lands on the hovered face."
         };

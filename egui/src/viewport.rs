@@ -7,7 +7,10 @@ use std::sync::{Arc, Mutex};
 use glam::{Mat4, Vec3, Vec4};
 
 use crate::gpu::{self, SceneGpu, SharedGpu};
-use crate::state::{Cell, EditorMode, LineMode, RenderMode, Session, Tool, ToolDrag, UiAction};
+use crate::state::{
+    Cell, EditorMode, Grab, LineMode, ObjectBand, RenderMode, Session, Tool, ToolDrag, UiAction,
+    Volume,
+};
 
 pub struct ViewCache {
     gpu: Option<SharedGpu>,
@@ -89,7 +92,8 @@ pub fn show(
         } else {
             None
         };
-    let drag = tool_drag(session, rect, cache.anchor, aim);
+    let shift = ctx.input(|i| i.modifiers.shift);
+    let drag = tool_drag(session, rect, cache.anchor, aim, shift);
     session.pointer(
         hover.is_some(),
         pointer.button_down(egui::PointerButton::Primary),
@@ -147,24 +151,17 @@ pub fn show(
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(22, 24, 28));
     }
 
-    if session.tool == Tool::Marquee && pointer.button_down(egui::PointerButton::Primary) {
+    let show_band = pointer.button_down(egui::PointerButton::Primary)
+        && ((session.editor_mode == EditorMode::Model && session.tool == Tool::Marquee)
+            || session.grab == Grab::ObjectMarquee);
+    if show_band {
         if let (Some(a), Some(b)) = (cache.anchor, aim) {
-            let band = egui::Rect::from_two_pos(a, b);
-            painter.rect_filled(
-                band,
-                0.0,
-                egui::Color32::from_rgba_unmultiplied(255, 220, 80, 28),
-            );
-            painter.rect_stroke(
-                band,
-                0.0,
-                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(255, 220, 80)),
-                egui::StrokeKind::Inside,
-            );
+            paint_band(&painter, a, b);
         }
     }
 
     if session.editor_mode == EditorMode::Object && session.render_mode == RenderMode::Edit {
+        paint_object_outlines(ui.painter().with_clip_rect(rect), session, rect);
         paint_gizmo(ui.painter().with_clip_rect(rect), session, rect);
     }
 
@@ -275,12 +272,15 @@ fn tool_drag(
     rect: egui::Rect,
     anchor: Option<egui::Pos2>,
     aim: Option<egui::Pos2>,
+    shift: bool,
 ) -> ToolDrag {
     let Some(anchor) = anchor else {
         return ToolDrag {
             rays: Vec::new(),
             face_steps: 1,
             marquee: None,
+            shift,
+            object_band: None,
         };
     };
     let Some(aim) = aim else {
@@ -288,6 +288,8 @@ fn tool_drag(
             rays: Vec::new(),
             face_steps: 1,
             marquee: None,
+            shift,
+            object_band: None,
         };
     };
     let face_steps = if let Some((cell, axis, sign)) = session.stroke_face() {
@@ -305,10 +307,169 @@ fn tool_drag(
     } else {
         None
     };
+    let object_band = if session.editor_mode == EditorMode::Object {
+        Some(objects_in_rect(session, rect, anchor, aim))
+    } else {
+        None
+    };
     ToolDrag {
         rays,
         face_steps,
         marquee,
+        shift,
+        object_band,
+    }
+}
+
+fn paint_band(painter: &egui::Painter, a: egui::Pos2, b: egui::Pos2) {
+    let band = egui::Rect::from_two_pos(a, b);
+    painter.rect_filled(
+        band,
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(255, 220, 80, 28),
+    );
+    painter.rect_stroke(
+        band,
+        0.0,
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(255, 220, 80)),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn objects_in_rect(
+    session: &Session,
+    rect: egui::Rect,
+    a: egui::Pos2,
+    b: egui::Pos2,
+) -> ObjectBand {
+    let min_x = a.x.min(b.x);
+    let max_x = a.x.max(b.x);
+    let min_y = a.y.min(b.y);
+    let max_y = a.y.max(b.y);
+    if max_x - min_x < 2.0 && max_y - min_y < 2.0 {
+        return ObjectBand {
+            click: true,
+            hits: Vec::new(),
+        };
+    }
+    let mut hits = Vec::new();
+    for (index, volume) in session.objects.iter().enumerate() {
+        let Some((sx0, sy0, sx1, sy1)) = screen_box(session, rect, volume) else {
+            continue;
+        };
+        if sx0 <= max_x && sx1 >= min_x && sy0 <= max_y && sy1 >= min_y {
+            hits.push(index);
+        }
+    }
+    ObjectBand { click: false, hits }
+}
+
+fn screen_box(
+    session: &Session,
+    rect: egui::Rect,
+    volume: &Volume,
+) -> Option<(f32, f32, f32, f32)> {
+    let (min, max) = crate::state::occupied_bounds(&volume.cells)?;
+    let shift = volume.translation;
+    let lo = Vec3::new(
+        (min.0 + shift.0) as f32,
+        (min.1 + shift.1) as f32,
+        (min.2 + shift.2) as f32,
+    );
+    let hi = Vec3::new(
+        (max.0 + shift.0 + 1) as f32,
+        (max.1 + shift.1 + 1) as f32,
+        (max.2 + shift.2 + 1) as f32,
+    );
+    let mut sx0 = f32::MAX;
+    let mut sy0 = f32::MAX;
+    let mut sx1 = f32::MIN;
+    let mut sy1 = f32::MIN;
+    let mut any = false;
+    for corner in 0..8 {
+        let point = Vec3::new(
+            if corner & 1 == 0 { lo.x } else { hi.x },
+            if corner & 2 == 0 { lo.y } else { hi.y },
+            if corner & 4 == 0 { lo.z } else { hi.z },
+        );
+        let Some(screen) = project_point(session, rect, point) else {
+            continue;
+        };
+        sx0 = sx0.min(screen.x);
+        sy0 = sy0.min(screen.y);
+        sx1 = sx1.max(screen.x);
+        sy1 = sy1.max(screen.y);
+        any = true;
+    }
+    any.then_some((sx0, sy0, sx1, sy1))
+}
+
+fn paint_object_outlines(painter: egui::Painter, session: &Session, rect: egui::Rect) {
+    for index in &session.object_selection {
+        let Some(volume) = session.objects.get(*index) else {
+            continue;
+        };
+        let primary = *index == session.selected;
+        let color = if primary {
+            egui::Color32::from_rgb(255, 214, 90)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(255, 214, 90, 170)
+        };
+        let width = if primary { 1.5_f32 } else { 1.0 };
+        paint_box(
+            &painter,
+            session,
+            rect,
+            volume,
+            egui::Stroke::new(width, color),
+        );
+    }
+}
+
+fn paint_box(
+    painter: &egui::Painter,
+    session: &Session,
+    rect: egui::Rect,
+    volume: &Volume,
+    stroke: egui::Stroke,
+) {
+    let Some((min, max)) = crate::state::occupied_bounds(&volume.cells) else {
+        return;
+    };
+    let shift = volume.translation;
+    let lo = [
+        (min.0 + shift.0) as f32,
+        (min.1 + shift.1) as f32,
+        (min.2 + shift.2) as f32,
+    ];
+    let hi = [
+        (max.0 + shift.0 + 1) as f32,
+        (max.1 + shift.1 + 1) as f32,
+        (max.2 + shift.2 + 1) as f32,
+    ];
+    let corner = |mask: u8| {
+        project_point(
+            session,
+            rect,
+            Vec3::new(
+                if mask & 1 == 0 { lo[0] } else { hi[0] },
+                if mask & 2 == 0 { lo[1] } else { hi[1] },
+                if mask & 4 == 0 { lo[2] } else { hi[2] },
+            ),
+        )
+    };
+    for axis in 0..3u8 {
+        let bit = 1u8 << axis;
+        for mask in 0..8u8 {
+            if mask & bit != 0 {
+                continue;
+            }
+            let Some(a) = corner(mask) else { continue };
+            let Some(b) = corner(mask | bit) else {
+                continue;
+            };
+            painter.line_segment([a, b], stroke);
+        }
     }
 }
 

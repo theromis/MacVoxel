@@ -191,6 +191,13 @@ pub enum Grab {
     Select,
     Move,
     Object,
+    ObjectMarquee,
+}
+
+enum ObjectPress {
+    Drag,
+    Marquee,
+    Idle,
 }
 
 #[derive(Clone, Copy)]
@@ -205,6 +212,15 @@ pub struct ToolDrag {
     /// Occupied cells inside a marquee, computed on release. `None` when
     /// the gesture is not a marquee.
     pub marquee: Option<Vec<Cell>>,
+    pub shift: bool,
+    /// Objects whose screen box meets the rubber band. `None` outside an
+    /// Object-mode drag. `click` is a press that never grew past 2px.
+    pub object_band: Option<ObjectBand>,
+}
+
+pub struct ObjectBand {
+    pub click: bool,
+    pub hits: Vec<usize>,
 }
 
 struct Stroke {
@@ -296,7 +312,10 @@ pub struct Session {
     pub active_slot: u8,
 
     pub objects: Vec<Volume>,
+    /// Primary object. Tools and the gizmo use this one.
     pub selected: usize,
+    /// Object-mode selection, including `selected`. A rubber band fills it.
+    pub object_selection: Vec<usize>,
     pub next_object: u32,
     pub path: Option<PathBuf>,
 
@@ -348,7 +367,7 @@ pub struct Session {
     pub hover_gizmo: Option<i32>,
     stroke: Option<Stroke>,
     stroke_serial: u32,
-    grab: Grab,
+    pub(crate) grab: Grab,
     /// Slots highlighted in the palette. The active slot is always one of them.
     pub palette_slots: HashSet<u8>,
     color_clipboard: Option<[u8; 4]>,
@@ -416,6 +435,7 @@ impl Session {
             active_slot: 36,
             objects: Vec::new(),
             selected: 0,
+            object_selection: vec![0],
             next_object: 2,
             path: None,
             editor_mode: EditorMode::Model,
@@ -841,6 +861,7 @@ impl Session {
             translation: (0, 0, 0),
         });
         self.selected = 0;
+        self.focus_object();
         self.next_object = 2;
         self.path = None;
         self.palette = default_palette();
@@ -906,6 +927,7 @@ impl Session {
             });
         }
         self.selected = 0;
+        self.focus_object();
         self.next_object = (self.objects.len() as u32).saturating_add(1).max(2);
         self.palette = loaded.palette.unwrap_or_else(default_palette);
         self.materials = loaded.materials;
@@ -936,6 +958,7 @@ impl Session {
             translation: (0, 0, 0),
         });
         self.selected = 0;
+        self.focus_object();
         self.next_object = 2;
         self.path = None;
         self.palette = default_palette();
@@ -1168,6 +1191,8 @@ impl Session {
             rays: vec![ray],
             face_steps: 1,
             marquee: None,
+            shift: false,
+            object_band: None,
         };
         self.pointer(
             true,
@@ -1257,6 +1282,7 @@ impl Session {
             translation,
         });
         self.selected = self.objects.len() - 1;
+        self.focus_object();
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
         self.commit();
     }
@@ -1271,6 +1297,7 @@ impl Session {
         };
         self.objects.insert(self.selected + 1, copy);
         self.selected += 1;
+        self.focus_object();
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
         self.commit();
     }
@@ -1283,6 +1310,7 @@ impl Session {
         self.checkpoint();
         self.objects.remove(self.selected);
         self.selected = self.selected.min(self.objects.len() - 1);
+        self.focus_object();
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
         self.commit();
     }
@@ -1298,11 +1326,61 @@ impl Session {
     }
 
     pub fn select_object(&mut self, index: usize) {
-        if index < self.objects.len() && index != self.selected {
+        if index >= self.objects.len() {
+            return;
+        }
+        if index != self.selected {
             self.selected = index;
             self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
             self.clear_picked();
         }
+        self.focus_object();
+    }
+
+    fn focus_object(&mut self) {
+        if self.objects.is_empty() {
+            self.object_selection.clear();
+            return;
+        }
+        self.selected = self.selected.min(self.objects.len() - 1);
+        self.object_selection = vec![self.selected];
+    }
+
+    fn choose_objects(&mut self, mut members: Vec<usize>, primary: usize) {
+        members.retain(|index| *index < self.objects.len());
+        members.sort_unstable();
+        members.dedup();
+        if members.is_empty() {
+            self.focus_object();
+            return;
+        }
+        self.object_selection = members;
+        self.selected = if self.object_selection.contains(&primary) {
+            primary
+        } else {
+            self.object_selection[self.object_selection.len() - 1]
+        };
+        self.clear_picked();
+    }
+
+    fn toggle_object(&mut self, index: usize) {
+        if index >= self.objects.len() {
+            return;
+        }
+        if let Some(pos) = self.object_selection.iter().position(|i| *i == index) {
+            if self.object_selection.len() == 1 {
+                return;
+            }
+            self.object_selection.remove(pos);
+            if self.selected == index {
+                self.selected = self.object_selection[self.object_selection.len() - 1];
+                self.clear_picked();
+            }
+            return;
+        }
+        self.object_selection.push(index);
+        self.selected = index;
+        self.clear_picked();
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -1374,6 +1452,11 @@ impl Session {
             });
         }
         self.selected = self.selected.min(self.objects.len() - 1);
+        self.object_selection
+            .retain(|index| *index < self.objects.len());
+        if !self.object_selection.contains(&self.selected) {
+            self.object_selection.push(self.selected);
+        }
     }
 
     pub fn pointer(
@@ -1408,13 +1491,15 @@ impl Session {
             if space {
                 self.grab = Grab::Pan;
             } else if self.editor_mode == EditorMode::Object {
-                if self.render_mode == RenderMode::Edit && self.begin_object_move(world_ray) {
-                    self.grab = Grab::Object;
-                } else if self.render_mode != RenderMode::Edit {
+                if self.render_mode != RenderMode::Edit {
                     self.grab = Grab::None;
                     self.status = self.blocked_reason();
                 } else {
-                    self.grab = Grab::None;
+                    match self.begin_object_move(world_ray, drag.shift) {
+                        ObjectPress::Drag => self.grab = Grab::Object,
+                        ObjectPress::Marquee => self.grab = Grab::ObjectMarquee,
+                        ObjectPress::Idle => self.grab = Grab::None,
+                    }
                 }
             } else if let Some((index, _)) = aimed.filter(|(index, _)| *index != self.selected) {
                 self.select_object(index);
@@ -1469,6 +1554,12 @@ impl Session {
             self.object_drag = None;
             if changed {
                 self.commit();
+            }
+            self.grab = Grab::None;
+        }
+        if primary_released && self.grab == Grab::ObjectMarquee {
+            if let Some(band) = &drag.object_band {
+                self.finish_object_band(band, drag.shift);
             }
             self.grab = Grab::None;
         }
@@ -2001,25 +2092,62 @@ impl Session {
     }
 
     fn transform_object(&mut self, map: impl Fn(Cell, Cell) -> Cell, status: &str) {
-        if self.active().cells.is_empty() {
-            return;
+        let members: Vec<usize> = self
+            .object_selection
+            .iter()
+            .copied()
+            .filter(|index| {
+                self.objects
+                    .get(*index)
+                    .is_some_and(|volume| !volume.cells.is_empty())
+            })
+            .collect();
+        let members = if members.is_empty() {
+            if self.active().cells.is_empty() {
+                return;
+            }
+            vec![self.selected]
+        } else {
+            members
+        };
+        let mut lo = (i32::MAX, i32::MAX, i32::MAX);
+        let mut hi = (i32::MIN, i32::MIN, i32::MIN);
+        for index in &members {
+            let Some((min, max)) = world_extents(&self.objects[*index]) else {
+                continue;
+            };
+            lo = (lo.0.min(min.0), lo.1.min(min.1), lo.2.min(min.2));
+            hi = (hi.0.max(max.0), hi.1.max(max.1), hi.2.max(max.2));
         }
-        let cells = self.active().cells.clone();
-        let (min, max) = extents(cells.keys().copied());
         let pivot = (
-            span_center(min.0, max.0),
-            span_center(min.1, max.1),
-            span_center(min.2, max.2),
+            span_center(lo.0, hi.0),
+            span_center(lo.1, hi.1),
+            span_center(lo.2, hi.2),
         );
-        let mut next = HashMap::with_capacity(cells.len());
-        for (c, v) in cells {
-            next.insert(map(c, pivot), v);
+        let mut rewritten = Vec::with_capacity(members.len());
+        let mut changed = false;
+        for index in &members {
+            let volume = &self.objects[*index];
+            let shift = volume.translation;
+            let mut next = HashMap::with_capacity(volume.cells.len());
+            for (cell, slot) in &volume.cells {
+                let world = (cell.0 + shift.0, cell.1 + shift.1, cell.2 + shift.2);
+                let moved = map(world, pivot);
+                next.insert(
+                    (moved.0 - shift.0, moved.1 - shift.1, moved.2 - shift.2),
+                    *slot,
+                );
+            }
+            changed |= next != volume.cells;
+            rewritten.push((*index, next));
         }
-        if next == self.active().cells {
+        if !changed {
             return;
         }
         self.checkpoint();
-        self.active_mut().cells = next;
+        for (index, next) in rewritten {
+            self.objects[index].cells = next;
+        }
         self.clear_picked();
         self.commit();
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
@@ -2221,14 +2349,20 @@ impl Session {
         self.selection_epoch = self.selection_epoch.wrapping_add(1);
     }
 
-    /// Object mode. A hit selects that object and slides it on the clicked
-    /// face. An arrow under the cursor locks the slide to that axis. Voxels
-    /// stay in local cells; only the translation changes.
-    fn begin_object_move(&mut self, ray: Option<(Vec3, Vec3)>) -> bool {
+    /// Object mode. A hit keeps the rubber-band set when the object is
+    /// already in it, and slides every member by the same voxel steps.
+    /// Shift toggles membership and does not drag. A miss starts a marquee.
+    fn begin_object_move(&mut self, ray: Option<(Vec3, Vec3)>, shift: bool) -> ObjectPress {
         let Some((origin, dir)) = ray else {
-            return false;
+            return ObjectPress::Idle;
         };
         let aimed = self.pick_object(origin, dir);
+        if shift {
+            if let Some((index, _)) = aimed {
+                self.toggle_object(index);
+            }
+            return ObjectPress::Idle;
+        }
         let locked = self.hover_gizmo.filter(|axis| (0..3).contains(axis));
         let Some((index, hit)) = aimed.or_else(|| {
             if locked.is_some() {
@@ -2243,13 +2377,20 @@ impl Session {
                 None
             }
         }) else {
-            return false;
+            return ObjectPress::Marquee;
         };
         if index >= self.objects.len() {
-            return false;
+            return ObjectPress::Idle;
         }
-        self.select_object(index);
-        let translation = self.active().translation;
+        if self.object_selection.contains(&index) {
+            if index != self.selected {
+                self.selected = index;
+                self.clear_picked();
+            }
+        } else {
+            self.select_object(index);
+        }
+        let translation = self.objects[index].translation;
         let (plane_axis, sign) = face_axis(hit.normal);
         let local_plane = match plane_axis {
             0 => hit.cell.0 as f32 + if sign > 0 { 1.0 } else { 0.0 },
@@ -2266,7 +2407,7 @@ impl Session {
             self.object_center().unwrap_or(Vec3::ZERO)
         } else {
             let Some(point) = intersect_axis_plane(origin, dir, plane_axis, plane) else {
-                return false;
+                return ObjectPress::Idle;
             };
             point
         };
@@ -2276,6 +2417,13 @@ impl Session {
         } else {
             forward
         };
+        let bases = self
+            .object_selection
+            .iter()
+            .copied()
+            .filter(|member| *member < self.objects.len())
+            .map(|member| (member, self.objects[member].translation))
+            .collect();
         self.object_drag = Some(ObjectDrag {
             index,
             locked,
@@ -2284,9 +2432,10 @@ impl Session {
             anchor,
             normal,
             base: translation,
+            bases,
             changed: false,
         });
-        true
+        ObjectPress::Drag
     }
 
     fn drag_object(&mut self, ray: Option<(Vec3, Vec3)>) {
@@ -2325,18 +2474,58 @@ impl Session {
         if self.objects.get(drag.index).is_none() {
             return;
         }
-        if self.objects[drag.index].translation == next {
+        let delta = (
+            next.0 - drag.base.0,
+            next.1 - drag.base.1,
+            next.2 - drag.base.2,
+        );
+        if delta == (0, 0, 0) {
             return;
         }
         if !drag.changed {
             self.checkpoint();
         }
-        self.objects[drag.index].translation = next;
+        for (member, base) in &drag.bases {
+            if let Some(volume) = self.objects.get_mut(*member) {
+                volume.translation = (base.0 + delta.0, base.1 + delta.1, base.2 + delta.2);
+            }
+        }
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
         self.object_drag = Some(ObjectDrag {
             changed: true,
             ..drag
         });
+    }
+
+    fn finish_object_band(&mut self, band: &ObjectBand, shift: bool) {
+        if band.click {
+            if !shift {
+                self.focus_object();
+            }
+            return;
+        }
+        let mut members = if shift {
+            self.object_selection.clone()
+        } else {
+            Vec::new()
+        };
+        for index in &band.hits {
+            if !members.contains(index) {
+                members.push(*index);
+            }
+        }
+        let primary = if members.contains(&self.selected) {
+            self.selected
+        } else {
+            band.hits.last().copied().unwrap_or(self.selected)
+        };
+        self.choose_objects(members, primary);
+        let count = self.object_selection.len();
+        self.status = if count == 1 {
+            "1 object selected.".into()
+        } else {
+            format!("{count} objects selected.")
+        };
     }
 
     fn object_center(&self) -> Option<Vec3> {
@@ -2738,6 +2927,7 @@ struct ObjectDrag {
     anchor: Vec3,
     normal: Vec3,
     base: Cell,
+    bases: Vec<(usize, Cell)>,
     changed: bool,
 }
 
@@ -2780,6 +2970,10 @@ fn lerp_color(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
         mix(a[2], b[2]),
         mix(a[3], b[3]),
     ]
+}
+
+pub(crate) fn occupied_bounds(cells: &HashMap<Cell, u8>) -> Option<(Cell, Cell)> {
+    cell_bounds(cells.keys().copied())
 }
 
 fn cell_bounds(cells: impl IntoIterator<Item = Cell>) -> Option<(Cell, Cell)> {
@@ -2840,6 +3034,15 @@ fn axis_name(axis: Axis) -> &'static str {
         Axis::Y => "Y",
         Axis::Z => "Z",
     }
+}
+
+fn world_extents(volume: &Volume) -> Option<(Cell, Cell)> {
+    let (min, max) = cell_bounds(volume.cells.keys().copied())?;
+    let shift = volume.translation;
+    Some((
+        (min.0 + shift.0, min.1 + shift.1, min.2 + shift.2),
+        (max.0 + shift.0, max.1 + shift.1, max.2 + shift.2),
+    ))
 }
 
 /// Integer center of an inclusive span. Matches the C++ floor((lo+hi+1)/2).
@@ -4366,6 +4569,75 @@ mod tests {
     }
 
     #[test]
+    fn object_band_selects_the_hits_and_a_click_keeps_one() {
+        let mut session = Session::new();
+        session.objects.push(Volume {
+            name: "B".into(),
+            cells: HashMap::from([((0, 0, 0), 2)]),
+            translation: (4, 0, 0),
+        });
+        session.finish_object_band(
+            &ObjectBand {
+                click: false,
+                hits: vec![0, 1],
+            },
+            false,
+        );
+        assert_eq!(session.object_selection, vec![0, 1]);
+        assert_eq!(session.selected, 0);
+        session.finish_object_band(
+            &ObjectBand {
+                click: true,
+                hits: Vec::new(),
+            },
+            false,
+        );
+        assert_eq!(session.object_selection, vec![0]);
+    }
+
+    #[test]
+    fn object_drag_moves_every_chosen_object() {
+        let mut session = Session::new();
+        session.editor_mode = EditorMode::Object;
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 1);
+        session.objects.push(Volume {
+            name: "B".into(),
+            cells: HashMap::from([((0, 0, 0), 2)]),
+            translation: (5, 0, 0),
+        });
+        session.object_selection = vec![0, 1];
+        let down = (Vec3::new(0.5, 0.5, 5.0), Vec3::new(0.0, 0.0, -1.0));
+        let over = (Vec3::new(2.5, 0.5, 5.0), Vec3::new(0.0, 0.0, -1.0));
+        point(&mut session, true, true, false, down);
+        point(&mut session, false, false, true, over);
+        assert_eq!(session.objects[0].translation, (2, 0, 0));
+        assert_eq!(session.objects[1].translation, (7, 0, 0));
+        assert_eq!(session.object_selection, vec![0, 1]);
+        session.undo();
+        assert_eq!(session.objects[0].translation, (0, 0, 0));
+        assert_eq!(session.objects[1].translation, (5, 0, 0));
+    }
+
+    #[test]
+    fn rotate_object_turns_the_whole_selection() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 1);
+        session.objects.push(Volume {
+            name: "B".into(),
+            cells: HashMap::from([((0, 0, 0), 2)]),
+            translation: (4, 0, 0),
+        });
+        session.object_selection = vec![0, 1];
+        session.rotate_object(Axis::Z, false);
+        assert_eq!(session.objects[0].translation, (0, 0, 0));
+        assert_eq!(session.objects[0].cells.get(&(2, -2, 0)), Some(&1));
+        assert_eq!(session.objects[1].translation, (4, 0, 0));
+        assert_eq!(session.objects[1].cells.get(&(-2, 2, 0)), Some(&2));
+    }
+
+    #[test]
     fn copy_paste_keeps_unselected_neighbors() {
         let mut session = Session::new();
         session.active_mut().cells.clear();
@@ -4432,6 +4704,8 @@ mod tests {
                 rays: Vec::new(),
                 face_steps: 1,
                 marquee: None,
+                shift: false,
+                object_band: None,
             },
             false,
         );
@@ -4597,6 +4871,8 @@ mod tests {
             rays: Vec::new(),
             face_steps: 1,
             marquee: None,
+            shift: false,
+            object_band: None,
         };
         session.pointer(
             true,
