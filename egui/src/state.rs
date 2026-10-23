@@ -305,6 +305,7 @@ pub struct Session {
     pub picked: HashSet<Cell>,
     pub selection_epoch: u64,
     select_anchor: Option<Cell>,
+    clipboard: Option<VoxelClipboard>,
     stroke: Option<Stroke>,
     stroke_serial: u32,
     grab: Grab,
@@ -402,6 +403,7 @@ impl Session {
             picked: HashSet::new(),
             selection_epoch: 1,
             select_anchor: None,
+            clipboard: None,
             stroke: None,
             stroke_serial: 1,
             grab: Grab::None,
@@ -1332,6 +1334,83 @@ impl Session {
         self.note_selection();
     }
 
+    /// Selected cells only, relative to their minimum corner. Empty slots in
+    /// the bounding box are not stored, so paste does not erase neighbors.
+    pub fn copy_picked(&mut self) {
+        if self.picked.is_empty() {
+            return;
+        }
+        let origin = min_corner(self.picked.iter().copied());
+        let mut cells = Vec::new();
+        for cell in &self.picked {
+            let Some(&slot) = self.active().cells.get(cell) else {
+                continue;
+            };
+            if slot == 0 {
+                continue;
+            }
+            cells.push((
+                (cell.0 - origin.0, cell.1 - origin.1, cell.2 - origin.2),
+                slot,
+            ));
+        }
+        if cells.is_empty() {
+            return;
+        }
+        let n = cells.len();
+        self.clipboard = Some(VoxelClipboard { origin, cells });
+        self.status = format!("Copied {n} voxels.");
+    }
+
+    pub fn cut_picked(&mut self) {
+        if self.picked.is_empty() {
+            return;
+        }
+        self.copy_picked();
+        let n = self
+            .clipboard
+            .as_ref()
+            .map(|clip| clip.cells.len())
+            .unwrap_or(0);
+        self.delete_picked();
+        if n > 0 {
+            self.status = format!("Cut {n} voxels.");
+        }
+    }
+
+    /// Writes the clipboard back at its original origin and selects those cells.
+    pub fn paste_clipboard(&mut self) {
+        let Some(clip) = self.clipboard.clone() else {
+            return;
+        };
+        self.checkpoint();
+        let mut pasted = HashSet::with_capacity(clip.cells.len());
+        {
+            let map = &mut self.active_mut().cells;
+            for (offset, slot) in &clip.cells {
+                let at = (
+                    clip.origin.0 + offset.0,
+                    clip.origin.1 + offset.1,
+                    clip.origin.2 + offset.2,
+                );
+                map.insert(at, *slot);
+                pasted.insert(at);
+            }
+        }
+        self.picked = pasted;
+        self.commit();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.note_selection();
+    }
+
+    pub fn deselect(&mut self) {
+        if self.picked.is_empty() {
+            return;
+        }
+        self.clear_picked();
+        self.status = IDLE.into();
+    }
+
     pub fn brush_cell_count(&self) -> i32 {
         footprint(self.brush_size, self.brush_shape, self.brush_3d).len() as i32
     }
@@ -1359,6 +1438,14 @@ impl Session {
             let save = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
             let open = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
             let new = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N);
+            let cut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::X);
+            let copy = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::C);
+            let paste = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::V);
+            let deselect = egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::D,
+            );
+            let command = i.modifiers.command;
             if !native_owns_shortcuts && i.consume_shortcut(&redo) {
                 cmd = Some(Cmd::Redo);
             } else if !native_owns_shortcuts && i.consume_shortcut(&undo) {
@@ -1371,21 +1458,31 @@ impl Session {
                 cmd = Some(Cmd::Open);
             } else if !native_owns_shortcuts && i.consume_shortcut(&new) {
                 cmd = Some(Cmd::New);
+            } else if !native_owns_shortcuts && i.consume_shortcut(&cut) {
+                cmd = Some(Cmd::Cut);
+            } else if !native_owns_shortcuts && i.consume_shortcut(&copy) {
+                cmd = Some(Cmd::Copy);
+            } else if !native_owns_shortcuts && i.consume_shortcut(&paste) {
+                cmd = Some(Cmd::Paste);
+            } else if !native_owns_shortcuts && i.consume_shortcut(&deselect) {
+                cmd = Some(Cmd::Deselect);
             } else if i.key_pressed(egui::Key::Tab) {
                 cmd = Some(Cmd::Tab);
-            } else if i.key_pressed(egui::Key::V) {
+            } else if i.key_pressed(egui::Key::V) && !command {
                 cmd = Some(Cmd::Tool(Tool::Brush));
-            } else if i.key_pressed(egui::Key::L) {
+            } else if i.key_pressed(egui::Key::L) && !command {
                 cmd = Some(Cmd::Tool(Tool::Line));
-            } else if i.key_pressed(egui::Key::B) {
+            } else if i.key_pressed(egui::Key::B) && !command {
                 cmd = Some(Cmd::Tool(Tool::Box));
-            } else if i.key_pressed(egui::Key::F) {
+            } else if i.key_pressed(egui::Key::F) && !command {
                 cmd = Some(Cmd::Tool(Tool::Face));
-            } else if i.key_pressed(egui::Key::U) {
+            } else if i.key_pressed(egui::Key::U) && !command {
                 cmd = Some(Cmd::Tool(Tool::Mutator));
-            } else if i.key_pressed(egui::Key::M) {
+            } else if i.key_pressed(egui::Key::M) && !command {
                 cmd = Some(Cmd::Tool(Tool::Marquee));
-            } else if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
+            } else if !command
+                && (i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+            {
                 cmd = Some(Cmd::DeletePicked);
             }
         });
@@ -1405,6 +1502,10 @@ impl Session {
             }
             Some(Cmd::Tool(tool)) => self.tool = tool,
             Some(Cmd::DeletePicked) => self.delete_picked(),
+            Some(Cmd::Cut) => self.cut_picked(),
+            Some(Cmd::Copy) => self.copy_picked(),
+            Some(Cmd::Paste) => self.paste_clipboard(),
+            Some(Cmd::Deselect) => self.deselect(),
             None => {}
         }
     }
@@ -1538,6 +1639,16 @@ enum Cmd {
     Tab,
     Tool(Tool),
     DeletePicked,
+    Cut,
+    Copy,
+    Paste,
+    Deselect,
+}
+
+#[derive(Clone)]
+struct VoxelClipboard {
+    origin: Cell,
+    cells: Vec<(Cell, u8)>,
 }
 
 fn ensure_vox_extension(path: PathBuf) -> PathBuf {
@@ -2339,6 +2450,56 @@ mod tests {
         assert!(!session.picked.contains(&(0, 0, 0)));
         assert_eq!(session.active().cells.get(&(1, -1, 0)), Some(&5));
         assert!(session.picked.contains(&(1, -1, 0)));
+    }
+
+    #[test]
+    fn copy_paste_keeps_unselected_neighbors() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 4);
+        session.active_mut().cells.insert((1, 0, 0), 5);
+        session.active_mut().cells.insert((2, 0, 0), 6);
+        session.picked.insert((0, 0, 0));
+        session.picked.insert((2, 0, 0));
+        session.copy_picked();
+        session.delete_picked();
+        assert_eq!(session.active().cells.get(&(1, 0, 0)), Some(&5));
+        assert!(!session.active().cells.contains_key(&(0, 0, 0)));
+        session.paste_clipboard();
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
+        assert_eq!(session.active().cells.get(&(1, 0, 0)), Some(&5));
+        assert_eq!(session.active().cells.get(&(2, 0, 0)), Some(&6));
+        assert!(session.picked.contains(&(0, 0, 0)));
+        assert!(session.picked.contains(&(2, 0, 0)));
+        assert!(!session.picked.contains(&(1, 0, 0)));
+    }
+
+    #[test]
+    fn cut_is_one_undo_step() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 4);
+        session.picked.insert((0, 0, 0));
+        session.cut_picked();
+        assert!(session.active().cells.is_empty());
+        session.undo();
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
+        session.paste_clipboard();
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
+    }
+
+    #[test]
+    fn paste_overwrites_the_cell_underneath() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 4);
+        session.picked.insert((0, 0, 0));
+        session.copy_picked();
+        session.active_mut().cells.insert((0, 0, 0), 9);
+        session.paste_clipboard();
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&4));
+        session.undo();
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&9));
     }
 
     #[test]

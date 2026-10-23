@@ -61,8 +61,21 @@ impl NativeMenu {
         let edit = Submenu::new("Edit", true);
         let undo = item("mv-undo", "Undo", "Cmd+Z");
         let redo = item("mv-redo", "Redo", "Cmd+Shift+Z");
+        let edit_sep = PredefinedMenuItem::separator();
+        let cut = item("mv-cut", "Cut", "Cmd+X");
+        let copy = item("mv-copy", "Copy", "Cmd+C");
+        let paste = item("mv-paste", "Paste", "Cmd+V");
+        let delete = item("mv-delete", "Delete", "Cmd+Backspace");
+        let deselect = item("mv-deselect", "Deselect", "Cmd+Shift+D");
         let _ = edit.append(&undo);
         let _ = edit.append(&redo);
+        let _ = edit.append(&edit_sep);
+        let _ = edit.append(&cut);
+        let _ = edit.append(&copy);
+        let _ = edit.append(&paste);
+        let _ = edit.append(&delete);
+        let _ = edit.append(&deselect);
+        predefined.push(edit_sep);
         let _ = menu.append(&edit);
 
         menu.init_for_nsapp();
@@ -72,7 +85,9 @@ impl NativeMenu {
             _file: file,
             _edit: edit,
             _predefined: predefined,
-            _items: vec![new, open, save, save_as, undo, redo],
+            _items: vec![
+                new, open, save, save_as, undo, redo, cut, copy, paste, delete, deselect,
+            ],
         }
     }
 
@@ -85,6 +100,11 @@ impl NativeMenu {
                 "mv-save-as" => session.save_as(),
                 "mv-undo" => session.undo(),
                 "mv-redo" => session.redo(),
+                "mv-cut" => session.cut_picked(),
+                "mv-copy" => session.copy_picked(),
+                "mv-paste" => session.paste_clipboard(),
+                "mv-delete" => session.delete_picked(),
+                "mv-deselect" => session.deselect(),
                 _ => continue,
             }
             ctx.request_repaint();
