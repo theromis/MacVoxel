@@ -117,6 +117,39 @@ final class EditorState {
         }
     }
 
+    func exportMeshDialog() {
+        let panel = NSSavePanel()
+        panel.title = "Export Mesh"
+        panel.allowedContentTypes = MacVoxelDocumentType.meshTypes
+        panel.nameFieldStringValue = suggestedGlbName()
+        panel.canCreateDirectories = true
+        let vertexColors = NSButton(
+            checkboxWithTitle: "Bake colors as vertex colors", target: nil, action: nil)
+        vertexColors.translatesAutoresizingMaskIntoConstraints = false
+        // The accessory strip is full-bleed. The panel title sits 18pt
+        // in from that edge; match it so the checkbox is not shifted left.
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 32))
+        accessory.addSubview(vertexColors)
+        NSLayoutConstraint.activate([
+            vertexColors.leadingAnchor.constraint(equalTo: accessory.leadingAnchor, constant: 18),
+            vertexColors.centerYAnchor.constraint(equalTo: accessory.centerYAnchor),
+        ])
+        panel.accessoryView = accessory
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try bridge.exportMesh(to: url, vertexColors: vertexColors.state == .on)
+                tick &+= 1
+            } catch {
+                presentError(title: "Export Failed", error: error)
+            }
+        }
+    }
+
+    private func suggestedGlbName() -> String {
+        let stem = (bridge.documentTitle as NSString).deletingPathExtension
+        return (stem.isEmpty ? "Untitled" : stem) + ".glb"
+    }
+
     // ---- History ----
 
     var canUndo: Bool {
@@ -726,6 +759,11 @@ final class EditorState {
 enum MacVoxelDocumentType {
     static let contentTypes: [UTType] = {
         if let t = UTType(filenameExtension: "vox") { return [t] }
+        return []
+    }()
+
+    static let meshTypes: [UTType] = {
+        if let t = UTType(filenameExtension: "glb") { return [t] }
         return []
     }()
 }

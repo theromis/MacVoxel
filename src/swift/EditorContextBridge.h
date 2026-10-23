@@ -138,6 +138,14 @@ typedef NS_ENUM(NSInteger, BridgeMaterialType) {
 // path yet (caller should fall back to Save As…).
 - (BOOL)saveDocumentInPlace:(NSError **)error;
 
+// Write the whole scene as a glTF 2.0 .glb. `vertexColors` stores
+// palette colors in COLOR_0 instead of a palette texture. Does not
+// change the document path. Commits a floating selection first so
+// the mesh matches the view.
+- (BOOL)exportMeshToURL:(NSURL *)url
+           vertexColors:(BOOL)vertexColors
+                  error:(NSError **)error;
+
 // ---------------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------------

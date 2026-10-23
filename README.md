@@ -73,6 +73,8 @@ The `-G Ninja` flag is optional but produces faster, cleaner builds.
 
 ### File
 - **⌘N / ⌘O / ⌘S / ⇧⌘S** — new / open / save / save-as `.vox`.
+- **⇧⌘E** — export the scene as a glTF `.glb`. The save panel can bake
+  palette colors as vertex colors instead of a texture.
 - **⌘W** — close window.
 - **⌘Q** — quit.
 

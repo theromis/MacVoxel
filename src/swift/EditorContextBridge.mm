@@ -24,6 +24,7 @@
 #include "GeneratorState.h"
 #include "Generators.h"
 #include "MutatorState.h"
+#include "MeshExport.h"
 #include "Mutators.h"
 #include "Palette.h"
 #include "Selection.h"
@@ -201,6 +202,34 @@ static macvoxel::Axis AxisFromBridge(BridgeAxis a) {
     NSURL *url = [NSURL fileURLWithPath:
         [NSString stringWithUTF8String:_ctx->document.path.c_str()]];
     return [self saveDocumentToURL:url error:error];
+}
+
+- (BOOL)exportMeshToURL:(NSURL *)url
+           vertexColors:(BOOL)vertexColors
+                  error:(NSError **)error {
+    if (url == nil || [[url path] length] == 0) {
+        if (error) *error = [NSError errorWithDomain:@"MacVoxel" code:6
+            userInfo:@{NSLocalizedDescriptionKey: @"No URL provided."}];
+        return NO;
+    }
+    if (_ctx->selection.lift_active()) {
+        macvoxel::lift::CommitLift(*_ctx);
+    }
+    const std::string path = [[url path] UTF8String];
+    const macvoxel::MeshColorMode mode = vertexColors
+        ? macvoxel::MeshColorMode::VertexColors
+        : macvoxel::MeshColorMode::Texture;
+    std::string err;
+    if (!macvoxel::ExportSceneGlb(_ctx->document, path, mode, nullptr, &err)) {
+        if (error) {
+            NSString *msg = [NSString stringWithUTF8String:err.c_str()];
+            if (msg == nil) msg = @"Export failed.";
+            *error = [NSError errorWithDomain:@"MacVoxel" code:7
+                userInfo:@{NSLocalizedDescriptionKey: msg}];
+        }
+        return NO;
+    }
+    return YES;
 }
 
 // ---------------------------------------------------------------------------

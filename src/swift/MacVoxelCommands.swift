@@ -41,6 +41,13 @@ struct MacVoxelCommands: Commands {
                 state.saveDocumentAsDialog()
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
+
+            Divider()
+
+            Button("Export Mesh\u{2026}") {
+                state.exportMeshDialog()
+            }
+            .keyboardShortcut("e", modifiers: [.command, .shift])
         }
 
         CommandGroup(replacing: .undoRedo) {

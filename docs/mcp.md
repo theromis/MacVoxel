@@ -120,7 +120,7 @@ treat it as linear and the color comes out lighter. Alpha is coverage and is
 not gamma-encoded. The glTF file is Y-up. Positions are `(x, z, −y)`, so
 Blender's importer keeps voxel +Z as Blender +Z.
 
-The same mesh is available without MCP:
+The same mesh is available from File → Export Mesh… (⇧⌘E) and without MCP:
 
 ```sh
 MacVoxel export --input in.vox --output out.glb
