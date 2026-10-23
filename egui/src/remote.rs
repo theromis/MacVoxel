@@ -155,7 +155,7 @@ pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Valu
 const METHODS: &[(&str, &str, &str)] = &[
     ("document.new", "", "Empty document, default palette"),
     ("document.open", "path", "Open a .vox, replacing the session"),
-    ("document.save", "path?", "Write the active volume. path overwrites the open file when omitted"),
+    ("document.save", "path?", "Write every non-empty object. path overwrites the open file when omitted"),
     ("document.inspect", "", "Path, counts, bounds, objects, palette"),
     ("voxel.get", "x, y, z", "Palette index of one local cell. 0 is empty"),
     ("voxel.set", "x, y, z, palette", "Write one cell. One undo step"),

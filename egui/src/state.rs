@@ -870,18 +870,36 @@ impl Session {
             std::fs::read(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
         let loaded = load_vox(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
         self.commit();
-        let n = loaded.cells.len();
-        let models = loaded.model_count;
+        let n: usize = loaded.objects.iter().map(|object| object.cells.len()).sum();
+        let models = loaded.objects.len();
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Model".into());
         self.objects.clear();
-        self.objects.push(Volume {
-            name: path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Model".into()),
-            cells: loaded.cells,
-            translation: (0, 0, 0),
-        });
+        for (index, object) in loaded.objects.into_iter().enumerate() {
+            let name = if !object.name.is_empty() {
+                object.name
+            } else if models == 1 {
+                stem.clone()
+            } else {
+                format!("Object {}", index + 1)
+            };
+            self.objects.push(Volume {
+                name,
+                cells: object.cells,
+                translation: object.translation,
+            });
+        }
+        if self.objects.is_empty() {
+            self.objects.push(Volume {
+                name: stem,
+                cells: HashMap::new(),
+                translation: (0, 0, 0),
+            });
+        }
         self.selected = 0;
+        self.next_object = (self.objects.len() as u32).saturating_add(1).max(2);
         self.palette = loaded.palette.unwrap_or_else(default_palette);
         self.materials = loaded.materials;
         self.path = Some(path.to_path_buf());
@@ -891,16 +909,11 @@ impl Session {
         self.clear_picked();
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
         self.frame_camera();
+        let file = path.file_name().unwrap_or_default().to_string_lossy();
         self.status = if models > 1 {
-            format!(
-                "Loaded {n} voxels from the first of {models} models in {}. Scene transforms are not applied in this preview.",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            )
+            format!("Loaded {n} voxels in {models} objects from {file}.")
         } else {
-            format!(
-                "Loaded {n} voxels from {}.",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            )
+            format!("Loaded {n} voxels from {file}.")
         };
         self.remember_path(path);
         Ok(())
@@ -1007,7 +1020,7 @@ impl Session {
         changed
     }
 
-    /// Save the active volume. An untitled document asks for a path.
+    /// Save every object. An untitled document asks for a path.
     pub fn save(&mut self) {
         match self.path.clone() {
             Some(path) => {
@@ -1033,11 +1046,13 @@ impl Session {
     }
 
     pub(crate) fn write_vox(&mut self, path: &Path) -> Result<(), String> {
-        let cells = self.active().cells.clone();
-        let name = self.active().name.clone();
-        let count = cells.len();
-        let several = self.objects.len() > 1;
-        let bytes = match save_vox(&cells, &self.palette, &self.materials) {
+        let count: usize = self.objects.iter().map(|object| object.cells.len()).sum();
+        let saved = self
+            .objects
+            .iter()
+            .filter(|object| !object.cells.is_empty())
+            .count();
+        let bytes = match save_scene(&self.objects, &self.palette, &self.materials) {
             Ok(bytes) => bytes,
             Err(e) => {
                 self.status = e.clone();
@@ -1050,16 +1065,15 @@ impl Session {
             return Err(message);
         }
         self.path = Some(path.to_path_buf());
-        let which = if several {
-            format!(" of {name}")
-        } else {
-            String::new()
-        };
         let file = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        self.status = format!("Saved {count} voxels{which} to {file}.");
+        self.status = if saved > 1 {
+            format!("Saved {count} voxels in {saved} objects to {file}.")
+        } else {
+            format!("Saved {count} voxels to {file}.")
+        };
         self.remember_path(path);
         Ok(())
     }
@@ -2967,8 +2981,15 @@ fn demo_tree() -> HashMap<Cell, u8> {
     cells
 }
 
+struct LoadedObject {
+    name: String,
+    cells: HashMap<Cell, u8>,
+    translation: Cell,
+}
+
 struct Loaded {
     cells: HashMap<Cell, u8>,
+    objects: Vec<LoadedObject>,
     palette: Option<[[u8; 4]; 256]>,
     materials: [Material; 256],
     model_count: usize,
@@ -3030,7 +3051,111 @@ fn save_vox(
     push_chunk(&mut children, b"XYZI", &xyzi);
     push_rgba(&mut children, palette);
     push_matl(&mut children, materials);
+    Ok(wrap_vox(children))
+}
 
+/// Every non-empty object, each as its own model. Local cells are shifted
+/// so the minimum corner is the origin. The leaf translation puts that
+/// model back where the editor had it. Rotations are not stored: a loaded
+/// rotation is baked into the cells.
+fn save_scene(
+    objects: &[Volume],
+    palette: &[[u8; 4]; 256],
+    materials: &[Material; 256],
+) -> Result<Vec<u8>, String> {
+    struct Packed {
+        name: String,
+        voxels: Vec<(i32, i32, i32, u8)>,
+        dims: [i32; 3],
+        leaf_t: [i32; 3],
+    }
+    let mut packed = Vec::new();
+    for object in objects {
+        let mut voxels: Vec<(i32, i32, i32, u8)> = object
+            .cells
+            .iter()
+            .filter(|(_, index)| **index != 0)
+            .map(|(cell, index)| (cell.0, cell.1, cell.2, *index))
+            .collect();
+        if voxels.is_empty() {
+            continue;
+        }
+        let mut min = (voxels[0].0, voxels[0].1, voxels[0].2);
+        let mut max = min;
+        for voxel in &voxels {
+            min.0 = min.0.min(voxel.0);
+            min.1 = min.1.min(voxel.1);
+            min.2 = min.2.min(voxel.2);
+            max.0 = max.0.max(voxel.0);
+            max.1 = max.1.max(voxel.1);
+            max.2 = max.2.max(voxel.2);
+        }
+        let dims = [max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1];
+        if dims[0] > 256 || dims[1] > 256 || dims[2] > 256 {
+            return Err(format!(
+                "scene exceeds .vox single-model limit of 256 per axis (bounds {}x{}x{})",
+                dims[0], dims[1], dims[2]
+            ));
+        }
+        for voxel in &mut voxels {
+            voxel.0 -= min.0;
+            voxel.1 -= min.1;
+            voxel.2 -= min.2;
+        }
+        voxels.sort_unstable();
+        let half = [dims[0] / 2, dims[1] / 2, dims[2] / 2];
+        packed.push(Packed {
+            name: object.name.clone(),
+            voxels,
+            dims,
+            leaf_t: [
+                object.translation.0 + min.0 + half[0],
+                object.translation.1 + min.1 + half[1],
+                object.translation.2 + min.2 + half[2],
+            ],
+        });
+    }
+    if packed.is_empty() {
+        return Err("cannot save an empty grid".into());
+    }
+
+    let mut children = Vec::new();
+    for model in &packed {
+        let mut size = Vec::new();
+        size.extend_from_slice(&(model.dims[0] as u32).to_le_bytes());
+        size.extend_from_slice(&(model.dims[1] as u32).to_le_bytes());
+        size.extend_from_slice(&(model.dims[2] as u32).to_le_bytes());
+        push_chunk(&mut children, b"SIZE", &size);
+        let mut xyzi = Vec::with_capacity(4 + model.voxels.len() * 4);
+        xyzi.extend_from_slice(&(model.voxels.len() as u32).to_le_bytes());
+        for (x, y, z, index) in &model.voxels {
+            xyzi.extend_from_slice(&[*x as u8, *y as u8, *z as u8, *index]);
+        }
+        push_chunk(&mut children, b"XYZI", &xyzi);
+    }
+
+    let mut kids = Vec::new();
+    for index in 0..packed.len() {
+        kids.push((2 + index * 2) as i32);
+    }
+    push_chunk(&mut children, b"nTRN", &trn_body(0, 1, [0, 0, 0], ""));
+    push_chunk(&mut children, b"nGRP", &grp_body(1, &kids));
+    for (index, model) in packed.iter().enumerate() {
+        let trn = (2 + index * 2) as i32;
+        let shp = trn + 1;
+        push_chunk(
+            &mut children,
+            b"nTRN",
+            &trn_body(trn, shp, model.leaf_t, &model.name),
+        );
+        push_chunk(&mut children, b"nSHP", &shp_body(shp, index as i32));
+    }
+    push_rgba(&mut children, palette);
+    push_matl(&mut children, materials);
+    Ok(wrap_vox(children))
+}
+
+fn wrap_vox(children: Vec<u8>) -> Vec<u8> {
     let mut file = Vec::new();
     file.extend_from_slice(b"VOX ");
     file.extend_from_slice(&150u32.to_le_bytes());
@@ -3038,7 +3163,61 @@ fn save_vox(
     file.extend_from_slice(&0u32.to_le_bytes());
     file.extend_from_slice(&(children.len() as u32).to_le_bytes());
     file.extend(children);
-    Ok(file)
+    file
+}
+
+fn push_i32(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_dict(out: &mut Vec<u8>, pairs: &[(&str, &str)]) {
+    push_i32(out, pairs.len() as i32);
+    for (key, value) in pairs {
+        push_string(out, key);
+        push_string(out, value);
+    }
+}
+
+fn trn_body(id: i32, child: i32, t: [i32; 3], name: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    push_i32(&mut body, id);
+    if name.is_empty() {
+        push_dict(&mut body, &[]);
+    } else {
+        push_dict(&mut body, &[("_name", name)]);
+    }
+    push_i32(&mut body, child);
+    push_i32(&mut body, -1);
+    push_i32(&mut body, -1);
+    push_i32(&mut body, 1);
+    if t == [0, 0, 0] {
+        push_dict(&mut body, &[]);
+    } else {
+        let text = format!("{} {} {}", t[0], t[1], t[2]);
+        push_dict(&mut body, &[("_t", &text)]);
+    }
+    body
+}
+
+fn grp_body(id: i32, children: &[i32]) -> Vec<u8> {
+    let mut body = Vec::new();
+    push_i32(&mut body, id);
+    push_dict(&mut body, &[]);
+    push_i32(&mut body, children.len() as i32);
+    for child in children {
+        push_i32(&mut body, *child);
+    }
+    body
+}
+
+fn shp_body(id: i32, model: i32) -> Vec<u8> {
+    let mut body = Vec::new();
+    push_i32(&mut body, id);
+    push_dict(&mut body, &[]);
+    push_i32(&mut body, 1);
+    push_i32(&mut body, model);
+    push_dict(&mut body, &[]);
+    body
 }
 
 fn push_chunk(out: &mut Vec<u8>, id: &[u8; 4], content: &[u8]) {
@@ -3129,8 +3308,9 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
     }
     let end = p + main_children;
 
-    let mut models: Vec<Vec<(u8, u8, u8, u8)>> = Vec::new();
-    let mut pending: Option<(u32, u32, u32)> = None;
+    let mut models: Vec<([i32; 3], Vec<(i32, i32, i32, u8)>)> = Vec::new();
+    let mut pending: Option<[i32; 3]> = None;
+    let mut nodes: HashMap<i32, VoxNode> = HashMap::new();
     let mut palette = None;
     let mut materials = [Material::default(); 256];
 
@@ -3146,15 +3326,15 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
             if body.len() != 12 {
                 return Err("SIZE chunk has the wrong length".into());
             }
-            pending = Some((
-                u32::from_le_bytes(body[0..4].try_into().unwrap()),
-                u32::from_le_bytes(body[4..8].try_into().unwrap()),
-                u32::from_le_bytes(body[8..12].try_into().unwrap()),
-            ));
+            pending = Some([
+                u32::from_le_bytes(body[0..4].try_into().unwrap()) as i32,
+                u32::from_le_bytes(body[4..8].try_into().unwrap()) as i32,
+                u32::from_le_bytes(body[8..12].try_into().unwrap()) as i32,
+            ]);
         } else if &id == b"XYZI" {
-            if pending.take().is_none() {
+            let Some(dims) = pending.take() else {
                 return Err("XYZI chunk before SIZE".into());
-            }
+            };
             if body.len() < 4 {
                 return Err("truncated XYZI".into());
             }
@@ -3165,9 +3345,26 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
             let mut voxels = Vec::with_capacity(n);
             for i in 0..n {
                 let o = 4 + i * 4;
-                voxels.push((body[o], body[o + 1], body[o + 2], body[o + 3]));
+                voxels.push((
+                    body[o] as i32,
+                    body[o + 1] as i32,
+                    body[o + 2] as i32,
+                    body[o + 3],
+                ));
             }
-            models.push(voxels);
+            models.push((dims, voxels));
+        } else if &id == b"nTRN" {
+            if let Some(node) = parse_trn(body) {
+                nodes.insert(node.id, node);
+            }
+        } else if &id == b"nGRP" {
+            if let Some(node) = parse_grp(body) {
+                nodes.insert(node.id, node);
+            }
+        } else if &id == b"nSHP" {
+            if let Some(node) = parse_shp(body) {
+                nodes.insert(node.id, node);
+            }
         } else if &id == b"RGBA" {
             if body.len() < 1024 {
                 return Err("RGBA chunk is shorter than 1024 bytes".into());
@@ -3195,44 +3392,346 @@ fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
         return Err("file has no models".into());
     }
     let model_count = models.len();
-    let voxels = models.into_iter().next().unwrap();
-    let mut raw: Vec<Cell> = Vec::new();
-    let mut colors: Vec<u8> = Vec::new();
-    for (x, y, z, i) in voxels {
-        if i == 0 {
-            continue;
-        }
-        raw.push((x as i32, y as i32, z as i32));
-        colors.push(i);
-    }
-    let cells = if raw.is_empty() {
-        HashMap::new()
-    } else {
-        let mut min = raw[0];
-        let mut max = raw[0];
-        for c in &raw {
-            min.0 = min.0.min(c.0);
-            min.1 = min.1.min(c.1);
-            min.2 = min.2.min(c.2);
-            max.0 = max.0.max(c.0);
-            max.1 = max.1.max(c.1);
-            max.2 = max.2.max(c.2);
-        }
-        let dx = -((min.0 + max.0) / 2);
-        let dy = -((min.1 + max.1) / 2);
-        let dz = -min.2;
-        let mut cells = HashMap::with_capacity(raw.len());
-        for (c, color) in raw.into_iter().zip(colors) {
-            cells.insert((c.0 + dx, c.1 + dy, c.2 + dz), color);
-        }
-        cells
-    };
+    let objects = place_models(&models, &nodes);
+    let cells = objects
+        .first()
+        .map(|object| object.cells.clone())
+        .unwrap_or_default();
     Ok(Loaded {
         cells,
+        objects,
         palette,
         materials,
         model_count,
     })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VoxKind {
+    Transform,
+    Group,
+    Shape,
+}
+
+#[derive(Clone)]
+struct VoxNode {
+    id: i32,
+    kind: VoxKind,
+    child: i32,
+    children: Vec<i32>,
+    model_id: i32,
+    t: [i32; 3],
+    rot: u8,
+    name: String,
+}
+
+const ROT_IDENTITY: [[i32; 3]; 3] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+
+fn rot_from_byte(rot: u8) -> [[i32; 3]; 3] {
+    let c0 = (rot & 3) as i32;
+    let c1 = ((rot >> 2) & 3) as i32;
+    let c2 = 3 - c0 - c1;
+    if c0 == c1 || !(0..=2).contains(&c2) {
+        return ROT_IDENTITY;
+    }
+    let sign = |bit: u8| if rot & (1 << bit) == 0 { 1 } else { -1 };
+    let mut matrix = [[0; 3]; 3];
+    matrix[0][c0 as usize] = sign(4);
+    matrix[1][c1 as usize] = sign(5);
+    matrix[2][c2 as usize] = sign(6);
+    matrix
+}
+
+fn rot_mul(a: [[i32; 3]; 3], b: [[i32; 3]; 3]) -> [[i32; 3]; 3] {
+    let mut out = [[0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            out[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j];
+        }
+    }
+    out
+}
+
+fn rot_apply(matrix: [[i32; 3]; 3], v: [i32; 3]) -> [i32; 3] {
+    [
+        matrix[0][0] * v[0] + matrix[0][1] * v[1] + matrix[0][2] * v[2],
+        matrix[1][0] * v[0] + matrix[1][1] * v[1] + matrix[1][2] * v[2],
+        matrix[2][0] * v[0] + matrix[2][1] * v[1] + matrix[2][2] * v[2],
+    ]
+}
+
+fn parse_trn(body: &[u8]) -> Option<VoxNode> {
+    let mut cursor = body;
+    let id = take_i32(&mut cursor)?;
+    let attrs = read_dict(&mut cursor)?;
+    let child = take_i32(&mut cursor)?;
+    let _reserved = take_i32(&mut cursor)?;
+    let _layer = take_i32(&mut cursor)?;
+    let frames = take_i32(&mut cursor)?;
+    let mut t = [0, 0, 0];
+    let mut rot = 4u8;
+    for index in 0..frames {
+        let frame = read_dict(&mut cursor)?;
+        if index == 0 {
+            if let Some(text) = frame.get("_t") {
+                t = parse_translation(text).unwrap_or(t);
+            }
+            if let Some(text) = frame.get("_r") {
+                rot = text.parse().unwrap_or(4);
+            }
+        }
+    }
+    Some(VoxNode {
+        id,
+        kind: VoxKind::Transform,
+        child,
+        children: Vec::new(),
+        model_id: -1,
+        t,
+        rot,
+        name: attrs.get("_name").cloned().unwrap_or_default(),
+    })
+}
+
+fn parse_grp(body: &[u8]) -> Option<VoxNode> {
+    let mut cursor = body;
+    let id = take_i32(&mut cursor)?;
+    let _attrs = read_dict(&mut cursor)?;
+    let count = take_i32(&mut cursor)?;
+    if count < 0 {
+        return None;
+    }
+    let mut children = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        children.push(take_i32(&mut cursor)?);
+    }
+    Some(VoxNode {
+        id,
+        kind: VoxKind::Group,
+        child: -1,
+        children,
+        model_id: -1,
+        t: [0, 0, 0],
+        rot: 4,
+        name: String::new(),
+    })
+}
+
+fn parse_shp(body: &[u8]) -> Option<VoxNode> {
+    let mut cursor = body;
+    let id = take_i32(&mut cursor)?;
+    let attrs = read_dict(&mut cursor)?;
+    let count = take_i32(&mut cursor)?;
+    if count < 0 {
+        return None;
+    }
+    let mut model_id = -1;
+    for index in 0..count {
+        let model = take_i32(&mut cursor)?;
+        let _model_attrs = read_dict(&mut cursor)?;
+        if index == 0 {
+            model_id = model;
+        }
+    }
+    Some(VoxNode {
+        id,
+        kind: VoxKind::Shape,
+        child: -1,
+        children: Vec::new(),
+        model_id,
+        t: [0, 0, 0],
+        rot: 4,
+        name: attrs.get("_name").cloned().unwrap_or_default(),
+    })
+}
+
+fn parse_translation(text: &str) -> Option<[i32; 3]> {
+    let mut parts = text.split_whitespace();
+    Some([
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ])
+}
+
+struct Placement {
+    model_id: i32,
+    world_t: [i32; 3],
+    world_r: [[i32; 3]; 3],
+    name: String,
+}
+
+fn place_models(
+    models: &[([i32; 3], Vec<(i32, i32, i32, u8)>)],
+    nodes: &HashMap<i32, VoxNode>,
+) -> Vec<LoadedObject> {
+    let placements = if nodes.is_empty() {
+        Vec::new()
+    } else {
+        let root = if nodes.contains_key(&0) {
+            0
+        } else {
+            *nodes.keys().min().unwrap_or(&0)
+        };
+        let mut out = Vec::new();
+        let mut path = HashSet::new();
+        walk_nodes(nodes, root, [0, 0, 0], ROT_IDENTITY, &mut path, &mut out);
+        out
+    };
+    let placements = if placements.is_empty() {
+        let dims = models.first().map(|(dims, _)| *dims).unwrap_or([0, 0, 0]);
+        vec![Placement {
+            model_id: 0,
+            world_t: [dims[0] / 2, dims[1] / 2, dims[2] / 2],
+            world_r: ROT_IDENTITY,
+            name: String::new(),
+        }]
+    } else {
+        placements
+    };
+    let mut world = Vec::new();
+    for placement in placements {
+        let Some((dims, voxels)) = models.get(placement.model_id as usize) else {
+            continue;
+        };
+        let half = [dims[0] / 2, dims[1] / 2, dims[2] / 2];
+        let mut cells = HashMap::new();
+        for (x, y, z, color) in voxels {
+            if *color == 0 {
+                continue;
+            }
+            let spun = rot_apply(placement.world_r, [x - half[0], y - half[1], z - half[2]]);
+            cells.insert(
+                (
+                    spun[0] + placement.world_t[0],
+                    spun[1] + placement.world_t[1],
+                    spun[2] + placement.world_t[2],
+                ),
+                *color,
+            );
+        }
+        world.push((placement.name, cells, placement.world_t));
+    }
+    if world.is_empty() {
+        return vec![LoadedObject {
+            name: String::new(),
+            cells: HashMap::new(),
+            translation: (0, 0, 0),
+        }];
+    }
+    let shift0 = world
+        .iter()
+        .find_map(|(_, cells, _)| display_shift(cells))
+        .unwrap_or((0, 0, 0));
+    world
+        .into_iter()
+        .map(|(name, cells, anchor)| {
+            let shift = display_shift(&cells).unwrap_or((0, 0, 0));
+            let local = cells
+                .into_iter()
+                .map(|(cell, color)| {
+                    (
+                        (cell.0 + shift.0, cell.1 + shift.1, cell.2 + shift.2),
+                        color,
+                    )
+                })
+                .collect();
+            let translation = if shift == (0, 0, 0) && local_is_empty(&local) {
+                (
+                    anchor[0] + shift0.0,
+                    anchor[1] + shift0.1,
+                    anchor[2] + shift0.2,
+                )
+            } else {
+                (shift0.0 - shift.0, shift0.1 - shift.1, shift0.2 - shift.2)
+            };
+            LoadedObject {
+                name,
+                cells: local,
+                translation,
+            }
+        })
+        .collect()
+}
+
+fn local_is_empty(cells: &HashMap<Cell, u8>) -> bool {
+    cells.is_empty()
+}
+
+fn display_shift(cells: &HashMap<Cell, u8>) -> Option<Cell> {
+    let mut keys = cells.keys();
+    let first = *keys.next()?;
+    let mut min = first;
+    let mut max = first;
+    for cell in cells.keys() {
+        min.0 = min.0.min(cell.0);
+        min.1 = min.1.min(cell.1);
+        min.2 = min.2.min(cell.2);
+        max.0 = max.0.max(cell.0);
+        max.1 = max.1.max(cell.1);
+        max.2 = max.2.max(cell.2);
+    }
+    Some((-((min.0 + max.0) / 2), -((min.1 + max.1) / 2), -min.2))
+}
+
+fn walk_nodes(
+    nodes: &HashMap<i32, VoxNode>,
+    id: i32,
+    t: [i32; 3],
+    r: [[i32; 3]; 3],
+    path: &mut HashSet<i32>,
+    out: &mut Vec<Placement>,
+) {
+    if !path.insert(id) {
+        return;
+    }
+    if let Some(node) = nodes.get(&id).cloned() {
+        match node.kind {
+            VoxKind::Transform => {
+                let spun = rot_apply(r, node.t);
+                let ct = [t[0] + spun[0], t[1] + spun[1], t[2] + spun[2]];
+                let cr = rot_mul(r, rot_from_byte(node.rot));
+                let child_is_shape = nodes
+                    .get(&node.child)
+                    .is_some_and(|child| child.kind == VoxKind::Shape);
+                if child_is_shape {
+                    if let Some(shape) = nodes.get(&node.child) {
+                        if shape.model_id >= 0 {
+                            let name = if node.name.is_empty() {
+                                shape.name.clone()
+                            } else {
+                                node.name.clone()
+                            };
+                            out.push(Placement {
+                                model_id: shape.model_id,
+                                world_t: ct,
+                                world_r: cr,
+                                name,
+                            });
+                        }
+                    }
+                } else {
+                    walk_nodes(nodes, node.child, ct, cr, path, out);
+                }
+            }
+            VoxKind::Group => {
+                for child in &node.children {
+                    walk_nodes(nodes, *child, t, r, path, out);
+                }
+            }
+            VoxKind::Shape => {
+                if node.model_id >= 0 {
+                    out.push(Placement {
+                        model_id: node.model_id,
+                        world_t: t,
+                        world_r: r,
+                        name: node.name.clone(),
+                    });
+                }
+            }
+        }
+    }
+    path.remove(&id);
 }
 
 fn parse_matl(body: &[u8]) -> Option<(usize, Material)> {
@@ -3249,6 +3748,21 @@ fn parse_matl(body: &[u8]) -> Option<(usize, Material)> {
         dict.insert(key, value);
     }
     Some((id as usize, material_from_dict(&dict)))
+}
+
+fn take_i32(bytes: &mut &[u8]) -> Option<i32> {
+    take_u32(bytes).map(|value| value as i32)
+}
+
+fn read_dict(bytes: &mut &[u8]) -> Option<HashMap<String, String>> {
+    let count = take_u32(bytes)? as usize;
+    let mut dict = HashMap::with_capacity(count);
+    for _ in 0..count {
+        let key = take_string(bytes)?;
+        let value = take_string(bytes)?;
+        dict.insert(key, value);
+    }
+    Some(dict)
 }
 
 fn take_u32(bytes: &mut &[u8]) -> Option<u32> {
@@ -3914,6 +4428,82 @@ mod tests {
         session.undo();
         assert_eq!(session.voxel_count(), before);
         let _ = std::fs::remove_file(path);
+    }
+
+    fn world_of(object: &LoadedObject, color: u8) -> Cell {
+        let (cell, _) = object
+            .cells
+            .iter()
+            .find(|(_, slot)| **slot == color)
+            .expect("color");
+        (
+            cell.0 + object.translation.0,
+            cell.1 + object.translation.1,
+            cell.2 + object.translation.2,
+        )
+    }
+
+    #[test]
+    fn scene_save_keeps_each_object_in_place() {
+        let mut first = HashMap::new();
+        first.insert((0, 0, 0), 1);
+        let mut second = HashMap::new();
+        second.insert((0, 0, 0), 2);
+        let objects = vec![
+            Volume {
+                name: "A".into(),
+                cells: first,
+                translation: (0, 0, 0),
+            },
+            Volume {
+                name: "B".into(),
+                cells: second,
+                translation: (5, 0, 0),
+            },
+        ];
+        let bytes = save_scene(&objects, &default_palette(), &[Material::default(); 256]).unwrap();
+        let loaded = load_vox(&bytes).expect("scene");
+        assert_eq!(loaded.objects.len(), 2);
+        assert_eq!(loaded.objects[0].name, "A");
+        assert_eq!(loaded.objects[1].name, "B");
+        assert_eq!(world_of(&loaded.objects[0], 1), (0, 0, 0));
+        assert_eq!(world_of(&loaded.objects[1], 2), (5, 0, 0));
+    }
+
+    #[test]
+    fn scene_rotation_is_baked_into_the_cells() {
+        let mut size = Vec::new();
+        for dim in [2u32, 2, 2] {
+            size.extend_from_slice(&dim.to_le_bytes());
+        }
+        let mut xyzi = Vec::new();
+        xyzi.extend_from_slice(&2u32.to_le_bytes());
+        xyzi.extend_from_slice(&[0, 0, 0, 3]);
+        xyzi.extend_from_slice(&[0, 0, 1, 7]);
+        let mut rot = Vec::new();
+        push_i32(&mut rot, 0);
+        push_dict(&mut rot, &[]);
+        push_i32(&mut rot, 1);
+        push_i32(&mut rot, -1);
+        push_i32(&mut rot, -1);
+        push_i32(&mut rot, 1);
+        push_dict(&mut rot, &[("_r", "8")]);
+        let mut shape = Vec::new();
+        push_i32(&mut shape, 1);
+        push_dict(&mut shape, &[]);
+        push_i32(&mut shape, 1);
+        push_i32(&mut shape, 0);
+        push_dict(&mut shape, &[]);
+        let mut children = chunk(b"SIZE", &size);
+        children.extend(chunk(b"XYZI", &xyzi));
+        children.extend(chunk(b"nTRN", &rot));
+        children.extend(chunk(b"nSHP", &shape));
+        let file = wrap_vox(children);
+        let loaded = load_vox(&file).expect("rotated");
+        let object = &loaded.objects[0];
+        let low = object.cells.iter().find(|(_, slot)| **slot == 3).unwrap().0;
+        let high = object.cells.iter().find(|(_, slot)| **slot == 7).unwrap().0;
+        assert_eq!((high.0 - low.0, high.1 - low.1, high.2 - low.2), (0, 1, 0));
     }
 
     /// After `MacVoxel voxrt --output` resaves a sample, the geometry,

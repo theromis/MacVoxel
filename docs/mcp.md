@@ -102,10 +102,12 @@ cell. Indices `1..255` are colors. A cell must lie in `[-1024, 1024)`. A write
 that would make the active object longer than 256 on any axis is refused and
 changes nothing.
 
-`save_file` writes the active volume only, origin-aligned, as one MagicaVoxel
-model. It does not write the other objects or their translations.
-`open_file` keeps the first model in the file. Extra models and `nTRN`
-transforms are not applied.
+`save_file` writes every non-empty object. Each model is origin-aligned and
+at most 256 cells on an axis; the scene graph stores the translation that
+puts it back. A rotation read from the file is baked into the cells, so the
+saved `_r` byte is identity.
+`open_file` loads every object. `nTRN` translation and rotation are applied.
+A file with no scene graph still loads its first model.
 
 ### Tools
 
@@ -113,7 +115,7 @@ transforms are not applied.
 |---|---|---|
 | `new_document` | — | Empty document, default palette, cleared path and undo stack |
 | `open_file` | `path` | Open a `.vox`, replacing the session |
-| `save_file` | — | Write the active volume. `path` overwrites the open file when omitted |
+| `save_file` | — | Write every non-empty object. `path` overwrites the open file when omitted |
 | `inspect_document` | — | Path, counts, bounds, objects, palette |
 | `get_voxel` | `x`, `y`, `z` | Palette index of one local cell. `0` is empty |
 | `set_voxel` | `x`, `y`, `z`, `palette` | Write one cell. One undo step |

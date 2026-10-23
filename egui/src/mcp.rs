@@ -405,7 +405,7 @@ fn tools() -> Vec<Value> {
     vec![
         tool("new_document", "Replace the session with an empty one-object document and the default palette.", json!({}), &[]),
         tool("open_file", "Open a .vox file, replacing the session document.", json!({"path": str_prop("Path of a .vox file")}), &["path"]),
-        tool("save_file", "Write the active volume as a .vox file.", json!({"path": str_prop("Where to write. Omit to overwrite the open file.")}), &[]),
+        tool("save_file", "Write every non-empty object as a .vox scene.", json!({"path": str_prop("Where to write. Omit to overwrite the open file.")}), &[]),
         tool("inspect_document", "Path, voxel count, bounds, objects, and the 256-color palette.", json!({}), &[]),
         tool("get_voxel", "Read one local cell of the active object. 0 is empty.", xyz_props(), &["x", "y", "z"]),
         tool("set_voxel", "Write one local cell of the active object. One undo step.", {
