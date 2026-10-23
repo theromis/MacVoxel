@@ -42,13 +42,13 @@ pub struct SceneGpu {
     highlight_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
-    chunks: HashMap<(i32, i32, i32), GpuMesh>,
+    chunks: HashMap<(usize, i32, i32, i32), GpuMesh>,
     grid: Option<GpuMesh>,
     grid_key: Option<(i32, i32, i32, i32, i32, i32)>,
     hover: Option<GpuMesh>,
-    hover_key: Option<(crate::state::Cell, crate::state::Cell)>,
+    hover_key: Option<(crate::state::Cell, crate::state::Cell, crate::state::Cell)>,
     selection: Option<GpuMesh>,
-    selection_key: Option<(u64, u64)>,
+    selection_key: Option<(u64, u64, crate::state::Cell)>,
     epoch: u64,
 }
 
@@ -157,44 +157,55 @@ impl SceneGpu {
     }
 
     fn sync_chunks(&mut self, device: &wgpu::Device, session: &Session) {
-        let cells = &session.active().cells;
-        let mut buckets: HashMap<(i32, i32, i32), Vec<(crate::state::Cell, [u8; 3])>> =
-            HashMap::new();
-        for (&cell, &slot) in cells {
-            let rgb = session.color(slot);
-            buckets
-                .entry(mesh::chunk_key(cell))
-                .or_default()
-                .push((cell, rgb));
-        }
-        let next: HashMap<(i32, i32, i32), u64> = buckets
-            .iter()
-            .map(|(key, listed)| (*key, mesh::occupancy_hash(listed)))
-            .collect();
-        let previous: HashMap<(i32, i32, i32), u64> = self
-            .chunks
-            .iter()
-            .map(|(key, chunk)| (*key, chunk.occupancy))
-            .collect();
-        for key in mesh::dirty_chunks(&previous, &next) {
-            match next.get(&key).copied() {
-                Some(hash) => {
-                    let built = mesh::mesh_chunk(cells, key, |slot| session.color(slot));
-                    if built.is_empty() {
-                        self.chunks.remove(&key);
-                    } else if let Some(gpu) = upload(device, &built, hash) {
-                        self.chunks.insert(key, gpu);
+        let mut live = std::collections::HashSet::new();
+        for (index, object) in session.objects.iter().enumerate() {
+            let mut buckets: HashMap<(i32, i32, i32), Vec<(crate::state::Cell, [u8; 3])>> =
+                HashMap::new();
+            for (&cell, &slot) in &object.cells {
+                let rgb = session.color(slot);
+                buckets
+                    .entry(mesh::chunk_key(cell))
+                    .or_default()
+                    .push((cell, rgb));
+            }
+            let next: HashMap<(i32, i32, i32), u64> = buckets
+                .iter()
+                .map(|(key, listed)| (*key, mesh::occupancy_hash(listed)))
+                .collect();
+            let previous: HashMap<(i32, i32, i32), u64> = self
+                .chunks
+                .iter()
+                .filter_map(|((object_index, x, y, z), chunk)| {
+                    (*object_index == index).then_some(((*x, *y, *z), chunk.occupancy))
+                })
+                .collect();
+            for key in mesh::dirty_chunks(&previous, &next) {
+                let full = (index, key.0, key.1, key.2);
+                match next.get(&key).copied() {
+                    Some(hash) => {
+                        let mut built =
+                            mesh::mesh_chunk(&object.cells, key, |slot| session.color(slot));
+                        mesh::translate_mesh(&mut built, object.translation);
+                        if built.is_empty() {
+                            self.chunks.remove(&full);
+                        } else if let Some(gpu) = upload(device, &built, hash) {
+                            self.chunks.insert(full, gpu);
+                        }
+                    }
+                    None => {
+                        self.chunks.remove(&full);
                     }
                 }
-                None => {
-                    self.chunks.remove(&key);
-                }
+            }
+            for key in next.keys() {
+                live.insert((index, key.0, key.1, key.2));
             }
         }
+        self.chunks.retain(|key, _| live.contains(key));
     }
 
     fn sync_grid(&mut self, device: &wgpu::Device, session: &Session) {
-        let Some((min, max)) = session.bounds() else {
+        let Some((min, max)) = session.world_bounds() else {
             self.grid = None;
             self.grid_key = None;
             return;
@@ -209,29 +220,36 @@ impl SceneGpu {
     }
 
     fn sync_hover(&mut self, device: &wgpu::Device, session: &Session) {
-        let key = session.hover.as_ref().map(|hit| (hit.cell, hit.normal));
+        let shift = session.active().translation;
+        let key = session
+            .hover
+            .as_ref()
+            .map(|hit| (hit.cell, hit.normal, shift));
         if key == self.hover_key {
             return;
         }
         self.hover_key = key;
-        let Some((cell, normal)) = key else {
+        let Some((cell, normal, shift)) = key else {
             self.hover = None;
             return;
         };
-        let Some(built) = mesh::highlight(cell, normal) else {
+        let Some(mut built) = mesh::highlight(cell, normal) else {
             self.hover = None;
             return;
         };
+        mesh::translate_mesh(&mut built, shift);
         self.hover = upload(device, &built, 0);
     }
 
     fn sync_selection(&mut self, device: &wgpu::Device, session: &Session) {
-        let key = (session.selection_epoch, session.mesh_epoch);
+        let shift = session.active().translation;
+        let key = (session.selection_epoch, session.mesh_epoch, shift);
         if self.selection_key == Some(key) {
             return;
         }
         self.selection_key = Some(key);
-        let built = mesh::selection_shell(&session.active().cells, &session.picked);
+        let mut built = mesh::selection_shell(&session.active().cells, &session.picked);
+        mesh::translate_mesh(&mut built, shift);
         self.selection = upload(device, &built, 0);
     }
 

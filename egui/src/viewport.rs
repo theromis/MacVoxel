@@ -51,7 +51,7 @@ pub fn show(
     render_state: Option<&eframe::egui_wgpu::RenderState>,
     session: &mut Session,
     cache: &mut ViewCache,
-) {
+) -> egui::Rect {
     let rect = ui.available_rect_before_wrap();
     ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
@@ -188,6 +188,7 @@ pub fn show(
     {
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
     }
+    rect
 }
 
 fn hud_frame(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {

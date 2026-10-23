@@ -177,6 +177,9 @@ impl Default for Material {
 pub struct Volume {
     pub name: String,
     pub cells: HashMap<Cell, u8>,
+    /// World offset of local cell (0, 0, 0). Copies are placed beside the
+    /// source so they do not occupy the same voxels.
+    pub translation: Cell,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -430,6 +433,7 @@ impl Session {
         session.objects.push(Volume {
             name: "Tree".into(),
             cells: demo_tree(),
+            translation: (0, 0, 0),
         });
         session.frame_camera();
         session
@@ -463,6 +467,29 @@ impl Session {
             max.2 = max.2.max(c.2);
         }
         Some((min, max))
+    }
+
+    pub fn world_bounds(&self) -> Option<(Cell, Cell)> {
+        let mut min = (i32::MAX, i32::MAX, i32::MAX);
+        let mut max = (i32::MIN, i32::MIN, i32::MIN);
+        let mut any = false;
+        for object in &self.objects {
+            for cell in object.cells.keys() {
+                any = true;
+                let world = (
+                    cell.0 + object.translation.0,
+                    cell.1 + object.translation.1,
+                    cell.2 + object.translation.2,
+                );
+                min.0 = min.0.min(world.0);
+                min.1 = min.1.min(world.1);
+                min.2 = min.2.min(world.2);
+                max.0 = max.0.max(world.0);
+                max.1 = max.1.max(world.1);
+                max.2 = max.2.max(world.2);
+            }
+        }
+        any.then_some((min, max))
     }
 
     pub fn size_xyz(&self) -> Option<(i32, i32, i32)> {
@@ -747,7 +774,7 @@ impl Session {
     }
 
     pub fn frame_camera(&mut self) {
-        if let Some((min, max)) = self.bounds() {
+        if let Some((min, max)) = self.world_bounds() {
             self.target = Vec3::new(
                 (min.0 + max.0 + 1) as f32 * 0.5,
                 (min.1 + max.1 + 1) as f32 * 0.5,
@@ -769,6 +796,7 @@ impl Session {
         self.objects.push(Volume {
             name: "Tree".into(),
             cells: demo_tree(),
+            translation: (0, 0, 0),
         });
         self.selected = 0;
         self.next_object = 2;
@@ -795,56 +823,158 @@ impl Session {
     }
 
     pub fn load_path(&mut self, path: &Path) {
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.status = format!("Could not read {}: {e}", path.display());
-                return;
-            }
-        };
-        match load_vox(&bytes) {
-            Ok(loaded) => {
-                self.commit();
-                let n = loaded.cells.len();
-                let models = loaded.model_count;
-                self.objects.clear();
-                self.objects.push(Volume {
-                    name: path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "Model".into()),
-                    cells: loaded.cells,
-                });
-                self.selected = 0;
-                self.palette = loaded.palette.unwrap_or_else(default_palette);
-                self.materials = loaded.materials;
-                self.path = Some(path.to_path_buf());
-                self.undo.clear();
-                self.redo.clear();
-                self.pending = None;
-                self.clear_picked();
-                self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
-                self.frame_camera();
-                self.status = if models > 1 {
-                    format!(
-                        "Loaded {n} voxels from the first of {models} models in {}. Scene transforms are not applied in this preview.",
-                        path.file_name().unwrap_or_default().to_string_lossy()
-                    )
-                } else {
-                    format!(
-                        "Loaded {n} voxels from {}.",
-                        path.file_name().unwrap_or_default().to_string_lossy()
-                    )
-                };
-            }
-            Err(e) => self.status = format!("{}: {e}", path.display()),
+        if let Err(e) = self.open_vox(path) {
+            self.status = e;
         }
+    }
+
+    pub(crate) fn open_vox(&mut self, path: &Path) -> Result<(), String> {
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+        let loaded = load_vox(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.commit();
+        let n = loaded.cells.len();
+        let models = loaded.model_count;
+        self.objects.clear();
+        self.objects.push(Volume {
+            name: path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Model".into()),
+            cells: loaded.cells,
+            translation: (0, 0, 0),
+        });
+        self.selected = 0;
+        self.palette = loaded.palette.unwrap_or_else(default_palette);
+        self.materials = loaded.materials;
+        self.path = Some(path.to_path_buf());
+        self.undo.clear();
+        self.redo.clear();
+        self.pending = None;
+        self.clear_picked();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.frame_camera();
+        self.status = if models > 1 {
+            format!(
+                "Loaded {n} voxels from the first of {models} models in {}. Scene transforms are not applied in this preview.",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+        } else {
+            format!(
+                "Loaded {n} voxels from {}.",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+        };
+        Ok(())
+    }
+
+    /// Empty one-object document. The window's File → New still builds the demo tree.
+    pub(crate) fn replace_empty(&mut self) {
+        self.commit();
+        self.objects.clear();
+        self.objects.push(Volume {
+            name: "Object".into(),
+            cells: HashMap::new(),
+            translation: (0, 0, 0),
+        });
+        self.selected = 0;
+        self.next_object = 2;
+        self.path = None;
+        self.palette = default_palette();
+        self.materials = [Material::default(); 256];
+        self.undo.clear();
+        self.redo.clear();
+        self.pending = None;
+        self.clear_picked();
+        self.hover = None;
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.frame_camera();
+        self.status = "Empty document.".into();
+    }
+
+    pub(crate) fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub(crate) fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    /// Write cells of the active object. Palette 0 erases. One undo step.
+    /// Coordinates are local to that object and must lie in `[-1024, 1024)`.
+    pub(crate) fn write_cells(&mut self, writes: &[(i32, i32, i32, i32)]) -> Result<i64, String> {
+        let mut deduped: HashMap<Cell, u8> = HashMap::new();
+        for (x, y, z, palette) in writes {
+            if !in_world(*x, *y, *z) {
+                return Err("coordinate outside the world [-1024, 1024)".into());
+            }
+            if !(0..=255).contains(palette) {
+                return Err("palette must be 0..255".into());
+            }
+            deduped.insert((*x, *y, *z), *palette as u8);
+        }
+        let mut next = self.active().cells.clone();
+        let mut changed = 0i64;
+        for (cell, palette) in deduped {
+            let old = next.get(&cell).copied().unwrap_or(0);
+            if old == palette {
+                continue;
+            }
+            changed += 1;
+            if palette == 0 {
+                next.remove(&cell);
+            } else {
+                next.insert(cell, palette);
+            }
+        }
+        if changed == 0 {
+            return Ok(0);
+        }
+        if let Some((min, max)) = cell_bounds(next.keys().copied()) {
+            let sx = max.0 - min.0 + 1;
+            let sy = max.1 - min.1 + 1;
+            let sz = max.2 - min.2 + 1;
+            if sx > 256 || sy > 256 || sz > 256 {
+                return Err(format!(
+                    "edit would make the active object {sx}x{sy}x{sz}; .vox models are at most 256 per axis"
+                ));
+            }
+        }
+        self.commit();
+        self.checkpoint();
+        self.active_mut().cells = next;
+        self.clear_picked();
+        self.commit();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        Ok(changed)
+    }
+
+    pub(crate) fn write_palette(&mut self, slots: &[(u8, [u8; 4])]) -> i64 {
+        let mut changed = 0i64;
+        for (index, rgba) in slots {
+            if self.palette[*index as usize] != *rgba {
+                changed += 1;
+            }
+        }
+        if changed == 0 {
+            return 0;
+        }
+        self.commit();
+        self.checkpoint();
+        for (index, rgba) in slots {
+            self.palette[*index as usize] = *rgba;
+        }
+        self.commit();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        changed
     }
 
     /// Save the active volume. An untitled document asks for a path.
     pub fn save(&mut self) {
         match self.path.clone() {
-            Some(path) => self.write_vox(&path),
+            Some(path) => {
+                let _ = self.write_vox(&path);
+            }
             None => self.save_as(),
         }
     }
@@ -861,35 +991,38 @@ impl Session {
         else {
             return;
         };
-        self.write_vox(&ensure_vox_extension(path));
+        let _ = self.write_vox(&ensure_vox_extension(path));
     }
 
-    fn write_vox(&mut self, path: &Path) {
+    pub(crate) fn write_vox(&mut self, path: &Path) -> Result<(), String> {
         let cells = self.active().cells.clone();
         let name = self.active().name.clone();
         let count = cells.len();
         let several = self.objects.len() > 1;
-        match save_vox(&cells, &self.palette, &self.materials) {
-            Ok(bytes) => match std::fs::write(path, bytes) {
-                Ok(()) => {
-                    self.path = Some(path.to_path_buf());
-                    let which = if several {
-                        format!(" of {name}")
-                    } else {
-                        String::new()
-                    };
-                    let file = path
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.display().to_string());
-                    self.status = format!("Saved {count} voxels{which} to {file}.");
-                }
-                Err(e) => {
-                    self.status = format!("Could not write {}: {e}", path.display());
-                }
-            },
-            Err(e) => self.status = e,
+        let bytes = match save_vox(&cells, &self.palette, &self.materials) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.status = e.clone();
+                return Err(e);
+            }
+        };
+        if let Err(e) = std::fs::write(path, bytes) {
+            let message = format!("Could not write {}: {e}", path.display());
+            self.status = message.clone();
+            return Err(message);
         }
+        self.path = Some(path.to_path_buf());
+        let which = if several {
+            format!(" of {name}")
+        } else {
+            String::new()
+        };
+        let file = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        self.status = format!("Saved {count} voxels{which} to {file}.");
+        Ok(())
     }
 
     pub fn take_drops(&mut self, ctx: &egui::Context) {
@@ -910,9 +1043,11 @@ impl Session {
         self.checkpoint();
         let name = format!("Object {}", self.next_object);
         self.next_object += 1;
+        let translation = beside(self.active());
         self.objects.push(Volume {
             name,
             cells: HashMap::new(),
+            translation,
         });
         self.selected = self.objects.len() - 1;
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
@@ -925,6 +1060,7 @@ impl Session {
         let copy = Volume {
             name: format!("{} copy", self.active().name),
             cells: self.active().cells.clone(),
+            translation: beside(self.active()),
         };
         self.objects.insert(self.selected + 1, copy);
         self.selected += 1;
@@ -1027,6 +1163,7 @@ impl Session {
             self.objects.push(Volume {
                 name: "Object".into(),
                 cells: HashMap::new(),
+                translation: (0, 0, 0),
             });
         }
         self.selected = self.selected.min(self.objects.len() - 1);
@@ -1049,6 +1186,9 @@ impl Session {
         drag: &ToolDrag,
         command: bool,
     ) {
+        let world_ray = ray;
+        let aimed = world_ray.and_then(|(origin, dir)| self.pick_object(origin, dir));
+        let ray = self.local_ray(world_ray);
         if inside && scroll.abs() > 0.0 {
             self.distance = (self.distance * (1.0 - scroll * 0.0014)).clamp(2.0, 2000.0);
         }
@@ -1060,6 +1200,9 @@ impl Session {
         } else if primary_pressed && inside {
             if space {
                 self.grab = Grab::Pan;
+            } else if let Some((index, _)) = aimed.filter(|(index, _)| *index != self.selected) {
+                self.select_object(index);
+                self.grab = Grab::None;
             } else if command && self.begin_move(ray) {
                 self.grab = Grab::Move;
             } else if self.can_edit() {
@@ -1964,6 +2107,40 @@ impl Session {
         self.set_picked(flood_same(&self.active().cells, seed, slot));
     }
 
+    fn local_ray(&self, ray: Option<(Vec3, Vec3)>) -> Option<(Vec3, Vec3)> {
+        let (origin, dir) = ray?;
+        let shift = self.active().translation;
+        Some((
+            origin - Vec3::new(shift.0 as f32, shift.1 as f32, shift.2 as f32),
+            dir,
+        ))
+    }
+
+    fn pick_object(&self, origin: Vec3, dir: Vec3) -> Option<(usize, Hit)> {
+        let mut best: Option<(f32, usize, Hit)> = None;
+        for (index, object) in self.objects.iter().enumerate() {
+            let local = origin
+                - Vec3::new(
+                    object.translation.0 as f32,
+                    object.translation.1 as f32,
+                    object.translation.2 as f32,
+                );
+            let Some(hit) = raycast(&object.cells, local, dir) else {
+                continue;
+            };
+            let center = Vec3::new(
+                hit.cell.0 as f32 + object.translation.0 as f32 + 0.5,
+                hit.cell.1 as f32 + object.translation.1 as f32 + 0.5,
+                hit.cell.2 as f32 + object.translation.2 as f32 + 0.5,
+            );
+            let distance = (center - origin).length_squared();
+            if best.is_none_or(|(so_far, _, _)| distance < so_far) {
+                best = Some((distance, index, hit));
+            }
+        }
+        best.map(|(_, index, hit)| (index, hit))
+    }
+
     fn hit_cell(&self, ray: Option<(Vec3, Vec3)>) -> Option<Cell> {
         let (origin, dir) = ray?;
         raycast(&self.active().cells, origin, dir).map(|hit| hit.cell)
@@ -2074,6 +2251,48 @@ fn lerp_color(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
         mix(a[2], b[2]),
         mix(a[3], b[3]),
     ]
+}
+
+fn cell_bounds(cells: impl IntoIterator<Item = Cell>) -> Option<(Cell, Cell)> {
+    let mut iter = cells.into_iter();
+    let first = iter.next()?;
+    let mut min = first;
+    let mut max = first;
+    for cell in iter {
+        min.0 = min.0.min(cell.0);
+        min.1 = min.1.min(cell.1);
+        min.2 = min.2.min(cell.2);
+        max.0 = max.0.max(cell.0);
+        max.1 = max.1.max(cell.1);
+        max.2 = max.2.max(cell.2);
+    }
+    Some((min, max))
+}
+
+fn in_world(x: i32, y: i32, z: i32) -> bool {
+    (-1024..1024).contains(&x) && (-1024..1024).contains(&y) && (-1024..1024).contains(&z)
+}
+
+fn beside(volume: &Volume) -> Cell {
+    let mut min_x = 0;
+    let mut max_x = 0;
+    let mut any = false;
+    for cell in volume.cells.keys() {
+        if !any {
+            min_x = cell.0;
+            max_x = cell.0;
+            any = true;
+        } else {
+            min_x = min_x.min(cell.0);
+            max_x = max_x.max(cell.0);
+        }
+    }
+    let span = if any { max_x - min_x + 2 } else { 2 };
+    (
+        volume.translation.0 + span,
+        volume.translation.1,
+        volume.translation.2,
+    )
 }
 
 fn min_corner(cells: impl IntoIterator<Item = Cell>) -> Cell {
@@ -2959,6 +3178,32 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_places_the_copy_beside_the_original() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 1);
+        session.active_mut().cells.insert((2, 0, 0), 1);
+        session.duplicate_object();
+        assert_eq!(session.objects[0].translation, (0, 0, 0));
+        assert_eq!(session.objects[1].translation, (4, 0, 0));
+        assert_eq!(session.selected, 1);
+        assert_eq!(session.objects[1].cells.len(), 2);
+    }
+
+    #[test]
+    fn pick_object_chooses_the_volume_under_the_ray() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 1);
+        session.duplicate_object();
+        let origin = Vec3::new(0.5, 0.5, 5.0);
+        let dir = Vec3::new(0.0, 0.0, -1.0);
+        assert_eq!(session.pick_object(origin, dir).unwrap().0, 0);
+        let origin = Vec3::new(2.5, 0.5, 5.0);
+        assert_eq!(session.pick_object(origin, dir).unwrap().0, 1);
+    }
+
+    #[test]
     fn palette_range_selects_the_rectangle() {
         let mut session = Session::new();
         session.select_palette_range(0, 31, 1, 30, false);
@@ -3294,7 +3539,7 @@ mod tests {
         });
         session.commit();
         let path = std::env::temp_dir().join("macvoxel-egui-undo.vox");
-        session.write_vox(&path);
+        session.write_vox(&path).unwrap();
         assert!(session.status.starts_with("Saved "));
         session.undo();
         assert_eq!(session.voxel_count(), before);

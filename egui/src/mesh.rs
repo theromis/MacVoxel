@@ -37,6 +37,15 @@ impl Mesh {
     }
 }
 
+pub fn translate_mesh(mesh: &mut Mesh, delta: Cell) {
+    let shift = [delta.0 as f32, delta.1 as f32, delta.2 as f32];
+    for vert in &mut mesh.verts {
+        vert.pos[0] += shift[0];
+        vert.pos[1] += shift[1];
+        vert.pos[2] += shift[2];
+    }
+}
+
 pub fn chunk_key(cell: Cell) -> (i32, i32, i32) {
     (
         cell.0.div_euclid(CHUNK),
@@ -305,6 +314,15 @@ mod tests {
         picked.insert((0, 0, 0));
         picked.insert((1, 0, 0));
         assert_eq!(selection_shell(&cells, &picked).face_count(), 10);
+    }
+
+    #[test]
+    fn translate_mesh_shifts_vertices() {
+        let mut cells = HashMap::new();
+        cells.insert((0, 0, 0), 1);
+        let mut mesh = mesh_chunk(&cells, (0, 0, 0), white);
+        translate_mesh(&mut mesh, (3, 0, 0));
+        assert!(mesh.verts.iter().all(|vert| vert.pos[0] >= 3.0));
     }
 
     #[test]
