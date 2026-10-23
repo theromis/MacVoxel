@@ -815,20 +815,39 @@ fn light(ui: &mut Ui, session: &mut Session) {
 
 fn selection(ui: &mut Ui, session: &mut Session) {
     let enabled = session.voxel_count() > 0;
+    let object = session.editor_mode == EditorMode::Object;
     ui.add_enabled_ui(enabled, |ui| {
         section(ui, "Rotate 90°");
-        axis_buttons(ui, "CCW", |axis| session.rotate_selection(axis, false));
+        axis_buttons(ui, "CCW", |axis| {
+            if object {
+                session.rotate_object(axis, false);
+            } else {
+                session.rotate_selection(axis, false);
+            }
+        });
         ui.label(
             RichText::new("CCW (right-hand rule)")
                 .small()
                 .color(Color32::from_gray(120)),
         );
-        axis_buttons(ui, "CW", |axis| session.rotate_selection(axis, true));
+        axis_buttons(ui, "CW", |axis| {
+            if object {
+                session.rotate_object(axis, true);
+            } else {
+                session.rotate_selection(axis, true);
+            }
+        });
         ui.label(RichText::new("CW").small().color(Color32::from_gray(120)));
         ui.separator();
         section(ui, "Flip");
-        axis_buttons(ui, "Flip", |axis| session.flip_selection(axis));
-        let scope = if session.picked.is_empty() {
+        axis_buttons(ui, "Flip", |axis| {
+            if object {
+                session.flip_object(axis);
+            } else {
+                session.flip_selection(axis);
+            }
+        });
+        let scope = if object || session.picked.is_empty() {
             "Whole object"
         } else {
             "Selection"
@@ -838,11 +857,12 @@ fn selection(ui: &mut Ui, session: &mut Session) {
                 .small()
                 .color(Color32::from_gray(120)),
         );
-        ui.label(
-            RichText::new("⌘-drag moves it. Paste lands on the hovered face.")
-                .small()
-                .color(Color32::from_gray(120)),
-        );
+        let hint = if object {
+            "X Y Z rotate the object. Shift flips it."
+        } else {
+            "⌘-drag moves it. Paste lands on the hovered face."
+        };
+        ui.label(RichText::new(hint).small().color(Color32::from_gray(120)));
     });
 }
 

@@ -1968,6 +1968,64 @@ impl Session {
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
     }
 
+    /// 90° about a world axis, around the center of the occupied span.
+    /// Local cells move; the translation of that center stays put.
+    pub fn rotate_object(&mut self, axis: Axis, clockwise: bool) {
+        let name = axis_name(axis);
+        let verb = if clockwise {
+            "clockwise"
+        } else {
+            "counterclockwise"
+        };
+        self.transform_object(
+            |c, pivot| {
+                let p = (c.0 - pivot.0, c.1 - pivot.1, c.2 - pivot.2);
+                let q = rot90(p, axis, clockwise);
+                (q.0 + pivot.0, q.1 + pivot.1, q.2 + pivot.2)
+            },
+            &format!("Rotated the object 90° {verb} about {name}."),
+        );
+    }
+
+    /// Mirror across the plane through the span center, perpendicular to `axis`.
+    pub fn flip_object(&mut self, axis: Axis) {
+        let name = axis_name(axis);
+        self.transform_object(
+            |c, pivot| match axis {
+                Axis::X => (pivot.0 * 2 - c.0, c.1, c.2),
+                Axis::Y => (c.0, pivot.1 * 2 - c.1, c.2),
+                Axis::Z => (c.0, c.1, pivot.2 * 2 - c.2),
+            },
+            &format!("Flipped the object across {name}."),
+        );
+    }
+
+    fn transform_object(&mut self, map: impl Fn(Cell, Cell) -> Cell, status: &str) {
+        if self.active().cells.is_empty() {
+            return;
+        }
+        let cells = self.active().cells.clone();
+        let (min, max) = extents(cells.keys().copied());
+        let pivot = (
+            span_center(min.0, max.0),
+            span_center(min.1, max.1),
+            span_center(min.2, max.2),
+        );
+        let mut next = HashMap::with_capacity(cells.len());
+        for (c, v) in cells {
+            next.insert(map(c, pivot), v);
+        }
+        if next == self.active().cells {
+            return;
+        }
+        self.checkpoint();
+        self.active_mut().cells = next;
+        self.clear_picked();
+        self.commit();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.status = status.to_string();
+    }
+
     pub fn flip_selection(&mut self, axis: Axis) {
         if !self.picked.is_empty() {
             let (min, max) = extents(self.picked.iter().copied());
@@ -2339,6 +2397,7 @@ impl Session {
         if ctx.wants_keyboard_input() {
             return;
         }
+        let object_mode = self.editor_mode == EditorMode::Object;
         let mut cmd: Option<Cmd> = None;
         // On macOS the application menu owns these accelerators. Consuming
         // them here as well would undo or save twice when AppKit also delivers
@@ -2418,6 +2477,26 @@ impl Session {
                 cmd = Some(Cmd::Tool(Tool::Mutator));
             } else if i.key_pressed(egui::Key::M) && !command {
                 cmd = Some(Cmd::Tool(Tool::Marquee));
+            } else if object_mode
+                && !command
+                && !i.modifiers.alt
+                && !i.modifiers.ctrl
+                && (i.key_pressed(egui::Key::X)
+                    || i.key_pressed(egui::Key::Y)
+                    || i.key_pressed(egui::Key::Z))
+            {
+                let axis = if i.key_pressed(egui::Key::X) {
+                    Axis::X
+                } else if i.key_pressed(egui::Key::Y) {
+                    Axis::Y
+                } else {
+                    Axis::Z
+                };
+                cmd = Some(if i.modifiers.shift {
+                    Cmd::FlipObject(axis)
+                } else {
+                    Cmd::RotateObject(axis)
+                });
             } else if !command
                 && (i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
             {
@@ -2446,6 +2525,8 @@ impl Session {
             Some(Cmd::Deselect) => self.deselect(),
             Some(Cmd::NewObject) => self.new_object(),
             Some(Cmd::DuplicateObject) => self.duplicate_object(),
+            Some(Cmd::RotateObject(axis)) => self.rotate_object(axis, false),
+            Some(Cmd::FlipObject(axis)) => self.flip_object(axis),
             Some(Cmd::ExportMesh) => self.export_mesh_dialog(),
             Some(Cmd::Close) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             None => {}
@@ -2623,6 +2704,8 @@ enum Cmd {
     DuplicateObject,
     ExportMesh,
     Close,
+    RotateObject(Axis),
+    FlipObject(Axis),
 }
 
 #[derive(Clone, PartialEq)]
@@ -2749,6 +2832,21 @@ fn min_corner(cells: impl IntoIterator<Item = Cell>) -> Cell {
         corner.2 = corner.2.min(c.2);
     }
     corner
+}
+
+fn axis_name(axis: Axis) -> &'static str {
+    match axis {
+        Axis::X => "X",
+        Axis::Y => "Y",
+        Axis::Z => "Z",
+    }
+}
+
+/// Integer center of an inclusive span. Matches the C++ floor((lo+hi+1)/2).
+fn span_center(lo: i32, hi: i32) -> i32 {
+    let s = lo as i64 + hi as i64 + 1;
+    let center = if s >= 0 { s / 2 } else { -((-s + 1) / 2) };
+    center as i32
 }
 
 fn extents(cells: impl IntoIterator<Item = Cell>) -> (Cell, Cell) {
@@ -4230,6 +4328,41 @@ mod tests {
         assert!(!session.picked.contains(&(0, 0, 0)));
         assert_eq!(session.active().cells.get(&(1, -1, 0)), Some(&5));
         assert!(session.picked.contains(&(1, -1, 0)));
+    }
+
+    #[test]
+    fn rotate_object_spins_around_its_center() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 1);
+        session.active_mut().cells.insert((2, 0, 0), 2);
+        session.active_mut().translation = (5, 0, 0);
+        session.picked.insert((0, 0, 0));
+        session.rotate_object(Axis::Z, false);
+        assert_eq!(session.active().translation, (5, 0, 0));
+        assert_eq!(session.active().cells.get(&(1, -1, 0)), Some(&1));
+        assert_eq!(session.active().cells.get(&(1, 1, 0)), Some(&2));
+        assert!(session.picked.is_empty());
+        session.undo();
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&1));
+        assert_eq!(session.active().cells.get(&(2, 0, 0)), Some(&2));
+        assert_eq!(session.active().translation, (5, 0, 0));
+    }
+
+    #[test]
+    fn flip_object_mirrors_across_the_span_center() {
+        let mut session = Session::new();
+        session.active_mut().cells.clear();
+        session.active_mut().cells.insert((0, 0, 0), 1);
+        session.active_mut().cells.insert((1, 0, 0), 2);
+        session.active_mut().translation = (4, 1, 0);
+        session.flip_object(Axis::X);
+        assert_eq!(session.active().translation, (4, 1, 0));
+        assert_eq!(session.active().cells.get(&(2, 0, 0)), Some(&1));
+        assert_eq!(session.active().cells.get(&(1, 0, 0)), Some(&2));
+        session.undo();
+        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&1));
+        assert_eq!(session.active().cells.get(&(1, 0, 0)), Some(&2));
     }
 
     #[test]
