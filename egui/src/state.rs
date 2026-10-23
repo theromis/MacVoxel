@@ -938,8 +938,8 @@ impl Session {
         // On macOS the application menu owns these accelerators. Consuming
         // them here as well would undo or save twice when AppKit also delivers
         // the key to the window.
-        let native_owns_shortcuts = cfg!(target_os = "macos")
-            && std::env::var_os("MACVOXEL_NO_NATIVE_MENU").is_none();
+        let native_owns_shortcuts =
+            cfg!(target_os = "macos") && std::env::var_os("MACVOXEL_NO_NATIVE_MENU").is_none();
         ctx.input_mut(|i| {
             let redo = egui::KeyboardShortcut::new(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -1301,10 +1301,7 @@ fn push_matl(out: &mut Vec<u8>, materials: &[Material; 256]) {
         }
         if material.ty == MaterialType::Emissive {
             pairs.push(("_emit", format_float(material.emission)));
-            pairs.push((
-                "_flux",
-                format_float((material.emission_power - 1) as f32),
-            ));
+            pairs.push(("_flux", format_float((material.emission_power - 1) as f32)));
         }
         let mut body = Vec::new();
         body.extend_from_slice(&(id as u32).to_le_bytes());

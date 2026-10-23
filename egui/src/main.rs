@@ -9,6 +9,8 @@
 //! File and Edit commands live on the application menu bar. Brush strokes
 //! edit an in-memory volume so the panels can be tried against a viewport.
 
+mod gpu;
+mod mesh;
 #[cfg(target_os = "macos")]
 mod native_menu;
 mod panels;
@@ -33,6 +35,7 @@ fn main() -> eframe::Result {
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([960.0, 640.0])
             .with_title("MacVoxel"),
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native(
@@ -58,12 +61,10 @@ struct Shell {
 }
 
 impl eframe::App for Shell {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         {
-            if self.native_menu.is_none()
-                && std::env::var_os("MACVOXEL_NO_NATIVE_MENU").is_none()
-            {
+            if self.native_menu.is_none() && std::env::var_os("MACVOXEL_NO_NATIVE_MENU").is_none() {
                 self.native_menu = Some(native_menu::NativeMenu::install());
             }
             if let Some(menu) = &self.native_menu {
@@ -111,7 +112,13 @@ impl eframe::App for Shell {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            viewport::show(ctx, ui, &mut self.session, &mut self.cache);
+            viewport::show(
+                ctx,
+                ui,
+                frame.wgpu_render_state(),
+                &mut self.session,
+                &mut self.cache,
+            );
         });
     }
 }
