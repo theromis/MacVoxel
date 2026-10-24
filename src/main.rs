@@ -445,6 +445,10 @@ fn install_ui_font(ctx: &egui::Context) -> bool {
 }
 
 fn apply_theme(ctx: &egui::Context) {
+    // egui follows the system appearance by default and the visuals below
+    // only apply to the active theme, so light mode showed stock light panels.
+    ctx.set_theme(egui::Theme::Dark);
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
     let font_loaded = install_ui_font(ctx);
 
     // Godot 4 default dark: blue-gray base, accent ~#4591fb.
