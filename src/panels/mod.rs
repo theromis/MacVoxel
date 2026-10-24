@@ -9,10 +9,54 @@ use crate::state::*;
 /// (`#2c333e`), still quieter than the primary text.
 pub(super) const DIM: Color32 = Color32::from_rgb(196, 206, 220);
 
+/// Frame of both side panels: the dark window background the docks sit on.
+pub fn side_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::side_top_panel(style)
+        .fill(style.visuals.extreme_bg_color)
+        .inner_margin(egui::Margin::same(DOCK_GAP))
+}
+
+/// Tools dock on top, palette dock at the bottom. The gap between them is
+/// the palette's resize handle.
 pub fn left(ui: &mut Ui, session: &mut Session) {
-    tools::tools(ui, session);
-    ui.separator();
-    palette::palette(ui, session);
+    egui::TopBottomPanel::bottom("palette-dock")
+        .resizable(true)
+        .default_height(360.0)
+        .height_range(140.0..=900.0)
+        .show_separator_line(false)
+        .frame(egui::Frame::NONE.inner_margin(egui::Margin {
+            top: DOCK_GAP,
+            ..egui::Margin::ZERO
+        }))
+        .show_inside(ui, |ui| {
+            dock(
+                ui,
+                &["Palette"],
+                0,
+                true,
+                |_| {},
+                |ui| {
+                    palette::active_color(ui, session);
+                    egui::ScrollArea::vertical()
+                        .id_salt("palette")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| palette::palette(ui, session));
+                },
+            );
+        });
+    dock(
+        ui,
+        &["Tools"],
+        0,
+        true,
+        |_| {},
+        |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("tools")
+                .auto_shrink([false, false])
+                .show(ui, |ui| tools::tools(ui, session));
+        },
+    );
 }
 
 /// Inspector dock on top, scene tree dock at the bottom, on the dark window
@@ -59,7 +103,7 @@ pub fn right(ui: &mut Ui, session: &mut Session) {
 }
 
 /// Space between docks, where the window background shows through.
-pub const DOCK_GAP: i8 = 6;
+const DOCK_GAP: i8 = 6;
 const DOCK_RADIUS: u8 = 4;
 
 /// A Godot-style dock: a strip of tabs on a darker band, the selected tab

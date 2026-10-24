@@ -4,8 +4,24 @@ use egui::{Color32, RichText, Ui};
 
 use super::*;
 
+/// The active slot and its color picker, kept above the scrolling grid.
+pub(super) fn active_color(ui: &mut Ui, session: &mut Session) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Active").small().color(DIM));
+        ui.monospace(format!("{}", session.active_slot));
+        let mut rgb = session.color(session.active_slot);
+        let resp = ui.color_edit_button_srgb(&mut rgb);
+        if resp.changed() {
+            session.begin_edit();
+            session.set_color(session.active_slot, rgb);
+        }
+        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+            session.end_edit();
+        }
+    });
+}
+
 pub(super) fn palette(ui: &mut Ui, session: &mut Session) {
-    section(ui, "Palette");
     let cell = 14.0;
     let gap = 2.0;
     let pitch = cell + gap;
@@ -159,18 +175,4 @@ pub(super) fn palette(ui: &mut Ui, session: &mut Session) {
         }
         session.finish_palette_drag();
     }
-
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Active").small().color(DIM));
-        ui.monospace(format!("{}", session.active_slot));
-        let mut rgb = session.color(session.active_slot);
-        let resp = ui.color_edit_button_srgb(&mut rgb);
-        if resp.changed() {
-            session.begin_edit();
-            session.set_color(session.active_slot, rgb);
-        }
-        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-            session.end_edit();
-        }
-    });
 }
