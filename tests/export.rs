@@ -322,7 +322,7 @@ fn a_clip_is_a_gltf_animation_and_hidden_parts_can_be_their_own_nodes() {
             "root",
             vec![crate::rig::ClipKey {
                 time: 0.0,
-                rotation: [0.0, 0.0, 0.0, 1.0],
+                rotation: Some([0.0, 0.0, 0.0, 1.0]),
                 translation: None,
                 scale: [1.0, 1.0, 1.0],
             }],
@@ -448,13 +448,13 @@ fn a_clip_without_translations_keeps_the_bind_offset() {
     let mut session = named_rig();
     let open = crate::rig::ClipKey {
         time: 0.3,
-        rotation: [0.3, 0.0, 0.0, 0.954],
+        rotation: Some([0.3, 0.0, 0.0, 0.954]),
         translation: None,
         scale: [1.0, 1.0, 1.0],
     };
     let rest = crate::rig::ClipKey {
         time: 0.0,
-        rotation: [0.0, 0.0, 0.0, 1.0],
+        rotation: Some([0.0, 0.0, 0.0, 1.0]),
         translation: None,
         scale: [1.0, 1.0, 1.0],
     };
@@ -497,4 +497,66 @@ fn a_clip_without_translations_keeps_the_bind_offset() {
     let bind = crate::rig::bind_pose(&session.skeleton).unwrap();
     assert_eq!(&values[..3], &bind[1].translation[..]);
     assert_eq!(&values[3..], &crate::rig::gltf_vector([0.0, 3.0, -1.0])[..]);
+}
+
+#[test]
+fn a_clip_without_rotations_keeps_the_bind_rotation() {
+    let mut session = named_rig();
+    let turned = [0.0, 0.0, 0.38268343, 0.9238795];
+    session.skeleton.bones[1].rotation = turned;
+    let key = |time: f32, translation: Option<[f32; 3]>, rotation: Option<[f32; 4]>| {
+        crate::rig::ClipKey {
+            time,
+            rotation,
+            translation,
+            scale: [1.0, 1.0, 1.0],
+        }
+    };
+    session.add_clip("slide").unwrap();
+    session
+        .set_clip_keys(
+            "slide",
+            "jaw",
+            vec![key(0.0, None, None), key(0.4, Some([0.0, 3.0, -1.0]), None)],
+        )
+        .unwrap();
+    let json = glb_json(&super::encode(&session, &split_export()).unwrap());
+    let paths: Vec<&str> = json["animations"][0]["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|channel| channel["target"]["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["translation", "scale"]);
+
+    // A rotation on one key only: the other key holds the bind rotation, not identity.
+    session
+        .set_clip_keys(
+            "slide",
+            "jaw",
+            vec![
+                key(0.0, None, None),
+                key(0.4, None, Some([0.0, 0.0, 0.0, 1.0])),
+            ],
+        )
+        .unwrap();
+    let bytes = super::encode(&session, &split_export()).unwrap();
+    let json = glb_json(&bytes);
+    let channel = &json["animations"][0]["channels"][0];
+    assert_eq!(channel["target"]["path"], "rotation");
+    let sampler = &json["animations"][0]["samplers"][channel["sampler"].as_u64().unwrap() as usize];
+    let output = &json["accessors"][sampler["output"].as_u64().unwrap() as usize];
+    let view = &json["bufferViews"][output["bufferView"].as_u64().unwrap() as usize];
+    let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let bin = &bytes[20 + json_len + 8..];
+    let start = view["byteOffset"].as_u64().unwrap() as usize;
+    let values: Vec<f32> = bin[start..start + 32]
+        .chunks(4)
+        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    let bind = crate::rig::bind_pose(&session.skeleton).unwrap();
+    for (got, want) in values[..4].iter().zip(bind[1].rotation) {
+        assert!((got - want).abs() < 1e-6);
+    }
+    assert!((values[7] - 1.0).abs() < 1e-6);
 }

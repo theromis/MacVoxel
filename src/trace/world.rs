@@ -1,6 +1,8 @@
 //! Voxel grid, ray march, and the GPU scene pack.
 
 use super::*;
+use crate::state::Cell;
+use glam::Mat4;
 
 pub(super) fn build_world(session: &Session) -> World {
     let mut voxels = HashMap::new();
@@ -9,6 +11,10 @@ pub(super) fn build_world(session: &Session) -> World {
             continue;
         }
         let delta = session.skin_delta(index);
+        if let Some(delta) = delta.filter(|delta| !is_rigid(delta)) {
+            scaled_cells(object, delta, &mut voxels);
+            continue;
+        }
         for (cell, slot) in &object.cells {
             if *slot == 0 {
                 continue;
@@ -344,5 +350,69 @@ pub(super) fn ray_box_entry(origin: Vec3, dir: Vec3, min: [i32; 3], max: [i32; 3
         None
     } else {
         Some(t0.max(0.0))
+    }
+}
+
+/// Whether a pose map keeps lengths: no bone or parent in the pose scales.
+pub(super) fn is_rigid(delta: &Mat4) -> bool {
+    [delta.x_axis, delta.y_axis, delta.z_axis]
+        .iter()
+        .all(|axis| (axis.truncate().length() - 1.0).abs() < 1e-4)
+}
+
+/// Cells this many or more in the posed box are not resampled.
+const MAX_SCALED_CELLS: i64 = 4_000_000;
+
+/// A scaled part, resampled cell by cell from the posed box back into the
+/// bind pose so a grown part has no holes and a shrunk one keeps its shape.
+/// A part flattened to nothing on an axis is left out.
+fn scaled_cells(object: &crate::state::Volume, delta: Mat4, voxels: &mut HashMap<Cell, u8>) {
+    if delta.determinant().abs() < 1e-6 || object.cells.is_empty() {
+        return;
+    }
+    let shift = Vec3::new(
+        object.translation.0 as f32,
+        object.translation.1 as f32,
+        object.translation.2 as f32,
+    );
+    let mut low = Vec3::splat(f32::MAX);
+    let mut high = Vec3::splat(f32::MIN);
+    for cell in object.cells.keys() {
+        let base = Vec3::new(cell.0 as f32, cell.1 as f32, cell.2 as f32) + shift;
+        for corner in 0..8 {
+            let offset = Vec3::new(
+                (corner & 1) as f32,
+                ((corner >> 1) & 1) as f32,
+                ((corner >> 2) & 1) as f32,
+            );
+            let point = delta.transform_point3(base + offset);
+            low = low.min(point);
+            high = high.max(point);
+        }
+    }
+    let low = low.floor().as_ivec3();
+    let high = high.ceil().as_ivec3();
+    let size = (high - low).as_i64vec3();
+    if size.x * size.y * size.z > MAX_SCALED_CELLS {
+        return;
+    }
+    let inverse = delta.inverse();
+    for x in low.x..high.x {
+        for y in low.y..high.y {
+            for z in low.z..high.z {
+                let center = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                let source = inverse.transform_point3(center) - shift;
+                let cell = (
+                    source.x.floor() as i32,
+                    source.y.floor() as i32,
+                    source.z.floor() as i32,
+                );
+                if let Some(&slot) = object.cells.get(&cell) {
+                    if slot != 0 {
+                        voxels.insert((x, y, z), slot);
+                    }
+                }
+            }
+        }
     }
 }

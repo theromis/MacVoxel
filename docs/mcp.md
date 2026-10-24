@@ -153,7 +153,7 @@ tracer. A file with no scene graph still loads its first model.
 | `remove_bone` | `name` | Delete a bone. Objects bound to it become unbound. Children keep its parent. One undo step |
 | `bind_object` | `index`, `bone` | Bind an object to one bone, or `bone: null` to unbind. Rigid: one bone, weight 1. One undo step |
 | `list_bones` | — | Each bone's parent, world pivot, quaternion, and the object indices bound to it |
-| `set_pose` | `pose` | Preview pose. Map of bone name to a local quaternion `[x, y, z, w]` on top of the bind pose. One undo step. Does not write the bind rotation |
+| `set_pose` | `pose` | Preview pose. Map of bone name to a local quaternion `[x, y, z, w]`, or `{rotation, scale}`, on top of the bind pose. One undo step. Does not write the bind rotation |
 | `clear_pose` | — | Remove the preview pose. One undo step |
 | `add_clip` | `name` | Empty named clip. One undo step. Saved in the `.vox` `MVAN` chunk |
 | `set_clip_keys` | `name`, `bone`, `keys` | Replace one bone's keys. Each key is `time`, optional `rotation`, `translation`, `scale`. One undo step |
@@ -238,7 +238,8 @@ the +X side of the target, looking toward −X. A model whose face points
 along −Y is face-on at yaw −90. `orthographic` defaults to false; true
 uses parallel rays whose frame matches the perspective view at the same
 distance. `pose` is an optional map of bone name to quaternion
-`[x, y, z, w]`, applied on top of the bind pose for this still only. The
+`[x, y, z, w]` or `{rotation, scale}` (see `set_pose`), applied on top of
+the bind pose for this still only. The
 window's preview pose and the bind rotation are unchanged when the call
 returns. `showBones` defaults to false; true draws joint points and parent
 links on the PNG after tonemapping. `views` is a list of
@@ -293,9 +294,9 @@ would otherwise rename the bone. The mesh itself keeps the object name. A game
 can then hide one part, such as an alternate face, without a second export.
 When the document has a skeleton, clips are written as a glTF `animations` array. Each clip is one animation
 whose name is the clip name. Channels target the joint nodes
-(rotation and scale, linear, plus translation when any key of that bone sets
-one). A bone whose keys never set `translation` has no translation channel,
-so it stays at its bind offset. Godot 4 imports that array as
+(scale, linear, plus rotation and translation when any key of that bone sets
+them). A bone whose keys never set `rotation` or `translation` has no such
+channel, so it stays at its bind rotation or offset. Godot 4 imports that array as
 an AnimationLibrary on the AnimationPlayer. A document with no clips omits
 `animations`, so the bytes match a rig-only export.
 
@@ -328,27 +329,36 @@ axes that are not the mirror axis. The new bone name must not already
 exist. Objects and bones are one undo step.
 
 `set_pose` replaces the window preview. `pose` maps a bone name to a
-quaternion `[x, y, z, w]` in voxel space. It is multiplied on the right of
-that bone's bind rotation, then the parent chain is applied, so a posed
-parent orbits its children. A bone omitted from the map stays at its bind
-rotation. Identity is dropped. The bind pose in the skeleton is not
+quaternion `[x, y, z, w]` in voxel space, or to an object with optional
+`rotation` (that quaternion) and `scale` `[x, y, z]` (each 0 to 16, default
+1). The rotation is multiplied on the right of that bone's bind rotation,
+then the parent chain is applied, so a posed parent orbits its children.
+The scale is local, about the joint, and the bone's children inherit it,
+as in glTF. A scaled part is resampled into the voxel grid, so a grown part
+has no holes; a zero axis flattens it, and the tracer leaves it out, the way
+a game hides a part with a zero bone scale. A bone omitted from the map
+stays at its bind pose. An entry with identity rotation and scale 1 is
+dropped. The bind pose in the skeleton is not
 written. `clear_pose` removes the preview. Both are undo steps, separate
 from `set_bone`. The window draws joint points and parent links whenever
 the skeleton is not empty. That overlay is not a tool default.
 
 `add_clip` creates an empty clip. `set_clip_keys` replaces the keys of one
 bone in that clip. A key's `time` is seconds, finite and ≥ 0, and times
-must increase. `rotation` is the bone's local quaternion (default identity).
+must increase. `rotation` is the bone's local quaternion. Omit it to keep the bind
+rotation, the same way as `translation` below: no rotation channel when no
+key of that bone sets one, and the bind rotation on a key that leaves it out
+in a track that has some.
 `translation` is the full local offset from the parent in voxel units, not
 a delta from the bind pose. Omit it to keep the bind offset: a track with no
 translation writes no glTF translation channel, and a key without one in a
 track that has some repeats the bind offset. `list_clips` shows an omitted
 one as `null`. `scale` is local
-(default `[1, 1, 1]`). A rest key that should match the bind pose repeats
-the bind rotation. `list_clips` returns the clips.
+(default `[1, 1, 1]`). A rest key that should match the bind pose sets neither. `list_clips` returns the clips.
 `remove_clip` deletes one. Each of these is one undo step. Save writes
-them in an `MVAN` chunk (version 2: a flag per key says whether it has a
-translation; version 1 files still load, every key with one) next to `MVRG`. MagicaVoxel skips the chunk.
+them in an `MVAN` chunk (version 3: a flag byte per key says whether it
+has a rotation and a translation; version 2 files, with a translation flag
+only, and version 1 files, with both always set, still load) next to `MVRG`. MagicaVoxel skips the chunk.
 
 `add_bone` requires `name` and a world `pivot` `[x, y, z]`. The components
 are fractional, so the joint can sit between cells. `parent` omitted

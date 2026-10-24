@@ -424,3 +424,44 @@ fn show_bones_paints_the_joint_into_the_png() {
     let marked = encode_png(&image, &session).unwrap();
     assert_ne!(plain, marked);
 }
+
+fn posed_block(scale: [f32; 3]) -> Session {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    for x in 0..2 {
+        for y in 0..2 {
+            for z in 0..2 {
+                voxel(&mut session, (x, y, z), 1);
+            }
+        }
+    }
+    session
+        .add_bone("lid", None, [0.0, 0.0, 0.0], None)
+        .unwrap();
+    session.bind_object(0, Some("lid")).unwrap();
+    let mut pose = crate::rig::Pose::new();
+    pose.insert(
+        "lid".into(),
+        crate::rig::BonePose {
+            rotation: crate::rig::IDENTITY_ROTATION,
+            scale,
+        },
+    );
+    session.set_pose(pose).unwrap();
+    session
+}
+
+#[test]
+fn a_grown_part_is_resampled_without_holes() {
+    let world = build_world(&posed_block([2.0, 2.0, 2.0]));
+    assert_eq!(world.count, 64);
+    assert_eq!((world.min, world.max), ([0, 0, 0], [3, 3, 3]));
+}
+
+#[test]
+fn a_part_flattened_to_zero_is_left_out() {
+    let world = build_world(&posed_block([1.0, 1.0, 0.0]));
+    assert_eq!(world.count, 0);
+    let world = build_world(&posed_block([1.0, 1.0, 0.5]));
+    assert_eq!(world.count, 4);
+}

@@ -316,9 +316,9 @@ impl Session {
         Ok(())
     }
 
-    /// Replace the preview pose. Omitted bones stay at the bind rotation.
-    /// An identity quaternion is dropped. `Bone.rotation` is not written.
-    pub fn set_pose(&mut self, pose: HashMap<String, [f32; 4]>) -> Result<(), String> {
+    /// Replace the preview pose. Omitted bones stay at the bind pose. An
+    /// identity entry is dropped. `Bone.rotation` is not written.
+    pub fn set_pose(&mut self, pose: crate::rig::Pose) -> Result<(), String> {
         let next = self.checked_pose(pose)?;
         if next == self.pose {
             return Ok(());
@@ -340,18 +340,33 @@ impl Session {
         self.commit();
     }
 
-    pub fn checked_pose(
-        &self,
-        pose: HashMap<String, [f32; 4]>,
-    ) -> Result<HashMap<String, [f32; 4]>, String> {
-        let mut next = HashMap::new();
-        for (name, rotation) in pose {
+    pub fn checked_pose(&self, pose: crate::rig::Pose) -> Result<crate::rig::Pose, String> {
+        let mut next = crate::rig::Pose::new();
+        for (name, extra) in pose {
             if self.skeleton.index_of(&name).is_none() {
                 return Err(format!("unknown bone `{name}`"));
             }
-            if let Some(rotation) = normalize_extra(rotation)? {
-                next.insert(name, rotation);
+            if extra
+                .scale
+                .iter()
+                .any(|axis| !axis.is_finite() || !(0.0..=MAX_POSE_SCALE).contains(axis))
+            {
+                return Err(format!(
+                    "pose `{name}` scale must be between 0 and {MAX_POSE_SCALE}"
+                ));
             }
+            let rotation = normalize_extra(extra.rotation)?;
+            let still = extra.scale.iter().all(|axis| (axis - 1.0).abs() < 1e-6);
+            if rotation.is_none() && still {
+                continue;
+            }
+            next.insert(
+                name,
+                crate::rig::BonePose {
+                    rotation: rotation.unwrap_or(crate::rig::IDENTITY_ROTATION),
+                    scale: extra.scale,
+                },
+            );
         }
         Ok(next)
     }
@@ -388,7 +403,7 @@ impl Session {
             return Err("clip key list is empty".into());
         }
         for key in &mut keys {
-            key.rotation = crate::rig::checked_rotation(key.rotation)?;
+            key.rotation = key.rotation.map(crate::rig::checked_rotation).transpose()?;
             if !key.time.is_finite() || key.time < 0.0 {
                 return Err("key time must be finite and at least 0".into());
             }
@@ -888,6 +903,9 @@ fn parent_order(skeleton: &Skeleton) -> Vec<usize> {
     }
     order
 }
+
+/// Largest preview scale on one axis.
+const MAX_POSE_SCALE: f32 = 16.0;
 
 fn normalize_extra(rotation: [f32; 4]) -> Result<Option<[f32; 4]>, String> {
     let rotation = crate::rig::checked_rotation(rotation)?;

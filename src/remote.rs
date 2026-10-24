@@ -570,7 +570,7 @@ const METHODS: &[(&str, &str, &str)] = &[
     ("rig.remove", "name", "Delete a bone. Objects bound to it become unbound"),
     ("rig.bind", "index, bone", "Bind an object. bone null unbinds"),
     ("rig.list", "", "Bones with parent, pivot, rotation, and bound objects"),
-    ("pose.set", "pose", "Preview pose. Map of bone name to quaternion [x, y, z, w], on top of the bind pose. One undo step"),
+    ("pose.set", "pose", "Preview pose. Map of bone name to quaternion [x, y, z, w] or {rotation, scale}, on top of the bind pose. One undo step"),
     ("pose.clear", "", "Clear the preview pose. One undo step"),
     ("clip.add", "name", "Add an empty animation clip. One undo step"),
     ("clip.keys", "name, bone, keys", "Replace one bone's keys. time, rotation, translation, scale. One undo step"),
@@ -705,24 +705,37 @@ fn render_views(params: &Value) -> Result<Vec<(f32, f32, String)>, String> {
     }
 }
 
-fn render_pose(
-    params: &Value,
-) -> Result<Option<std::collections::HashMap<String, [f32; 4]>>, String> {
+/// A pose map: each bone is a quaternion `[x, y, z, w]`, or an object with
+/// optional `rotation` and `scale` `[x, y, z]`.
+fn render_pose(params: &Value) -> Result<Option<crate::rig::Pose>, String> {
     match params.get("pose") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Object(map)) => {
-            let mut pose = std::collections::HashMap::new();
+            let mut pose = crate::rig::Pose::new();
             for (name, value) in map {
-                let rotation = as_vec(value, 4)
-                    .ok_or_else(|| format!("pose `{name}` must be [x, y, z, w]"))?;
-                pose.insert(
-                    name.clone(),
-                    [rotation[0], rotation[1], rotation[2], rotation[3]],
-                );
+                let extra = match value {
+                    Value::Object(_) => crate::rig::BonePose {
+                        rotation: opt_vec4(value, "rotation")?
+                            .unwrap_or(crate::rig::IDENTITY_ROTATION),
+                        scale: opt_vec3(value, "scale")?.unwrap_or([1.0, 1.0, 1.0]),
+                    },
+                    _ => {
+                        let rotation = as_vec(value, 4).ok_or_else(|| {
+                            format!("pose `{name}` must be [x, y, z, w] or {{rotation, scale}}")
+                        })?;
+                        crate::rig::BonePose::rotation([
+                            rotation[0],
+                            rotation[1],
+                            rotation[2],
+                            rotation[3],
+                        ])
+                    }
+                };
+                pose.insert(name.clone(), extra);
             }
             Ok(Some(pose))
         }
-        Some(_) => Err("pose must be an object of bone quaternions".into()),
+        Some(_) => Err("pose must be an object of bone poses".into()),
     }
 }
 
@@ -819,7 +832,7 @@ fn clip_keys(params: &Value) -> Result<Vec<crate::rig::ClipKey>, String> {
             .get("time")
             .and_then(Value::as_f64)
             .ok_or("key time is required")? as f32;
-        let rotation = opt_vec4(key, "rotation")?.unwrap_or(crate::rig::IDENTITY_ROTATION);
+        let rotation = opt_vec4(key, "rotation")?;
         let translation = opt_vec3(key, "translation")?;
         let scale = opt_vec3(key, "scale")?.unwrap_or([1.0, 1.0, 1.0]);
         out.push(crate::rig::ClipKey {

@@ -526,6 +526,30 @@ fn set_pose_is_undoable_and_render_pose_does_not_stick() {
 }
 
 #[test]
+fn a_pose_entry_may_scale_and_a_negative_scale_is_refused() {
+    let mut head = Headless::new();
+    head.ok("add_bone", json!({"name": "lid", "pivot": [0.0, 0.0, 0.0]}));
+    head.ok(
+        "set_pose",
+        json!({"pose": {"lid": {"scale": [1.0, 1.0, 0.0]}}}),
+    );
+    let lid = head.session.pose["lid"];
+    assert_eq!(lid.scale, [1.0, 1.0, 0.0]);
+    assert_eq!(lid.rotation, crate::rig::IDENTITY_ROTATION);
+    let reply = head.call(
+        "set_pose",
+        json!({"pose": {"lid": {"scale": [1.0, -1.0, 1.0]}}}),
+    );
+    assert_eq!(reply["result"]["isError"], true);
+    // An entry that changes nothing is dropped.
+    head.ok(
+        "set_pose",
+        json!({"pose": {"lid": {"rotation": [0.0, 0.0, 0.0, 1.0], "scale": [1.0, 1.0, 1.0]}}}),
+    );
+    assert!(head.session.pose.is_empty());
+}
+
+#[test]
 fn clips_save_in_vox_and_mirror_and_shapes_follow_the_box_rules() {
     let mut head = Headless::new();
     head.ok(

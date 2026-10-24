@@ -493,7 +493,7 @@ pub(super) struct Snapshot {
     materials: [Material; 256],
     graph: Option<VoxGraph>,
     skeleton: Skeleton,
-    pose: HashMap<String, [f32; 4]>,
+    pose: crate::rig::Pose,
     clips: Vec<Clip>,
 }
 
@@ -584,9 +584,9 @@ pub struct Session {
     /// groups, layers, hidden flags, and animation frames past the first.
     graph: Option<VoxGraph>,
     pub skeleton: Skeleton,
-    /// Local quaternions on top of the bind pose. Empty leaves the bind pose.
-    /// Undo restores this preview; it does not write `Bone.rotation`.
-    pub pose: HashMap<String, [f32; 4]>,
+    /// Local rotations and scales on top of the bind pose. Empty leaves the
+    /// bind pose. Undo restores this preview; it does not write `Bone.rotation`.
+    pub pose: crate::rig::Pose,
     /// Named clips. Saved in the `MVAN` chunk and exported as glTF animations.
     pub clips: Vec<Clip>,
     /// Bone highlighted in the viewport. Not part of undo.

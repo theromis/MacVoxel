@@ -528,7 +528,7 @@ fn tools() -> Vec<Value> {
         }), &["index", "bone"]),
         tool("list_bones", "Bones with parent, pivot, rotation, and the object indices bound to each. Pivots are fractional world coordinates.", json!({}), &[]),
         tool("set_pose", "Preview a pose in the window. Each quaternion is local and multiplied on the right of the bind rotation, so a parent orbits its children. Omitted bones stay at the bind pose. Identity is a no-op. Does not change the bind pose. One undo step.", json!({
-            "pose": {"type": "object", "description": "Map of bone name to quaternion [x, y, z, w]. Replaces the preview.", "additionalProperties": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}}
+            "pose": {"type": "object", "description": "Map of bone name to a quaternion [x, y, z, w] or {rotation, scale}; scale is local per axis, 0 to 16, and children inherit it. Replaces the preview.", "additionalProperties": {"anyOf": [{"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}, {"type": "object", "properties": {"rotation": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}, "scale": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}}, "additionalProperties": false}]}}
         }), &["pose"]),
         tool("clear_pose", "Remove the preview pose. The bind pose stays. One undo step.", json!({}), &[]),
         tool("add_clip", "Add an empty named clip. Keys are local TRS in voxel space: translation is the full offset from the parent, not a delta. One undo step. Saved in the .vox MVAN chunk and written to glTF as an animation.", json!({
@@ -569,7 +569,7 @@ fn tools() -> Vec<Value> {
             "pitch": num_prop("Orbit pitch in degrees, -90..90. 90 looks straight down. Omit to keep the framing angle (25)."),
             "distance": num_prop("Multiple of the framing distance, greater than 0 and at most 100. Default 1."),
             "orthographic": {"type": "boolean", "description": "Parallel rays. The frame matches the perspective view at the same distance. Default false."},
-            "pose": {"type": "object", "description": "Temporary preview pose for this still. Bone name to quaternion [x, y, z, w], on top of the bind pose. The document pose is restored afterwards.", "additionalProperties": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}},
+            "pose": {"type": "object", "description": "Temporary preview pose for this still. Bone name to a quaternion [x, y, z, w] or {rotation, scale}, on top of the bind pose. A zero scale hides that bone's parts. The document pose is restored afterwards.", "additionalProperties": {"anyOf": [{"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}, {"type": "object", "properties": {"rotation": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}, "scale": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}}, "additionalProperties": false}]}},
             "showBones": {"type": "boolean", "description": "Draw joint points and parent links on the PNG. Default false."},
             "views": {"type": "array", "description": "Extra PNGs. The required path is still written with the top-level yaw and pitch. Each item is {yaw, pitch, path}.", "items": {"type": "object"}}
             })

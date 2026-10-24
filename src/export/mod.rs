@@ -747,12 +747,16 @@ fn append_animations(
             let mut rotation = Vec::new();
             let mut translation = Vec::new();
             let mut scale = Vec::new();
-            // A track whose keys never set a translation leaves the joint at its bind offset:
-            // no channel, so an importer keeps the rest position. A key without one in a track
-            // that has some repeats the bind offset.
+            // A track whose keys never set a translation (or a rotation) leaves the joint at
+            // its bind offset (or rotation): no channel, so an importer keeps the rest value.
+            // A key without one in a track that has some repeats the bind value.
             let moves = track.keys.iter().any(|key| key.translation.is_some());
+            let turns = track.keys.iter().any(|key| key.rotation.is_some());
             for key in &track.keys {
-                rotation.extend_from_slice(&crate::rig::gltf_rotation(key.rotation));
+                let turn = key
+                    .rotation
+                    .map_or(bind[bone].rotation, crate::rig::gltf_rotation);
+                rotation.extend_from_slice(&turn);
                 let offset = key
                     .translation
                     .map_or(bind[bone].translation, crate::rig::gltf_vector);
@@ -768,9 +772,12 @@ fn append_animations(
                 );
                 channels.push(json!({"sampler": samplers.len() - 1, "target": {"node": node, "path": "translation"}}));
             }
-            let rot_acc = push_anim(root, bin, &rotation, "VEC4", track.keys.len(), false);
-            samplers.push(json!({"input": time_acc, "output": rot_acc, "interpolation": "LINEAR"}));
-            channels.push(json!({"sampler": samplers.len() - 1, "target": {"node": node, "path": "rotation"}}));
+            if turns {
+                let rot_acc = push_anim(root, bin, &rotation, "VEC4", track.keys.len(), false);
+                samplers
+                    .push(json!({"input": time_acc, "output": rot_acc, "interpolation": "LINEAR"}));
+                channels.push(json!({"sampler": samplers.len() - 1, "target": {"node": node, "path": "rotation"}}));
+            }
             let scale_acc = push_anim(root, bin, &scale, "VEC3", track.keys.len(), false);
             samplers
                 .push(json!({"input": time_acc, "output": scale_acc, "interpolation": "LINEAR"}));
