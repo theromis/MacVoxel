@@ -4,7 +4,7 @@
 //! request, each reply is one JSON line. The session token is written to an
 //! owner-only file so another local user cannot drive this window.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -231,7 +231,7 @@ fn issue(port: u16) -> io::Result<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)

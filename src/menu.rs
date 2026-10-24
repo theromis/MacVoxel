@@ -102,6 +102,7 @@ pub fn native() -> bool {
 }
 
 impl Action {
+    #[cfg(target_os = "macos")]
     pub fn id(self) -> &'static str {
         match self {
             Action::New => "new",
@@ -123,6 +124,7 @@ impl Action {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub fn from_id(id: &str) -> Option<Action> {
         ALL.into_iter().find(|action| action.id() == id)
     }

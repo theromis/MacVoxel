@@ -80,6 +80,22 @@ macvoxel-egui --control 7979
 macvoxel-egui mcp --connect 127.0.0.1:7979 --launch
 ```
 
+## Releases
+
+The Release workflow runs only on request:
+
+```sh
+gh workflow run release.yml                      # version from Cargo.toml
+gh workflow run release.yml -f version=0.1.0-rc.1
+gh workflow run release.yml -f draft-release=false  # artifacts only
+```
+
+It builds macOS universal (`.dmg`, `.zip`), Windows x64, x86 and arm64
+(`.zip`), Linux x86_64, aarch64 and riscv64 (`.tar.gz`, `.deb`) and FreeBSD
+x86_64 (`.tar.gz`), then creates or updates the draft release `v<version>`
+with a `SHA256SUMS.txt`. The builds are unsigned; the macOS app has an ad-hoc
+signature, so Gatekeeper asks before the first launch.
+
 ## License
 
 MIT. See `LICENSE`.

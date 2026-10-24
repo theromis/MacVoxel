@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=MacVoxel
+Comment=Voxel editor
+Exec=macvoxel %f
+Terminal=false
+Categories=Graphics;3DGraphics;
