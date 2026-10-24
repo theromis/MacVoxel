@@ -9,6 +9,10 @@ use super::geom::*;
 use super::vox::*;
 use super::*;
 
+const SAVE: &str = "Save";
+const DONT_SAVE: &str = "Don't Save";
+const CANCEL: &str = "Cancel";
+
 impl Session {
     pub fn new_document(&mut self) {
         self.commit();
@@ -41,6 +45,7 @@ impl Session {
         self.undo.clear();
         self.redo.clear();
         self.pending = None;
+        self.mark_clean();
         self.clear_picked();
         self.script_error.clear();
         self.script_due = None;
@@ -83,6 +88,7 @@ impl Session {
         self.undo.clear();
         self.redo.clear();
         self.pending = None;
+        self.mark_clean();
         self.frame_camera();
         let file = path.file_name().unwrap_or_default().to_string_lossy();
         self.script_error.clear();
@@ -180,6 +186,7 @@ impl Session {
         self.undo.clear();
         self.redo.clear();
         self.pending = None;
+        self.mark_clean();
         Ok(())
     }
 
@@ -276,6 +283,7 @@ impl Session {
         self.undo.clear();
         self.redo.clear();
         self.pending = None;
+        self.mark_clean();
         self.script_error.clear();
         self.script_due = None;
         self.clear_picked();
@@ -376,6 +384,62 @@ impl Session {
         changed
     }
 
+    /// Remember the current document as saved. The preview pose is not saved
+    /// in the file, so it does not count as a change.
+    pub(super) fn mark_clean(&mut self) {
+        let mut snapshot = self.snapshot();
+        snapshot.pose.clear();
+        self.clean = Some(Box::new(snapshot));
+    }
+
+    /// Edits since the document was opened, saved, or created.
+    pub fn has_unsaved_changes(&mut self) -> bool {
+        self.commit();
+        let Some(clean) = self.clean.as_deref() else {
+            return true;
+        };
+        clean.objects != self.objects
+            || clean.palette != self.palette
+            || clean.materials != self.materials
+            || clean.graph != self.graph
+            || clean.skeleton != self.skeleton
+            || clean.clips != self.clips
+    }
+
+    /// True when the window may close. Unsaved edits ask Save, Don't Save,
+    /// or Cancel. Save that is cancelled or fails keeps the window open.
+    pub fn confirm_close(&mut self) -> bool {
+        if !self.has_unsaved_changes() {
+            return true;
+        }
+        let answer = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Unsaved changes")
+            .set_description(format!(
+                "Save changes to {} before closing?",
+                self.document_label()
+            ))
+            .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
+                SAVE.into(),
+                DONT_SAVE.into(),
+                CANCEL.into(),
+            ))
+            .show();
+        match answer {
+            rfd::MessageDialogResult::Custom(label) if label == SAVE => {
+                self.save();
+                !self.has_unsaved_changes()
+            }
+            rfd::MessageDialogResult::Yes => {
+                self.save();
+                !self.has_unsaved_changes()
+            }
+            rfd::MessageDialogResult::Custom(label) if label == DONT_SAVE => true,
+            rfd::MessageDialogResult::No => true,
+            _ => false,
+        }
+    }
+
     /// Save every object. An untitled document asks for a path.
     pub fn save(&mut self) {
         match self.path.clone() {
@@ -428,6 +492,7 @@ impl Session {
             return Err(message);
         }
         self.path = Some(path.to_path_buf());
+        self.mark_clean();
         let file = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -468,7 +533,11 @@ impl Session {
     pub fn export_summary(&self) -> String {
         let options = &self.export;
         let mut parts = vec![
-            if options.merge { "merged faces" } else { "unmerged faces" },
+            if options.merge {
+                "merged faces"
+            } else {
+                "unmerged faces"
+            },
             if options.vertex_colors {
                 "vertex colors"
             } else {

@@ -705,6 +705,9 @@ pub struct Session {
     palette_shift: bool,
     pub palette_anchor: u8,
     pending: Option<Snapshot>,
+    /// Document as last opened, saved, or created. Compared only when the
+    /// window asks to close, so edits are not hashed every frame.
+    clean: Option<Box<Snapshot>>,
     /// A panel drag in progress: edits gather into one undo step until it ends.
     gesture: bool,
     undo: Vec<Snapshot>,

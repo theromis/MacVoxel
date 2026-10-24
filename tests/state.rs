@@ -809,6 +809,42 @@ fn undo_survives_a_save() {
     let _ = std::fs::remove_file(path);
 }
 
+#[test]
+fn unsaved_changes_follow_the_last_save() {
+    let mut session = Session::new();
+    assert!(!session.has_unsaved_changes());
+    let hit = Hit {
+        cell: (0, 0, 0),
+        normal: (0, 0, 1),
+    };
+    session.checkpoint();
+    session.stamp(hit);
+    assert!(session.has_unsaved_changes());
+    session.undo();
+    assert!(!session.has_unsaved_changes());
+
+    session.checkpoint();
+    session.stamp(hit);
+    let path = std::env::temp_dir().join("macvoxel-egui-unsaved.vox");
+    session.write_vox(&path).unwrap();
+    assert!(!session.has_unsaved_changes());
+    session.undo();
+    assert!(session.has_unsaved_changes());
+    session.redo();
+    assert!(!session.has_unsaved_changes());
+
+    session
+        .pose
+        .insert("Preview".into(), crate::rig::BonePose::IDENTITY);
+    assert!(!session.has_unsaved_changes());
+
+    session.new_document();
+    assert!(!session.has_unsaved_changes());
+    session.load_path(&path);
+    assert!(!session.has_unsaved_changes());
+    let _ = std::fs::remove_file(path);
+}
+
 fn world_of(object: &LoadedObject, color: u8) -> Cell {
     let (cell, _) = object
         .cells
@@ -1746,7 +1782,9 @@ fn key_pose_keys_the_bind_rotation_times_the_pose() {
     session
         .add_bone("root", None, [0.0, 0.0, 0.0], Some([0.0, 0.0, half, half]))
         .unwrap();
-    session.add_bone("tip", Some("root"), [0.0, 0.0, 4.0], None).unwrap();
+    session
+        .add_bone("tip", Some("root"), [0.0, 0.0, 4.0], None)
+        .unwrap();
     let turn = crate::rig::BonePose {
         rotation: [half, 0.0, 0.0, half],
         scale: [1.0, 2.0, 1.0],
@@ -1758,14 +1796,22 @@ fn key_pose_keys_the_bind_rotation_times_the_pose() {
     session.clip_time = 0.5;
     assert_eq!(session.key_pose().unwrap(), 2);
     let clip = &session.clips[0];
-    let root = clip.tracks.iter().find(|track| track.bone == "root").unwrap();
+    let root = clip
+        .tracks
+        .iter()
+        .find(|track| track.bone == "root")
+        .unwrap();
     let want = (glam::Quat::from_array([0.0, 0.0, half, half])
         * glam::Quat::from_array(turn.rotation))
     .normalize();
     let got = glam::Quat::from_array(root.keys[0].rotation.unwrap());
     assert!(got.dot(want).abs() > 0.9999);
     assert_eq!(root.keys[0].scale, [1.0, 2.0, 1.0]);
-    let tip = clip.tracks.iter().find(|track| track.bone == "tip").unwrap();
+    let tip = clip
+        .tracks
+        .iter()
+        .find(|track| track.bone == "tip")
+        .unwrap();
     assert_eq!(tip.keys[0].rotation, None);
 
     // A second key at the same time replaces the first; another time adds one.
@@ -1775,7 +1821,10 @@ fn key_pose_keys_the_bind_rotation_times_the_pose() {
     assert_eq!(session.clips[0].tracks[0].keys.len(), 2);
     // Both bones keyed in one press are one undo step.
     session.undo();
-    assert!(session.clips[0].tracks.iter().all(|track| track.keys.len() == 1));
+    assert!(session.clips[0]
+        .tracks
+        .iter()
+        .all(|track| track.keys.len() == 1));
 }
 
 #[test]
@@ -1816,5 +1865,7 @@ fn the_export_dialog_names_its_options() {
     );
     session.export.split_objects = true;
     session.export.vertex_colors = true;
-    assert!(session.export_summary().ends_with("vertex colors, one mesh per object"));
+    assert!(session
+        .export_summary()
+        .ends_with("vertex colors, one mesh per object"));
 }

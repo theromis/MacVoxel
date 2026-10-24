@@ -41,11 +41,14 @@ impl NativeMenu {
             PredefinedMenuItem::hide_others(Some("Hide Others")),
             PredefinedMenuItem::show_all(Some("Show All")),
             PredefinedMenuItem::separator(),
-            PredefinedMenuItem::quit(Some("Quit MacVoxel")),
         ];
         for item in &predefined {
             let _ = app.append(item);
         }
+        // The predefined Quit terminates the app without a close request,
+        // which would skip the unsaved-changes prompt.
+        let quit = item("mv-quit", "Quit MacVoxel", "Cmd+Q");
+        let _ = app.append(&quit);
         let _ = menu.append(&app);
 
         let file = Submenu::new("File", true);
@@ -108,6 +111,7 @@ impl NativeMenu {
             recent,
             _predefined: predefined,
             _items: vec![
+                quit,
                 new,
                 open,
                 save,
@@ -147,7 +151,7 @@ impl NativeMenu {
                 "mv-save" => session.save(),
                 "mv-save-as" => session.save_as(),
                 "mv-export" => session.export_mesh_dialog(),
-                "mv-close" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                "mv-close" | "mv-quit" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 "mv-undo" => session.undo(),
                 "mv-redo" => session.redo(),
                 "mv-cut" => session.cut_picked(),

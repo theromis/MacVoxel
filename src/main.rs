@@ -158,6 +158,9 @@ impl eframe::App for Shell {
                 menu.poll(&mut self.session, ctx);
             }
         }
+        if ctx.input(|input| input.viewport().close_requested()) && !self.session.confirm_close() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
 
         let title = format!("MacVoxel — {}", self.session.document_label());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));

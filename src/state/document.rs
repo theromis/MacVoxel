@@ -136,6 +136,7 @@ impl Session {
             palette_shift: false,
             palette_anchor: 36,
             pending: None,
+            clean: None,
             gesture: false,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -157,6 +158,7 @@ impl Session {
             script: Default::default(),
         });
         session.frame_camera();
+        session.mark_clean();
         session
     }
 
