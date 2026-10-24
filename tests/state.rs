@@ -333,6 +333,7 @@ fn grown_size_survives_a_scene_save() {
         &session.palette,
         &session.materials,
         &Skeleton::default(),
+        &[],
     )
     .unwrap();
     let loaded = load_vox(&bytes).expect("scene");
@@ -426,6 +427,7 @@ fn resize_keeps_a_loaded_rotation() {
         &session.palette,
         &session.materials,
         &Skeleton::default(),
+        &[],
     )
     .unwrap();
     let again = load_vox(&bytes).expect("saved");
@@ -441,6 +443,7 @@ fn resize_keeps_a_loaded_rotation() {
         &session.palette,
         &session.materials,
         &Skeleton::default(),
+        &[],
     )
     .unwrap();
     let shrunk = load_vox(&bytes).expect("shrunk");
@@ -860,6 +863,7 @@ fn scene_save_keeps_each_object_in_place() {
         &default_palette(),
         &[Material::default(); 256],
         &Skeleton::default(),
+        &[],
     )
     .unwrap();
     let loaded = load_vox(&bytes).expect("scene");
@@ -984,6 +988,7 @@ fn scene_graph_keeps_hidden_layers_frames_and_groups() {
         &[Material::default(); 256],
         loaded.graph.as_ref(),
         &Skeleton::default(),
+        &[],
     )
     .unwrap();
     assert!(bytes.windows(4).any(|window| window == b"LAYR"));
@@ -1016,6 +1021,7 @@ fn scene_graph_keeps_hidden_layers_frames_and_groups() {
         &[Material::default(); 256],
         loaded.graph.as_ref(),
         &Skeleton::default(),
+        &[],
     )
     .unwrap();
     let shifted = load_vox(&bytes).expect("moved");
@@ -1086,6 +1092,7 @@ fn scene_rotation_is_baked_into_the_cells() {
         &default_palette(),
         &[Material::default(); 256],
         &Skeleton::default(),
+        &[],
     )
     .unwrap();
     let again = load_vox(&bytes).expect("resaved rotation");
@@ -1163,6 +1170,7 @@ fn corner_position_round_trips_odd_and_even_sizes() {
         &default_palette(),
         &[Material::default(); 256],
         &Skeleton::default(),
+        &[],
     )
     .unwrap();
     let loaded = load_vox(&bytes).expect("scene");
@@ -1212,6 +1220,7 @@ fn rotated_object_round_trips_world_cells() {
         &default_palette(),
         &[Material::default(); 256],
         &Skeleton::default(),
+        &[],
     )
     .unwrap();
     let again = load_vox(&bytes).expect("resaved");

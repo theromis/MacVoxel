@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::*;
 
 #[test]
@@ -67,4 +69,45 @@ fn identity_pose_puts_the_joint_on_the_pivot() {
     let point = Vec3::new(4.0, 3.0, -2.0);
     let skinned = world.transform_point3(inverse.transform_point3(point));
     assert!((skinned - point).length() < 1e-4);
+}
+
+#[test]
+fn a_parent_pose_orbits_the_child_and_identity_is_a_no_op() {
+    let mut skeleton = Skeleton::default();
+    skeleton.add("root", None, [0.0, 0.0, 0.0], None).unwrap();
+    skeleton
+        .add("child", Some("root"), [2.0, 0.0, 0.0], None)
+        .unwrap();
+    let rest = skin_deltas(&skeleton, &HashMap::new()).unwrap();
+    let point = Vec3::new(3.0, 1.0, 2.0);
+    for delta in &rest {
+        let moved = delta.transform_point3(point);
+        assert!((moved - point).length() < 1e-4, "{moved}");
+    }
+    let half = std::f32::consts::FRAC_PI_2 * 0.5;
+    let mut pose = HashMap::new();
+    pose.insert("root".into(), [0.0, 0.0, half.sin(), half.cos()]);
+    let joints = posed_joints(&skeleton, &pose).unwrap();
+    assert!(joints[1].0.x.abs() < 1e-4, "{}", joints[1].0);
+    assert!((joints[1].0.y - 2.0).abs() < 1e-4, "{}", joints[1].0);
+    assert!(joints[1].0.z.abs() < 1e-4, "{}", joints[1].0);
+}
+
+#[test]
+fn clips_round_trip_through_the_mvan_body() {
+    let clip = Clip {
+        name: "wave".into(),
+        tracks: vec![BoneTrack {
+            bone: "root".into(),
+            keys: vec![ClipKey {
+                time: 0.25,
+                rotation: IDENTITY_ROTATION,
+                translation: [1.0, 2.0, 3.0],
+                scale: [1.0, 1.0, 2.0],
+            }],
+        }],
+    };
+    let body = encode_clips(&[clip.clone()]).unwrap().unwrap();
+    assert_eq!(decode_clips(&body).unwrap(), vec![clip]);
+    assert!(encode_clips(&[]).unwrap().is_none());
 }

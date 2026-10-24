@@ -21,6 +21,10 @@ pub struct MeshExport {
     pub vertex_colors: bool,
     /// Greedy-merge coplanar faces that share a palette slot.
     pub merge: bool,
+    /// Include objects marked hidden. Default export leaves them out.
+    pub export_hidden: bool,
+    /// One mesh node per object, still sharing one skin. Default is one mesh.
+    pub split_objects: bool,
 }
 
 struct Built {
@@ -41,6 +45,9 @@ struct Built {
 }
 
 fn encode(session: &Session, options: &MeshExport) -> Result<Vec<u8>, String> {
+    if options.split_objects {
+        return encode_split(session, options);
+    }
     if !session.skeleton.bones.is_empty() {
         return encode_skinned(session, options);
     }
@@ -214,7 +221,10 @@ fn encode(session: &Session, options: &MeshExport) -> Result<Vec<u8>, String> {
 
 fn encode_skinned(session: &Session, options: &MeshExport) -> Result<Vec<u8>, String> {
     for object in &session.objects {
-        if object.hidden || object.cells.values().all(|slot| *slot == 0) {
+        if object.cells.values().all(|slot| *slot == 0) {
+            continue;
+        }
+        if object.hidden && !options.export_hidden {
             continue;
         }
         session.skeleton.joint_or_root(object.bone.as_deref())?;
@@ -433,6 +443,7 @@ fn encode_skinned(session: &Session, options: &MeshExport) -> Result<Vec<u8>, St
                 "byteLength": png.len()
             }));
     }
+    append_animations(&mut root, &mut bin, session, 1)?;
     let mut json_bytes = serde_json::to_vec(&root).map_err(|err| err.to_string())?;
     pad(&mut json_bytes, b' ');
     let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
@@ -447,6 +458,336 @@ fn encode_skinned(session: &Session, options: &MeshExport) -> Result<Vec<u8>, St
     out.extend_from_slice(b"BIN\0");
     out.extend_from_slice(&bin);
     Ok(out)
+}
+
+fn encode_split(session: &Session, options: &MeshExport) -> Result<Vec<u8>, String> {
+    let skinned = !session.skeleton.bones.is_empty();
+    let mut parts = Vec::new();
+    for index in 0..session.objects.len() {
+        let object = &session.objects[index];
+        if object.cells.values().all(|slot| *slot == 0) {
+            continue;
+        }
+        if object.hidden && !options.export_hidden {
+            continue;
+        }
+        if skinned {
+            session.skeleton.joint_or_root(object.bone.as_deref())?;
+        }
+        let built = quads::build_one(session, options, index);
+        if built.indices.is_empty() {
+            continue;
+        }
+        parts.push((object.name.clone(), built));
+    }
+    if parts.is_empty() {
+        return Err("Nothing to export.".into());
+    }
+    let poses = if skinned {
+        crate::rig::bind_pose(&session.skeleton)?
+    } else {
+        Vec::new()
+    };
+    let png = if options.vertex_colors {
+        Vec::new()
+    } else {
+        palette_png(&session.palette)?
+    };
+    let with_motion = parts.iter().any(|(_, built)| !built.motion.is_empty());
+    let color_name = if options.vertex_colors {
+        "COLOR_0"
+    } else {
+        "TEXCOORD_0"
+    };
+    let extra_type = if options.vertex_colors {
+        "VEC4"
+    } else {
+        "VEC2"
+    };
+    let mut bin = Vec::new();
+    let mut accessors = Vec::new();
+    let mut views = Vec::new();
+    let mut meshes = Vec::new();
+    let mut nodes = Vec::new();
+    let mut blend = false;
+    for (name, built) in &parts {
+        blend |= built.blend;
+        let verts = (built.positions.len() / 3) as u32;
+        let pos_off = bin.len();
+        push_f32s(&mut bin, &built.positions);
+        let nrm_off = bin.len();
+        push_f32s(&mut bin, &built.normals);
+        let extra_off = bin.len();
+        push_f32s(&mut bin, &built.extra);
+        let motion_off = bin.len();
+        if with_motion {
+            push_f32s(&mut bin, &built.motion);
+        }
+        let joint_off = bin.len();
+        if skinned {
+            for joint in &built.joints {
+                bin.extend_from_slice(&joint.to_le_bytes());
+            }
+        }
+        let weight_off = bin.len();
+        if skinned {
+            for _ in 0..verts {
+                push_f32s(&mut bin, &[1.0, 0.0, 0.0, 0.0]);
+            }
+        }
+        let idx_off = bin.len();
+        for index in &built.indices {
+            bin.extend_from_slice(&index.to_le_bytes());
+        }
+        let mut attributes = serde_json::Map::new();
+        attributes.insert("POSITION".into(), json!(accessors.len()));
+        views.push(json!({"buffer": 0, "byteOffset": pos_off, "byteLength": built.positions.len() * 4, "target": 34962}));
+        accessors.push(json!({
+            "bufferView": views.len() - 1,
+            "componentType": 5126,
+            "count": verts,
+            "type": "VEC3",
+            "min": built.min,
+            "max": built.max
+        }));
+        attributes.insert("NORMAL".into(), json!(accessors.len()));
+        views.push(json!({"buffer": 0, "byteOffset": nrm_off, "byteLength": built.normals.len() * 4, "target": 34962}));
+        accessors.push(json!({"bufferView": views.len() - 1, "componentType": 5126, "count": verts, "type": "VEC3"}));
+        attributes.insert(color_name.into(), json!(accessors.len()));
+        views.push(json!({"buffer": 0, "byteOffset": extra_off, "byteLength": built.extra.len() * 4, "target": 34962}));
+        accessors.push(json!({"bufferView": views.len() - 1, "componentType": 5126, "count": verts, "type": extra_type}));
+        if skinned {
+            attributes.insert("JOINTS_0".into(), json!(accessors.len()));
+            views.push(json!({"buffer": 0, "byteOffset": joint_off, "byteLength": built.joints.len() * 2, "target": 34962}));
+            accessors.push(json!({"bufferView": views.len() - 1, "componentType": 5123, "count": verts, "type": "VEC4"}));
+            attributes.insert("WEIGHTS_0".into(), json!(accessors.len()));
+            views.push(json!({"buffer": 0, "byteOffset": weight_off, "byteLength": verts as usize * 16, "target": 34962}));
+            accessors.push(json!({"bufferView": views.len() - 1, "componentType": 5126, "count": verts, "type": "VEC4"}));
+        }
+        if with_motion {
+            attributes.insert("TEXCOORD_1".into(), json!(accessors.len()));
+            views.push(json!({"buffer": 0, "byteOffset": motion_off, "byteLength": built.motion.len() * 4, "target": 34962}));
+            accessors.push(json!({"bufferView": views.len() - 1, "componentType": 5126, "count": verts, "type": "VEC2"}));
+        }
+        let indices = accessors.len();
+        views.push(json!({"buffer": 0, "byteOffset": idx_off, "byteLength": built.indices.len() * 4, "target": 34963}));
+        accessors.push(json!({"bufferView": views.len() - 1, "componentType": 5125, "count": built.indices.len(), "type": "SCALAR"}));
+        meshes.push(json!({
+            "name": name,
+            "primitives": [{
+                "attributes": attributes,
+                "indices": indices,
+                "material": 0,
+                "mode": 4
+            }]
+        }));
+        let mut node = json!({"name": name, "mesh": nodes.len()});
+        if skinned {
+            node["skin"] = json!(0);
+        }
+        nodes.push(node);
+    }
+    let mut skins = Vec::new();
+    let mut scene_nodes: Vec<usize> = (0..parts.len()).collect();
+    if skinned {
+        let ibm_off = bin.len();
+        for pose in &poses {
+            push_f32s(&mut bin, &pose.inverse_bind);
+        }
+        let ibm = accessors.len();
+        views.push(json!({"buffer": 0, "byteOffset": ibm_off, "byteLength": poses.len() * 64}));
+        accessors.push(json!({"bufferView": views.len() - 1, "componentType": 5126, "count": poses.len(), "type": "MAT4"}));
+        for (index, pose) in poses.iter().enumerate() {
+            let mut node = json!({
+                "name": session.skeleton.bones[index].name,
+                "translation": pose.translation,
+                "rotation": pose.rotation
+            });
+            let children: Vec<usize> = session
+                .skeleton
+                .child_indices(index)
+                .into_iter()
+                .map(|child| parts.len() + child)
+                .collect();
+            if !children.is_empty() {
+                node["children"] = json!(children);
+            }
+            nodes.push(node);
+        }
+        let joints: Vec<usize> = (parts.len()..parts.len() + poses.len()).collect();
+        let roots: Vec<usize> = session
+            .skeleton
+            .root_indices()
+            .into_iter()
+            .map(|index| parts.len() + index)
+            .collect();
+        let mut skin = json!({"joints": joints, "inverseBindMatrices": ibm});
+        if let Some(root) = roots.first() {
+            skin["skeleton"] = json!(root);
+        }
+        skins.push(skin);
+        scene_nodes.extend(roots);
+    }
+    let image_off = bin.len();
+    bin.extend_from_slice(&png);
+    pad(&mut bin, 0);
+    let alpha = if blend { "BLEND" } else { "OPAQUE" };
+    let material_name = if options.vertex_colors {
+        "voxel-vertex-color"
+    } else {
+        "voxel-palette"
+    };
+    let mut material = json!({
+        "name": material_name,
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+            "metallicFactor": 0.0,
+            "roughnessFactor": 1.0
+        },
+        "alphaMode": alpha
+    });
+    if !options.vertex_colors {
+        material["pbrMetallicRoughness"]["baseColorTexture"] = json!({"index": 0});
+        views.push(json!({"buffer": 0, "byteOffset": image_off, "byteLength": png.len()}));
+    }
+    let mut root = json!({
+        "asset": {"version": "2.0", "generator": "MacVoxel"},
+        "scene": 0,
+        "scenes": [{"nodes": scene_nodes}],
+        "nodes": nodes,
+        "materials": [material],
+        "meshes": meshes,
+        "accessors": accessors,
+        "bufferViews": views,
+        "buffers": [{"byteLength": bin.len()}]
+    });
+    if skinned {
+        root["skins"] = json!(skins);
+    }
+    if !options.vertex_colors {
+        let image_view = views.len() - 1;
+        root["textures"] = json!([{"sampler": 0, "source": 0}]);
+        root["samplers"] = json!([{
+            "magFilter": 9728,
+            "minFilter": 9728,
+            "wrapS": 33071,
+            "wrapT": 33071
+        }]);
+        root["images"] = json!([{"bufferView": image_view, "mimeType": "image/png"}]);
+    }
+    if skinned {
+        append_animations(&mut root, &mut bin, session, parts.len())?;
+    }
+    let mut json_bytes = serde_json::to_vec(&root).map_err(|err| err.to_string())?;
+    pad(&mut json_bytes, b' ');
+    let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(b"glTF");
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"JSON");
+    out.extend_from_slice(&json_bytes);
+    out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"BIN\0");
+    out.extend_from_slice(&bin);
+    Ok(out)
+}
+
+fn append_animations(
+    root: &mut serde_json::Value,
+    bin: &mut Vec<u8>,
+    session: &Session,
+    joint_base: usize,
+) -> Result<(), String> {
+    if session.clips.is_empty() {
+        return Ok(());
+    }
+    let mut animations = Vec::new();
+    for clip in &session.clips {
+        let mut samplers = Vec::new();
+        let mut channels = Vec::new();
+        for track in &clip.tracks {
+            let bone = session.skeleton.index_of(&track.bone).ok_or_else(|| {
+                format!("clip `{}` names unknown bone `{}`", clip.name, track.bone)
+            })?;
+            if track.keys.is_empty() {
+                continue;
+            }
+            let times: Vec<f32> = track.keys.iter().map(|key| key.time).collect();
+            let mut rotation = Vec::new();
+            let mut translation = Vec::new();
+            let mut scale = Vec::new();
+            for key in &track.keys {
+                rotation.extend_from_slice(&crate::rig::gltf_rotation(key.rotation));
+                translation.extend_from_slice(&crate::rig::gltf_vector(key.translation));
+                scale.extend_from_slice(&crate::rig::gltf_scale(key.scale));
+            }
+            let time_acc = push_anim(root, bin, &times, "SCALAR", times.len(), true);
+            let trans_acc = push_anim(root, bin, &translation, "VEC3", track.keys.len(), false);
+            let rot_acc = push_anim(root, bin, &rotation, "VEC4", track.keys.len(), false);
+            let scale_acc = push_anim(root, bin, &scale, "VEC3", track.keys.len(), false);
+            let base = samplers.len();
+            samplers
+                .push(json!({"input": time_acc, "output": trans_acc, "interpolation": "LINEAR"}));
+            samplers.push(json!({"input": time_acc, "output": rot_acc, "interpolation": "LINEAR"}));
+            samplers
+                .push(json!({"input": time_acc, "output": scale_acc, "interpolation": "LINEAR"}));
+            let node = joint_base + bone;
+            channels
+                .push(json!({"sampler": base, "target": {"node": node, "path": "translation"}}));
+            channels
+                .push(json!({"sampler": base + 1, "target": {"node": node, "path": "rotation"}}));
+            channels.push(json!({"sampler": base + 2, "target": {"node": node, "path": "scale"}}));
+        }
+        animations.push(json!({
+            "name": clip.name,
+            "samplers": samplers,
+            "channels": channels
+        }));
+    }
+    root["animations"] = json!(animations);
+    root["buffers"][0]["byteLength"] = json!(bin.len());
+    Ok(())
+}
+
+fn push_anim(
+    root: &mut serde_json::Value,
+    bin: &mut Vec<u8>,
+    values: &[f32],
+    ty: &str,
+    count: usize,
+    bounds: bool,
+) -> usize {
+    let offset = bin.len();
+    let mut min = f32::MAX;
+    let mut max = f32::MIN;
+    for value in values {
+        min = min.min(*value);
+        max = max.max(*value);
+        bin.extend_from_slice(&value.to_le_bytes());
+    }
+    let views = root["bufferViews"].as_array().expect("buffer views").len();
+    let accessors = root["accessors"].as_array().expect("accessors").len();
+    root["bufferViews"]
+        .as_array_mut()
+        .expect("buffer views")
+        .push(json!({"buffer": 0, "byteOffset": offset, "byteLength": values.len() * 4}));
+    let mut accessor = json!({
+        "bufferView": views,
+        "componentType": 5126,
+        "count": count,
+        "type": ty
+    });
+    if bounds {
+        accessor["min"] = json!([min]);
+        accessor["max"] = json!([max]);
+    }
+    root["accessors"]
+        .as_array_mut()
+        .expect("accessors")
+        .push(accessor);
+    accessors
 }
 
 fn push_f32s(out: &mut Vec<u8>, values: &[f32]) {
@@ -469,6 +810,8 @@ pub fn export_glb(session: &Session, path: &Path) -> Result<u32, String> {
         &MeshExport {
             vertex_colors: false,
             merge: true,
+            export_hidden: false,
+            split_objects: false,
         },
     )
 }

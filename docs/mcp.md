@@ -105,7 +105,8 @@ the model centre, `SIZE / 2` with integer division. A rotation `_r`, and a
 parent group's translation, turn that centre. Loading subtracts the rotated
 centre offset so the SIZE corner stays local `(0, 0, 0)`. Saving adds the
 offset back, so MagicaVoxel still opens the parts in place. Bone pivots are
-world voxel coordinates too. Palette
+fractional world coordinates: a joint may sit on a corner, a cell centre, or
+anywhere between cells. Palette
 index `0` is empty and erases a cell. Indices `1..255` are colors. A cell
 must lie in `[-1024, 1024)`. A write that would make the active object longer
 than 256 on any axis is refused and changes nothing.
@@ -138,26 +139,35 @@ tracer. A file with no scene graph still loads its first model.
 | `set_voxel` | `x`, `y`, `z`, `palette` | Write one **local** cell. One undo step |
 | `set_voxels` | `cells` | Write up to 200000 **local** cells as one undo step |
 | `fill_box` | `x0`, `y0`, `z0`, `x1`, `y1`, `z1`, `palette` | Fill an inclusive box of **local** cells, at most 2000000, one undo step |
+| `fill_ellipsoid` | `x0`, `y0`, `z0`, `x1`, `y1`, `z1`, `palette` | Fill the ellipsoid inscribed in that box. The box volume is checked first, even when the solid is smaller. One undo step |
+| `fill_rounded_box` | `x0`, `y0`, `z0`, `x1`, `y1`, `z1`, `palette`, `radius` | Same box, with an edge bevel of `radius` voxels. `radius` 0 is the full box. The radius is clamped to half the shortest side |
 | `get_voxels` | `x0`, `y0`, `z0`, `x1`, `y1`, `z1` | Non-empty **local** cells inside an inclusive box, at most 100000 |
 | `set_palette` | `index`, `r`, `g`, `b` or `entries` | Replace one slot, or many via `entries`, as one undo step. `a` defaults to 255. Optional `motion` (`none`, `sway`, `bob`) and `motion_amount` (0..4) |
 | `set_active_object` | `index` | Edit a different object. Later voxel tools use its local cells |
 | `add_object` | — | Empty object. Optional `name`, world `position` `[x, y, z]` (default `[0, 0, 0]`), `size` `[x, y, z]` (capacity hint, each axis 1..=256), `make_active` (default true). Returns the index. One undo step |
 | `set_object` | `index` | Optional `name`, world `position`, `hidden`. Moving changes the scene-graph translation, so voxels move in the world. One undo step |
 | `remove_object` | `index` | Remove the object and its voxels. Its bone stays; the binding goes. Later indices decrease by one. Refuses the last object. One undo step |
-| `add_bone` | `name`, `pivot` | Add a bone. `pivot` is a world voxel coordinate `[x, y, z]`. Optional `parent` (omit or null for a root) and `rotation` quaternion `[x, y, z, w]` (default identity `[0, 0, 0, 1]`). One undo step |
+| `mirror_object` | `index`, `axis`, `name` | Copy the object mirrored across `x`, `y`, or `z` through the origin. Optional world `position` and `mirrorBones` (default false). One undo step |
+| `add_bone` | `name`, `pivot` | Add a bone. `pivot` is a fractional world coordinate `[x, y, z]`. Optional `parent` (omit or null for a root) and `rotation` quaternion `[x, y, z, w]` (default identity `[0, 0, 0, 1]`). One undo step |
 | `set_bone` | `name` | Optional `parent` (null makes a root; omit leaves it), world `pivot`, `rotation` `[x, y, z, w]`, `rename`. One undo step |
 | `remove_bone` | `name` | Delete a bone. Objects bound to it become unbound. Children keep its parent. One undo step |
 | `bind_object` | `index`, `bone` | Bind an object to one bone, or `bone: null` to unbind. Rigid: one bone, weight 1. One undo step |
 | `list_bones` | — | Each bone's parent, world pivot, quaternion, and the object indices bound to it |
+| `set_pose` | `pose` | Preview pose. Map of bone name to a local quaternion `[x, y, z, w]` on top of the bind pose. One undo step. Does not write the bind rotation |
+| `clear_pose` | — | Remove the preview pose. One undo step |
+| `add_clip` | `name` | Empty named clip. One undo step. Saved in the `.vox` `MVAN` chunk |
+| `set_clip_keys` | `name`, `bone`, `keys` | Replace one bone's keys. Each key is `time`, optional `rotation`, `translation`, `scale`. One undo step |
+| `list_clips` | — | Clips and their bone keys |
+| `remove_clip` | `name` | Remove a clip. One undo step |
 | `undo` | — | Undo the last edit |
 | `redo` | — | Redo the last undone edit |
-| `render` | `path` | Path-trace the scene to a PNG. `width` and `height` default to 256. `samples` defaults to 16. `bounces` defaults to 4. `denoise` defaults to true. `yaw` defaults to 30°, `pitch` to 25° |
+| `render` | `path` | Path-trace the scene to a PNG. `width` and `height` default to 256. `samples` defaults to 16. `bounces` defaults to 4. `denoise` defaults to true. `yaw` defaults to 30°, `pitch` to 25°. Optional `orthographic`, `views`, `pose`, `showBones` |
 | `screenshot` | — | PNG of the whole editor window. Connected mode only |
 | `screenshot_viewport` | — | PNG of the 3D viewport, including its mode chips. Connected mode only |
 | `screenshot_region` | `x`, `y`, `width`, `height` | PNG of a rectangle in window points. Connected mode only |
 | `ui_inspect` | — | Previous frame's controls, tool, mode, active object, voxel count, and status. Connected mode only |
 | `ui_click` | `x`, `y` | Click the topmost registered control. A viewport hit stamps the active tool. A slider sets its value from the point. A palette cell selects that slot. Connected mode only |
-| `export_mesh` | `path` | Write a glTF 2.0 `.glb` of every object. `merge` defaults to false. `vertexColors` defaults to false. A slot with motion adds `TEXCOORD_1` |
+| `export_mesh` | `path` | Write a glTF 2.0 `.glb` of every object. `merge` defaults to false. `vertexColors` defaults to false. `exportHidden` and `splitObjects` default to false. A slot with motion adds `TEXCOORD_1`. Clips become glTF animations |
 | `set_script` | `source`, optional `object` | Store a Rhai script and read its parameters. One undo step. Does not rebuild voxels |
 | `get_script` | optional `object` | Source, auto flag, and parameters |
 | `set_params` | `values`, optional `object` | Set parameter values by name. One undo step. Does not run the script |
@@ -169,6 +179,11 @@ tracer. A file with no scene graph still loads its first model.
 that already hold the requested index are not an undo step.
 
 `fill_box` corners may arrive in either order. The box is inclusive.
+`fill_ellipsoid` and `fill_rounded_box` use that same inclusive box. A cell
+is solid when its centre lies inside the shape. The ellipsoid is centred on
+the box and touches the middle of each face. `fill_rounded_box` measures
+the distance from the cell centre to the box inset by `radius`. Both refuse
+a box larger than 2000000 cells before writing, and both are one undo step.
 
 `set_palette` takes either one slot (`index`, `r`, `g`, `b`, optional `a`) or
 `entries`: an array of those objects, at most 256. Pass one form or the other,
@@ -218,7 +233,18 @@ window. `width` and `height` are 1..1024 and default to 256. `samples` is
 1..128 and defaults to 16. `bounces` is 0..8 and defaults to 4. `seed`
 defaults to 1. The camera frames the scene, then orbits: `yaw` defaults to
 30 degrees, `pitch` to 25 degrees (−90..90), and `distance` multiplies that
-framing distance (greater than 0, at most 100). The file is ACES tonemapped.
+framing distance (greater than 0, at most 100). Yaw 0 puts the camera on
+the +X side of the target, looking toward −X. A model whose face points
+along −Y is face-on at yaw −90. `orthographic` defaults to false; true
+uses parallel rays whose frame matches the perspective view at the same
+distance. `pose` is an optional map of bone name to quaternion
+`[x, y, z, w]`, applied on top of the bind pose for this still only. The
+window's preview pose and the bind rotation are unchanged when the call
+returns. `showBones` defaults to false; true draws joint points and parent
+links on the PNG after tonemapping. `views` is a list of
+`{yaw, pitch, path}`. The required `path` is still written with the
+top-level yaw and pitch, and each view is an extra PNG. An empty
+`views` list is an error. The file is ACES tonemapped.
 `denoise` defaults to true. The default build runs the edge-aware filter;
 a build with `--features oidn` runs Open Image Denoise on the finished
 frame, using the first-hit albedo and normal. `atmospheric`,
@@ -226,7 +252,8 @@ frame, using the first-hit albedo and normal. `atmospheric`,
 `absorption`), `aperture`, and `focus` use the same names as
 `macvoxel render` and change the still only when present. An empty scene
 is an error. The call does not move the editor camera. The reply is
-`path`, `width`, `height`, and `samples`.
+`path`, `width`, `height`, and `samples`, plus `views` when that list
+was sent.
 
 `export_mesh` writes every solid voxel of every visible object, exposed faces
 only. Hidden objects are left out. `merge` defaults to false, one quad per
@@ -255,6 +282,17 @@ A merged quad never shares a vertex between two bones; faces are grouped by
 bone before the T-junction split. `TEXCOORD_1` is still written when any slot
 has motion.
 
+`exportHidden` defaults to false, so a hidden object stays out of the file.
+`true` includes it. `splitObjects` defaults to false, one mesh named
+`voxels`. `true` writes one mesh node per object, named with the object
+name, still sharing a single skin when the document has a skeleton. A game
+can then hide one part, such as an alternate face, without a second export.
+When the document has a skeleton, clips are written as a glTF `animations` array. Each clip is one animation
+whose name is the clip name. Channels target the joint nodes
+(translation, rotation, and scale, linear). Godot 4 imports that array as
+an AnimationLibrary on the AnimationPlayer. A document with no clips omits
+`animations`, so the bytes match a rig-only export.
+
 `add_object` appends an empty object and returns its index. `position` is
 the world voxel coordinate of local cell `(0, 0, 0)` and defaults to
 `[0, 0, 0]`. `size` is an optional local SIZE box, each axis `1..=256`. It
@@ -268,7 +306,42 @@ stays in the skeleton. Object indices after the removed one decrease by one,
 and the reply sets `indicesShifted` with a `note` when that happens. The
 last remaining object cannot be removed.
 
-`add_bone` requires `name` and a world `pivot` `[x, y, z]`. `parent` omitted
+`mirror_object` copies one object. `axis` is `x`, `y`, or `z`. A cell at
+world coordinate `c` on that axis lands at `-c - 1` (cell `(2, 0, 0)`
+mirrored on X becomes world x −3). The other axes stay. Omit `position`
+and the copy's translation is the minimum corner of those mirrored cells;
+local cells are relative to it. A `position` is that corner instead, and
+the locals are the mirrored world cells minus it. `mirrorBones` defaults
+to false, and the copy is unbound. `true` requires a bound object and
+copies that bone plus its descendants. A name ending in `_l` becomes
+`_r`, and the reverse; any other name gains `_r`. A parent inside the
+copied subtree is the mirrored parent. A parent outside it stays, so a
+limb remains on the spine. The pivot's component on the axis is negated
+(a fractional pivot stays fractional). The local quaternion flips the two
+axes that are not the mirror axis. The new bone name must not already
+exist. Objects and bones are one undo step.
+
+`set_pose` replaces the window preview. `pose` maps a bone name to a
+quaternion `[x, y, z, w]` in voxel space. It is multiplied on the right of
+that bone's bind rotation, then the parent chain is applied, so a posed
+parent orbits its children. A bone omitted from the map stays at its bind
+rotation. Identity is dropped. The bind pose in the skeleton is not
+written. `clear_pose` removes the preview. Both are undo steps, separate
+from `set_bone`. The window draws joint points and parent links whenever
+the skeleton is not empty. That overlay is not a tool default.
+
+`add_clip` creates an empty clip. `set_clip_keys` replaces the keys of one
+bone in that clip. A key's `time` is seconds, finite and ≥ 0, and times
+must increase. `rotation` is the bone's local quaternion (default identity).
+`translation` is the full local offset from the parent in voxel units, not
+a delta from the bind pose (default `[0, 0, 0]`). `scale` is local
+(default `[1, 1, 1]`). A rest key that should match the bind pose repeats
+that local offset and the bind rotation. `list_clips` returns the clips.
+`remove_clip` deletes one. Each of these is one undo step. Save writes
+them in an `MVAN` chunk next to `MVRG`. MagicaVoxel skips the chunk.
+
+`add_bone` requires `name` and a world `pivot` `[x, y, z]`. The components
+are fractional, so the joint can sit between cells. `parent` omitted
 or null is a root. `rotation` is a quaternion `[x, y, z, w]` in voxel space
 and defaults to `[0, 0, 0, 1]`. `set_bone` edits one bone; omit a field to
 leave it, and pass `parent: null` to make it a root. `remove_bone` unbinds

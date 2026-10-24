@@ -202,6 +202,7 @@ struct Shade {
     sun_color: [f32; 3],
     eye: Vec3,
     target: Vec3,
+    orthographic: bool,
 }
 
 impl Shade {
@@ -228,6 +229,7 @@ impl Shade {
             sun_color: session.sun_color,
             eye: session.eye(),
             target: session.target,
+            orthographic: session.orthographic,
         }
     }
 
@@ -328,8 +330,17 @@ fn shade_pixel(
     seed: u32,
 ) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let mut rng = Rng(hash(x, y, sample).wrapping_add(seed));
-    let center = primary_dir(width, height, x, y, shade.eye, shade.target, &mut rng);
-    let (origin, dir) = lens_ray(shade, shade.eye, shade.target, center, &mut rng);
+    let (origin, dir) = if shade.orthographic {
+        let (origin, dir) = ortho_primary(width, height, x, y, shade.eye, shade.target, &mut rng);
+        if shade.aperture <= 0.0 {
+            (origin, dir)
+        } else {
+            lens_ray(shade, origin, origin + dir, dir, &mut rng)
+        }
+    } else {
+        let center = primary_dir(width, height, x, y, shade.eye, shade.target, &mut rng);
+        lens_ray(shade, shade.eye, shade.target, center, &mut rng)
+    };
     let color = radiance(world, shade, origin, dir, 0, &mut rng);
     let (albedo, normal) = if sample == 0 {
         first_guides(world, shade, origin, dir)
@@ -438,7 +449,10 @@ pub fn encode_png(image: &Image, session: &Session) -> Result<Vec<u8>, String> {
         return Err("Render has no samples yet.".into());
     }
     let linear = filtered(image, session)?;
-    let rgba = tonemap_rgba(&linear, session.aces);
+    let mut rgba = tonemap_rgba(&linear, session.aces);
+    if session.show_bones {
+        draw_bone_overlay(&mut rgba, image.width, image.height, session);
+    }
     encode_rgba(image.width, image.height, &rgba)
 }
 
@@ -562,6 +576,93 @@ pub(crate) fn linear_channel(channel: u8) -> f32 {
     }
 }
 
+fn draw_bone_overlay(rgba: &mut [u8], width: u32, height: u32, session: &Session) {
+    if session.skeleton.bones.is_empty() {
+        return;
+    }
+    let Ok(joints) = crate::rig::posed_joints(&session.skeleton, &session.pose) else {
+        return;
+    };
+    let eye = session.eye();
+    let (forward, right, up) = camera_basis(eye, session.target);
+    let project = |point: Vec3| -> Option<(i32, i32)> {
+        let rel = point - eye;
+        let z = rel.dot(forward);
+        if z <= 0.05 {
+            return None;
+        }
+        let x = rel.dot(right);
+        let y = rel.dot(up);
+        let aspect = width as f32 / height.max(1) as f32;
+        let tan = (FOV_Y * 0.5).tan();
+        let (u, v) = if session.orthographic {
+            let half_h = session.distance * tan;
+            let half_w = half_h * aspect;
+            if half_w <= 1.0e-6 || half_h <= 1.0e-6 {
+                return None;
+            }
+            (x / half_w, y / half_h)
+        } else {
+            (x / (z * aspect * tan), y / (z * tan))
+        };
+        let px = ((u + 1.0) * 0.5 * width as f32).round() as i32;
+        let py = ((1.0 - v) * 0.5 * height as f32).round() as i32;
+        Some((px, py))
+    };
+    let pixels: Vec<Option<(i32, i32)>> = joints.iter().map(|(point, _)| project(*point)).collect();
+    for (index, pixel) in pixels.iter().enumerate() {
+        let Some(pixel) = *pixel else {
+            continue;
+        };
+        if let Some(parent) = session.skeleton.parent_index(index) {
+            if let Some(from) = pixels.get(parent).copied().flatten() {
+                bone_line(rgba, width, height, from, pixel);
+            }
+        }
+        for y in pixel.1 - 1..=pixel.1 + 1 {
+            for x in pixel.0 - 1..=pixel.0 + 1 {
+                bone_pixel(rgba, width, height, x, y);
+            }
+        }
+    }
+}
+
+fn bone_pixel(rgba: &mut [u8], width: u32, height: u32, x: i32, y: i32) {
+    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+        return;
+    }
+    let index = (y as u32 * width + x as u32) as usize * 4;
+    rgba[index] = 255;
+    rgba[index + 1] = 191;
+    rgba[index + 2] = 51;
+    rgba[index + 3] = 255;
+}
+
+fn bone_line(rgba: &mut [u8], width: u32, height: u32, from: (i32, i32), to: (i32, i32)) {
+    let (mut x0, mut y0) = from;
+    let (x1, y1) = to;
+    let dx = (x1 - x0).abs();
+    let dy = (y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx - dy;
+    loop {
+        bone_pixel(rgba, width, height, x0, y0);
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let twice = 2 * err;
+        if twice > -dy {
+            err -= dy;
+            x0 += sx;
+        }
+        if twice < dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
 pub(crate) fn linear_rgb(rgba: [u8; 4]) -> [f32; 3] {
     [
         linear_channel(rgba[0]),
@@ -573,7 +674,10 @@ pub(crate) fn linear_rgb(rgba: [u8; 4]) -> [f32; 3] {
 mod shade;
 mod world;
 
-use shade::{aces, denoise, first_guides, lens_ray, primary_dir, radiance, to_srgb};
+use shade::{
+    aces, camera_basis, denoise, first_guides, lens_ray, ortho_primary, primary_dir, radiance,
+    to_srgb,
+};
 use world::build_world;
 pub use world::{gpu_scene, GpuLight, GpuScene};
 

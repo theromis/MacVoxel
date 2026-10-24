@@ -27,6 +27,7 @@ pub(crate) fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
     let mut palette = None;
     let mut materials = [Material::default(); 256];
     let mut rig: Option<(Skeleton, Vec<crate::rig::StoredBind>)> = None;
+    let mut clips = None;
     let mut scripts = None;
 
     while p + 12 <= end {
@@ -111,6 +112,11 @@ pub(crate) fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
                 return Err("duplicate MVRG chunk".into());
             }
             rig = Some(crate::rig::decode_chunk(body)?);
+        } else if &id == b"MVAN" {
+            if clips.is_some() {
+                return Err("duplicate MVAN chunk".into());
+            }
+            clips = Some(crate::rig::decode_clips(body)?);
         } else if &id == b"MVSC" {
             if scripts.is_some() {
                 return Err("duplicate MVSC chunk".into());
@@ -186,6 +192,7 @@ pub(crate) fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
         materials,
         graph,
         skeleton,
+        clips: clips.unwrap_or_default(),
     })
 }
 

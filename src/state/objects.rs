@@ -316,6 +316,298 @@ impl Session {
         Ok(())
     }
 
+    /// Replace the preview pose. Omitted bones stay at the bind rotation.
+    /// An identity quaternion is dropped. `Bone.rotation` is not written.
+    pub fn set_pose(&mut self, pose: HashMap<String, [f32; 4]>) -> Result<(), String> {
+        let next = self.checked_pose(pose)?;
+        if next == self.pose {
+            return Ok(());
+        }
+        self.checkpoint();
+        self.pose = next;
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.commit();
+        Ok(())
+    }
+
+    pub fn clear_pose(&mut self) {
+        if self.pose.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        self.pose.clear();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.commit();
+    }
+
+    pub fn checked_pose(
+        &self,
+        pose: HashMap<String, [f32; 4]>,
+    ) -> Result<HashMap<String, [f32; 4]>, String> {
+        let mut next = HashMap::new();
+        for (name, rotation) in pose {
+            if self.skeleton.index_of(&name).is_none() {
+                return Err(format!("unknown bone `{name}`"));
+            }
+            if let Some(rotation) = normalize_extra(rotation)? {
+                next.insert(name, rotation);
+            }
+        }
+        Ok(next)
+    }
+
+    pub fn add_clip(&mut self, name: &str) -> Result<(), String> {
+        let name = clip_name(name)?;
+        if self.clips.iter().any(|clip| clip.name == name) {
+            return Err(format!("clip `{name}` already exists"));
+        }
+        self.checkpoint();
+        self.clips.push(crate::rig::Clip {
+            name,
+            tracks: Vec::new(),
+        });
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_clip_keys(
+        &mut self,
+        name: &str,
+        bone: &str,
+        mut keys: Vec<crate::rig::ClipKey>,
+    ) -> Result<(), String> {
+        if self.skeleton.index_of(bone).is_none() {
+            return Err(format!("unknown bone `{bone}`"));
+        }
+        let index = self
+            .clips
+            .iter()
+            .position(|clip| clip.name == name)
+            .ok_or_else(|| format!("unknown clip `{name}`"))?;
+        if keys.is_empty() {
+            return Err("clip key list is empty".into());
+        }
+        for key in &mut keys {
+            key.rotation = crate::rig::checked_rotation(key.rotation)?;
+            if !key.time.is_finite() || key.time < 0.0 {
+                return Err("key time must be finite and at least 0".into());
+            }
+            if key
+                .translation
+                .iter()
+                .chain(key.scale.iter())
+                .any(|value| !value.is_finite())
+            {
+                return Err("key translation and scale must be finite".into());
+            }
+        }
+        keys.sort_by(|left, right| {
+            left.time
+                .partial_cmp(&right.time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for pair in keys.windows(2) {
+            if pair[1].time <= pair[0].time {
+                return Err("clip key times must increase".into());
+            }
+        }
+        self.checkpoint();
+        let tracks = &mut self.clips[index].tracks;
+        if let Some(track) = tracks.iter_mut().find(|track| track.bone == bone) {
+            track.keys = keys;
+        } else {
+            tracks.push(crate::rig::BoneTrack {
+                bone: bone.to_string(),
+                keys,
+            });
+        }
+        self.commit();
+        Ok(())
+    }
+
+    pub fn remove_clip(&mut self, name: &str) -> Result<(), String> {
+        let index = self
+            .clips
+            .iter()
+            .position(|clip| clip.name == name)
+            .ok_or_else(|| format!("unknown clip `{name}`"))?;
+        self.checkpoint();
+        self.clips.remove(index);
+        self.commit();
+        Ok(())
+    }
+
+    /// Copy an object mirrored through the origin on one axis.
+    /// `mirror_bones` also copies the bound bone and its descendants,
+    /// swapping an `_l` / `_r` suffix.
+    pub fn mirror_object(
+        &mut self,
+        index: usize,
+        axis: usize,
+        name: &str,
+        position: Option<[i32; 3]>,
+        mirror_bones: bool,
+    ) -> Result<(usize, Vec<String>), String> {
+        if index >= self.objects.len() {
+            return Err(format!(
+                "object index {index} is out of range ({} objects)",
+                self.objects.len()
+            ));
+        }
+        if axis > 2 {
+            return Err("axis must be x, y, or z".into());
+        }
+        let name = check_object_name(name)?;
+        let source = &self.objects[index];
+        let mut world = Vec::new();
+        for (cell, slot) in &source.cells {
+            let mut at = [
+                cell.0 + source.translation.0,
+                cell.1 + source.translation.1,
+                cell.2 + source.translation.2,
+            ];
+            at[axis] = -at[axis] - 1;
+            if !in_world(at[0], at[1], at[2]) {
+                return Err("mirrored cell is outside the world [-1024, 1024)".into());
+            }
+            world.push((at, *slot));
+        }
+        let origin = if let Some(position) = position {
+            position
+        } else if world.is_empty() {
+            let mut at = [
+                source.translation.0,
+                source.translation.1,
+                source.translation.2,
+            ];
+            at[axis] = -at[axis];
+            at
+        } else {
+            let mut min = world[0].0;
+            for (at, _) in &world {
+                min[0] = min[0].min(at[0]);
+                min[1] = min[1].min(at[1]);
+                min[2] = min[2].min(at[2]);
+            }
+            min
+        };
+        let mut cells = HashMap::new();
+        for (at, slot) in world {
+            let local = [at[0] - origin[0], at[1] - origin[1], at[2] - origin[2]];
+            if !in_world(local[0], local[1], local[2]) {
+                return Err("mirrored cell is outside the world [-1024, 1024)".into());
+            }
+            cells.insert((local[0], local[1], local[2]), slot);
+        }
+        if let Some((min, max)) = cell_bounds(cells.keys().copied()) {
+            let span = [max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1];
+            if span.iter().any(|axis| *axis > 256) {
+                return Err(format!(
+                    "mirrored object would be {}x{}x{}; .vox models are at most 256 per axis",
+                    span[0], span[1], span[2]
+                ));
+            }
+        }
+        let hidden = source.hidden;
+        let (skeleton, bone, added) = if mirror_bones {
+            self.mirrored_bones(index, axis)?
+        } else {
+            (self.skeleton.clone(), None, Vec::new())
+        };
+        self.checkpoint();
+        self.skeleton = skeleton;
+        self.objects.push(Volume {
+            name,
+            cells,
+            translation: (origin[0], origin[1], origin[2]),
+            box_min: (0, 0, 0),
+            dims: (0, 0, 0),
+            rot: ROT_IDENTITY,
+            pivot: (0, 0, 0),
+            model_dims: (0, 0, 0),
+            hidden,
+            file: None,
+            bone,
+            script: Default::default(),
+        });
+        let created = self.objects.len() - 1;
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+        self.commit();
+        Ok((created, added))
+    }
+
+    fn mirrored_bones(
+        &self,
+        index: usize,
+        axis: usize,
+    ) -> Result<(Skeleton, Option<String>, Vec<String>), String> {
+        let Some(bound) = self.objects[index].bone.as_deref() else {
+            return Err("object is not bound to a bone".into());
+        };
+        let root = self
+            .skeleton
+            .index_of(bound)
+            .ok_or_else(|| format!("unknown bone `{bound}`"))?;
+        let mut members = Vec::new();
+        for bone_index in 0..self.skeleton.bones.len() {
+            let mut cursor = Some(bone_index);
+            let mut guard = 0;
+            while let Some(current) = cursor {
+                if current == root {
+                    members.push(bone_index);
+                    break;
+                }
+                cursor = self.skeleton.parent_index(current);
+                guard += 1;
+                if guard > self.skeleton.bones.len() {
+                    break;
+                }
+            }
+        }
+        let order = parent_order(&self.skeleton);
+        members.sort_by_key(|index| order.iter().position(|item| item == index).unwrap_or(0));
+        let mut next = self.skeleton.clone();
+        let mut renamed: HashMap<String, String> = HashMap::new();
+        let mut added = Vec::new();
+        for bone_index in members {
+            let bone = &self.skeleton.bones[bone_index];
+            let new_name = crate::rig::mirrored_bone_name(&bone.name);
+            if next.index_of(&new_name).is_some() || renamed.values().any(|name| name == &new_name)
+            {
+                return Err(format!("bone `{new_name}` already exists"));
+            }
+            let parent = match &bone.parent {
+                Some(parent) => Some(
+                    renamed
+                        .get(parent)
+                        .cloned()
+                        .unwrap_or_else(|| parent.clone()),
+                ),
+                None => None,
+            };
+            let mut pivot = bone.pivot;
+            pivot[axis] = -pivot[axis];
+            let rotation = crate::rig::mirror_rotation(bone.rotation, axis);
+            next.add(&new_name, parent.as_deref(), pivot, Some(rotation))?;
+            renamed.insert(bone.name.clone(), new_name.clone());
+            added.push(new_name);
+        }
+        let bone = renamed.get(bound).cloned();
+        Ok((next, bone, added))
+    }
+
+    /// World rigid map for one object. `None` when the preview pose is empty,
+    /// so the mesh hash and the tracer stay on the bind pose.
+    pub fn skin_delta(&self, index: usize) -> Option<glam::Mat4> {
+        if self.pose.is_empty() {
+            return None;
+        }
+        let object = self.objects.get(index)?;
+        let deltas = crate::rig::skin_deltas(&self.skeleton, &self.pose).ok()?;
+        let joint = self.skeleton.joint_or_root(object.bone.as_deref()).ok()? as usize;
+        deltas.get(joint).copied()
+    }
+
     pub fn bind_object(&mut self, index: usize, bone: Option<&str>) -> Result<(), String> {
         if index >= self.objects.len() {
             return Err(format!(
@@ -471,6 +763,8 @@ impl Session {
             materials: self.materials,
             graph: self.graph.clone(),
             skeleton: self.skeleton.clone(),
+            pose: self.pose.clone(),
+            clips: self.clips.clone(),
         }
     }
 
@@ -481,6 +775,8 @@ impl Session {
             materials: std::mem::replace(&mut self.materials, snap.materials),
             graph: std::mem::replace(&mut self.graph, snap.graph),
             skeleton: std::mem::replace(&mut self.skeleton, snap.skeleton),
+            pose: std::mem::replace(&mut self.pose, snap.pose),
+            clips: std::mem::replace(&mut self.clips, snap.clips),
         }
     }
 
@@ -497,6 +793,8 @@ impl Session {
                 || prev.materials != self.materials
                 || prev.graph != self.graph
                 || prev.skeleton != self.skeleton
+                || prev.pose != self.pose
+                || prev.clips != self.clips
             {
                 self.undo.push(prev);
                 self.redo.clear();
@@ -565,6 +863,54 @@ impl Session {
             self.object_selection.push(self.selected);
         }
     }
+}
+
+fn parent_order(skeleton: &Skeleton) -> Vec<usize> {
+    let mut order = Vec::new();
+    let mut seen = vec![false; skeleton.bones.len()];
+    for start in 0..skeleton.bones.len() {
+        let mut chain = Vec::new();
+        let mut cursor = Some(start);
+        while let Some(current) = cursor {
+            if seen[current] {
+                break;
+            }
+            chain.push(current);
+            cursor = skeleton.parent_index(current);
+        }
+        while let Some(current) = chain.pop() {
+            if !seen[current] {
+                seen[current] = true;
+                order.push(current);
+            }
+        }
+    }
+    order
+}
+
+fn normalize_extra(rotation: [f32; 4]) -> Result<Option<[f32; 4]>, String> {
+    let rotation = crate::rig::checked_rotation(rotation)?;
+    let quat =
+        glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]).normalize();
+    if quat.x.abs() < 1e-6
+        && quat.y.abs() < 1e-6
+        && quat.z.abs() < 1e-6
+        && (quat.w.abs() - 1.0).abs() < 1e-5
+    {
+        return Ok(None);
+    }
+    Ok(Some([quat.x, quat.y, quat.z, quat.w]))
+}
+
+fn clip_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("clip name is empty".into());
+    }
+    if name.len() > 64 || name.contains('\0') {
+        return Err("clip name is invalid".into());
+    }
+    Ok(name.to_string())
 }
 
 fn check_object_name(name: &str) -> Result<String, String> {

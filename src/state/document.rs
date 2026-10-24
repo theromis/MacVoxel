@@ -1,6 +1,6 @@
 //! New session, palette edits, materials, and the camera frame.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use glam::Vec3;
 
@@ -63,7 +63,11 @@ impl Session {
             path: None,
             graph: None,
             skeleton: Skeleton::default(),
+            pose: HashMap::new(),
+            clips: Vec::new(),
             selected_bone: None,
+            orthographic: false,
+            show_bones: false,
             editor_mode: EditorMode::Model,
             render_mode: RenderMode::Edit,
             stochastic_gi: true,

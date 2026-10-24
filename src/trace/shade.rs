@@ -224,6 +224,18 @@ pub(super) fn pick_light<'a>(world: &'a World, power_weighted: bool, rng: &mut R
     world.lights.last().expect("lights")
 }
 
+pub(super) fn camera_basis(eye: Vec3, target: Vec3) -> (Vec3, Vec3, Vec3) {
+    let forward = (target - eye).normalize_or_zero();
+    let world_up = if forward.dot(Vec3::Z).abs() > 0.95 {
+        Vec3::Y
+    } else {
+        Vec3::Z
+    };
+    let right = forward.cross(world_up).normalize_or_zero();
+    let up = right.cross(forward).normalize_or_zero();
+    (forward, right, up)
+}
+
 pub(super) fn primary_dir(
     width: u32,
     height: u32,
@@ -233,14 +245,7 @@ pub(super) fn primary_dir(
     target: Vec3,
     rng: &mut Rng,
 ) -> Vec3 {
-    let forward = (target - eye).normalize_or_zero();
-    let world_up = if forward.dot(Vec3::Z).abs() > 0.95 {
-        Vec3::Y
-    } else {
-        Vec3::Z
-    };
-    let right = forward.cross(world_up).normalize_or_zero();
-    let up = right.cross(forward).normalize_or_zero();
+    let (forward, right, up) = camera_basis(eye, target);
     let aspect = width as f32 / height.max(1) as f32;
     let tan = (FOV_Y * 0.5).tan();
     let jitter_x = rng.next_f32() - 0.5;
@@ -248,6 +253,31 @@ pub(super) fn primary_dir(
     let u = ((x as f32 + 0.5 + jitter_x) / width as f32) * 2.0 - 1.0;
     let v = 1.0 - ((y as f32 + 0.5 + jitter_y) / height as f32) * 2.0;
     (forward + right * (u * aspect * tan) + up * (v * tan)).normalize_or_zero()
+}
+
+/// Parallel primary ray. The target plane matches the perspective frame at
+/// `distance`, and the ray direction is the camera forward for every pixel.
+pub(super) fn ortho_primary(
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    eye: Vec3,
+    target: Vec3,
+    rng: &mut Rng,
+) -> (Vec3, Vec3) {
+    let (forward, right, up) = camera_basis(eye, target);
+    let aspect = width as f32 / height.max(1) as f32;
+    let tan = (FOV_Y * 0.5).tan();
+    let distance = eye.distance(target);
+    let half_h = distance * tan;
+    let half_w = half_h * aspect;
+    let jitter_x = rng.next_f32() - 0.5;
+    let jitter_y = rng.next_f32() - 0.5;
+    let u = ((x as f32 + 0.5 + jitter_x) / width as f32) * 2.0 - 1.0;
+    let v = 1.0 - ((y as f32 + 0.5 + jitter_y) / height as f32) * 2.0;
+    let origin = eye + right * (u * half_w) + up * (v * half_h);
+    (origin, forward)
 }
 
 pub(super) fn lens_ray(

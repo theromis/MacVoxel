@@ -70,11 +70,21 @@ pub(super) fn build(session: &Session) -> Built {
         &MeshExport {
             vertex_colors: false,
             merge: true,
+            export_hidden: false,
+            split_objects: false,
         },
     )
 }
 
+pub(super) fn build_one(session: &Session, options: &MeshExport, only: usize) -> Built {
+    build_filtered(session, options, Some(only))
+}
+
 pub(super) fn build_with(session: &Session, options: &MeshExport) -> Built {
+    build_filtered(session, options, None)
+}
+
+fn build_filtered(session: &Session, options: &MeshExport, only: Option<usize>) -> Built {
     let mut built = Built {
         positions: Vec::new(),
         normals: Vec::new(),
@@ -88,8 +98,11 @@ pub(super) fn build_with(session: &Session, options: &MeshExport) -> Built {
     };
     let with_motion = session.has_motion();
     let mut quads = Vec::new();
-    for object in &session.objects {
-        if object.hidden {
+    for (index, object) in session.objects.iter().enumerate() {
+        if only.is_some_and(|only| only != index) {
+            continue;
+        }
+        if object.hidden && !options.export_hidden {
             continue;
         }
         let bone = if session.skeleton.bones.is_empty() {

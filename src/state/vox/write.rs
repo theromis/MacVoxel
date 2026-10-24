@@ -67,10 +67,11 @@ pub(crate) fn save_document(
     materials: &[Material; 256],
     graph: Option<&VoxGraph>,
     skeleton: &Skeleton,
+    clips: &[crate::rig::Clip],
 ) -> Result<Vec<u8>, String> {
     match graph {
-        Some(graph) => save_graph(objects, palette, materials, graph, skeleton),
-        None => save_scene(objects, palette, materials, skeleton),
+        Some(graph) => save_graph(objects, palette, materials, graph, skeleton, clips),
+        None => save_scene(objects, palette, materials, skeleton, clips),
     }
 }
 
@@ -83,6 +84,7 @@ pub(crate) fn save_graph(
     materials: &[Material; 256],
     graph: &VoxGraph,
     skeleton: &Skeleton,
+    clips: &[crate::rig::Clip],
 ) -> Result<Vec<u8>, String> {
     let mut models = graph.models.clone();
     let mut nodes = graph.nodes.clone();
@@ -224,6 +226,7 @@ pub(crate) fn save_graph(
     push_rgba(&mut children, palette);
     push_matl(&mut children, materials);
     push_rig(&mut children, &rig_saved, skeleton)?;
+    push_anims(&mut children, clips)?;
     if let Some(body) = crate::script::encode_chunk(objects) {
         push_chunk(&mut children, b"MVSC", &body);
     }
@@ -580,6 +583,7 @@ pub(crate) fn save_scene(
     palette: &[[u8; 4]; 256],
     materials: &[Material; 256],
     skeleton: &Skeleton,
+    clips: &[crate::rig::Clip],
 ) -> Result<Vec<u8>, String> {
     struct Packed {
         name: String,
@@ -697,10 +701,18 @@ pub(crate) fn save_scene(
         .map(|model| (model.trn, model.name.clone(), model.bone.clone()))
         .collect();
     push_rig(&mut children, &rig_saved, skeleton)?;
+    push_anims(&mut children, clips)?;
     if let Some(body) = crate::script::encode_chunk(objects) {
         push_chunk(&mut children, b"MVSC", &body);
     }
     Ok(wrap_vox(children))
+}
+
+fn push_anims(children: &mut Vec<u8>, clips: &[crate::rig::Clip]) -> Result<(), String> {
+    if let Some(body) = crate::rig::encode_clips(clips)? {
+        push_chunk(children, b"MVAN", &body);
+    }
+    Ok(())
 }
 
 pub(crate) fn push_rig(

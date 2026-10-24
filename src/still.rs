@@ -24,6 +24,7 @@ pub struct Still {
     pub yaw: f32,
     pub pitch: f32,
     pub distance: f32,
+    pub orthographic: Option<bool>,
 }
 
 pub(crate) struct Saved {
@@ -42,6 +43,7 @@ pub(crate) struct Saved {
     focus_distance: f32,
     glass_mode: GlassMode,
     stochastic_gi: bool,
+    orthographic: bool,
 }
 
 fn apply(session: &mut Session, still: &Still) -> Saved {
@@ -61,6 +63,7 @@ fn apply(session: &mut Session, still: &Still) -> Saved {
         focus_distance: session.focus_distance,
         glass_mode: session.glass_mode,
         stochastic_gi: session.stochastic_gi,
+        orthographic: session.orthographic,
     };
     session.frame_camera();
     session.yaw = still.yaw.to_radians();
@@ -91,6 +94,9 @@ fn apply(session: &mut Session, still: &Still) -> Saved {
     if let Some(value) = still.stochastic_gi {
         session.stochastic_gi = value;
     }
+    if let Some(value) = still.orthographic {
+        session.orthographic = value;
+    }
     saved
 }
 
@@ -110,6 +116,7 @@ fn restore(session: &mut Session, saved: Saved) {
     session.focus_distance = saved.focus_distance;
     session.glass_mode = saved.glass_mode;
     session.stochastic_gi = saved.stochastic_gi;
+    session.orthographic = saved.orthographic;
 }
 
 #[cfg(test)]

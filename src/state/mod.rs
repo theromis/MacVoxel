@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use glam::Vec3;
 
-use crate::rig::Skeleton;
+use crate::rig::{Clip, Skeleton};
 
 pub type Cell = (i32, i32, i32);
 
@@ -493,6 +493,8 @@ pub(super) struct Snapshot {
     materials: [Material; 256],
     graph: Option<VoxGraph>,
     skeleton: Skeleton,
+    pose: HashMap<String, [f32; 4]>,
+    clips: Vec<Clip>,
 }
 
 #[derive(Clone)]
@@ -582,8 +584,17 @@ pub struct Session {
     /// groups, layers, hidden flags, and animation frames past the first.
     graph: Option<VoxGraph>,
     pub skeleton: Skeleton,
+    /// Local quaternions on top of the bind pose. Empty leaves the bind pose.
+    /// Undo restores this preview; it does not write `Bone.rotation`.
+    pub pose: HashMap<String, [f32; 4]>,
+    /// Named clips. Saved in the `MVAN` chunk and exported as glTF animations.
+    pub clips: Vec<Clip>,
     /// Bone highlighted in the viewport. Not part of undo.
     pub selected_bone: Option<usize>,
+    /// Parallel rays for a still. The window leaves this false.
+    pub orthographic: bool,
+    /// Draw joints on a still PNG. The window draws them whenever a skeleton exists.
+    pub show_bones: bool,
 
     pub editor_mode: EditorMode,
     pub render_mode: RenderMode,

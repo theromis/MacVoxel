@@ -7,9 +7,10 @@ linked.
 ## Layout
 
 `src/main.rs` is the window. `state/` is the session: `document` (palette and
-camera), `files` (open and save), `objects` (bones and undo), `pointer`,
-`selection`, `drag`, `pick`, `geom`, and `vox/` (`.vox` read, write, and the
-rig chunk). `viewport.rs` is orbit and pointer input. `panels/` is the side
+camera), `files` (open and save), `objects` (bones, the preview pose, clips,
+and undo), `pointer`,
+`selection`, `drag`, `pick`, `geom`, and `vox/` (`.vox` read, write, the
+`MVRG` rig chunk, and the `MVAN` clip chunk). `viewport.rs` is orbit and pointer input. `panels/` is the side
 UI. `tools/` is brush shapes and generators. `mesh.rs` and `gpu.rs` draw the
 edit-mode mesh. `trace/` is the CPU path tracer. `trace_gpu.rs` plus
 `trace.wgsl` and `blit.wgsl` are the wgpu tracer used by Render mode.
@@ -35,6 +36,10 @@ Cells of a rotated model are baked into world space for editing. `Volume.rot`,
 open span. The same plane and the same slot is not a cut. Positions are glTF
 Y-up `(x, z, -y)`. The menu export uses a palette texture. `COLOR_0` is
 linear. MCP `export_mesh` leaves merge off unless the caller sets it.
+`exportHidden` and `splitObjects` default to false. Clips are glTF
+animations on the joint nodes. The preview pose is not the bind pose:
+it is a local quaternion per bone, and an empty pose leaves the mesh and
+the tracer unchanged.
 
 ## Render
 
@@ -52,7 +57,7 @@ frame cancels it. Denoise is the edge-aware filter unless the crate is built
 with `--features oidn`, which links Open Image Denoise and applies it to the
 finished frame from the albedo and normal guides. That feature needs the
 Open Image Denoise library on the build machine (`pkg-config`); the default
-build does not. The Render panel names the denoiser that is linked. `macvoxel render` is the same still with no window:
+build does not. The Render panel names the denoiser that is linked. Yaw 0 places the camera on +X looking toward −X; a model facing −Y is face-on at yaw −90. `macvoxel render` is the same still with no window:
 CPU by default, `--gpu` for the wgpu tracer. `macvoxel voxrt` checks a `.vox`
 round trip, the save fixpoint, and the rotation codec.
 

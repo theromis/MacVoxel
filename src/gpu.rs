@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor};
 use eframe::wgpu;
 use eframe::wgpu::util::DeviceExt;
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 
 use crate::mesh::{self, Mesh};
 use crate::state::Session;
@@ -51,6 +51,8 @@ pub struct SceneGpu {
     hover_key: Option<(crate::state::Cell, crate::state::Cell, crate::state::Cell)>,
     selection: Option<GpuMesh>,
     selection_key: Option<(u64, u64, crate::state::Cell)>,
+    bones: Option<GpuMesh>,
+    bones_key: u64,
     epoch: u64,
 }
 
@@ -112,6 +114,8 @@ impl SceneGpu {
             hover_key: None,
             selection: None,
             selection_key: None,
+            bones: None,
+            bones_key: 0,
             epoch: 0,
         }
     }
@@ -163,6 +167,7 @@ impl SceneGpu {
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
         self.sync_hover(device, session);
         self.sync_selection(device, session);
+        self.sync_bones(device, session);
     }
 
     fn sync_chunks(&mut self, device: &wgpu::Device, session: &Session) {
@@ -171,6 +176,7 @@ impl SceneGpu {
             if object.hidden {
                 continue;
             }
+            let delta = session.skin_delta(index);
             let mut buckets: HashMap<(i32, i32, i32), Vec<(crate::state::Cell, [u8; 3])>> =
                 HashMap::new();
             for (&cell, &slot) in &object.cells {
@@ -198,6 +204,15 @@ impl SceneGpu {
                                 ^ (uv[1].to_bits() as u64).wrapping_mul(0xC2B2_AE3D),
                         );
                     }
+                    if let Some(delta) = delta {
+                        for column in delta.to_cols_array_2d() {
+                            for value in column {
+                                hash = hash
+                                    .wrapping_mul(0x9E37_79B1)
+                                    .wrapping_add(value.to_bits() as u64);
+                            }
+                        }
+                    }
                     (*key, hash)
                 })
                 .collect();
@@ -219,6 +234,14 @@ impl SceneGpu {
                             |slot| session.motion_uv(slot),
                         );
                         mesh::translate_mesh(&mut built, object.translation);
+                        if let Some(delta) = delta {
+                            for vert in &mut built.verts {
+                                let point = delta.transform_point3(Vec3::from_array(vert.pos));
+                                vert.pos = point.to_array();
+                                let normal = delta.transform_vector3(Vec3::from_array(vert.normal));
+                                vert.normal = normal.normalize_or_zero().to_array();
+                            }
+                        }
                         if built.is_empty() {
                             self.chunks.remove(&full);
                         } else if let Some(gpu) = upload(device, &built, hash) {
@@ -286,6 +309,19 @@ impl SceneGpu {
         self.selection = upload(device, &built, 0);
     }
 
+    fn sync_bones(&mut self, device: &wgpu::Device, session: &Session) {
+        let key = bone_key(session);
+        if key == self.bones_key {
+            return;
+        }
+        self.bones_key = key;
+        self.bones = if key == 0 {
+            None
+        } else {
+            upload(device, &bone_mesh(session), key)
+        };
+    }
+
     pub fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("voxels"),
@@ -324,7 +360,147 @@ impl SceneGpu {
             pass.set_pipeline(&self.highlight_pipeline);
             draw(&mut pass, hover);
         }
+        if let Some(bones) = &self.bones {
+            pass.set_pipeline(&self.highlight_pipeline);
+            draw(&mut pass, bones);
+        }
     }
+}
+
+fn bone_key(session: &Session) -> u64 {
+    if session.skeleton.bones.is_empty() {
+        return 0;
+    }
+    let Ok(joints) = crate::rig::posed_joints(&session.skeleton, &session.pose) else {
+        return 1;
+    };
+    let mut hash = joints.len() as u64;
+    for (index, (point, _)) in joints.iter().enumerate() {
+        hash = hash
+            .wrapping_mul(0x9E37_79B1)
+            .wrapping_add(point.x.to_bits() as u64);
+        hash = hash
+            .wrapping_mul(0x9E37_79B1)
+            .wrapping_add(point.y.to_bits() as u64);
+        hash = hash
+            .wrapping_mul(0x9E37_79B1)
+            .wrapping_add(point.z.to_bits() as u64);
+        let parent = session.skeleton.parent_index(index).unwrap_or(usize::MAX) as u64;
+        hash = hash.wrapping_add(parent);
+    }
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
+fn bone_mesh(session: &Session) -> Mesh {
+    let mut mesh = Mesh::default();
+    let Ok(joints) = crate::rig::posed_joints(&session.skeleton, &session.pose) else {
+        return mesh;
+    };
+    let color = [1.0, 0.75, 0.2];
+    for (index, (point, _)) in joints.iter().enumerate() {
+        push_cube(&mut mesh, *point, 0.1, color);
+        if let Some(parent) = session.skeleton.parent_index(index) {
+            push_link(&mut mesh, joints[parent].0, *point, 0.04, color);
+        }
+    }
+    mesh
+}
+
+fn push_cube(mesh: &mut Mesh, center: Vec3, half: f32, color: [f32; 3]) {
+    let min = center - Vec3::splat(half);
+    let max = center + Vec3::splat(half);
+    let corners = [
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(max.x, max.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+    ];
+    let faces = [
+        ([0, 1, 2, 3], Vec3::new(0.0, 0.0, -1.0)),
+        ([4, 7, 6, 5], Vec3::new(0.0, 0.0, 1.0)),
+        ([0, 4, 5, 1], Vec3::new(0.0, -1.0, 0.0)),
+        ([3, 2, 6, 7], Vec3::new(0.0, 1.0, 0.0)),
+        ([0, 3, 7, 4], Vec3::new(-1.0, 0.0, 0.0)),
+        ([1, 5, 6, 2], Vec3::new(1.0, 0.0, 0.0)),
+    ];
+    for (quad, normal) in faces {
+        push_quad(
+            mesh,
+            [
+                corners[quad[0]],
+                corners[quad[1]],
+                corners[quad[2]],
+                corners[quad[3]],
+            ],
+            normal,
+            color,
+        );
+    }
+}
+
+fn push_link(mesh: &mut Mesh, from: Vec3, to: Vec3, radius: f32, color: [f32; 3]) {
+    let dir = to - from;
+    if dir.length_squared() < 1.0e-8 {
+        return;
+    }
+    let dir = dir.normalize();
+    let helper = if dir.z.abs() < 0.9 { Vec3::Z } else { Vec3::Y };
+    let side = dir.cross(helper).normalize();
+    let up = side.cross(dir).normalize();
+    let s = side * radius;
+    let u = up * radius;
+    let corners = [
+        from + s + u,
+        from - s + u,
+        from - s - u,
+        from + s - u,
+        to + s + u,
+        to - s + u,
+        to - s - u,
+        to + s - u,
+    ];
+    let faces = [
+        ([0, 4, 5, 1], up),
+        ([3, 2, 6, 7], -up),
+        ([0, 3, 7, 4], side),
+        ([1, 5, 6, 2], -side),
+    ];
+    for (quad, normal) in faces {
+        push_quad(
+            mesh,
+            [
+                corners[quad[0]],
+                corners[quad[1]],
+                corners[quad[2]],
+                corners[quad[3]],
+            ],
+            normal,
+            color,
+        );
+    }
+}
+
+fn push_quad(mesh: &mut Mesh, corners: [Vec3; 4], normal: Vec3, color: [f32; 3]) {
+    let start = mesh.verts.len() as u32;
+    let normal = normal.normalize_or_zero().to_array();
+    for corner in corners {
+        mesh.verts.push(crate::mesh::Vert {
+            pos: corner.to_array(),
+            normal,
+            color,
+            motion: [0.0; 4],
+        });
+    }
+    mesh.indices
+        .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
 }
 
 fn draw<'a>(pass: &mut wgpu::RenderPass<'a>, mesh: &'a GpuMesh) {

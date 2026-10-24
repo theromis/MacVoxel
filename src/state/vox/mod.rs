@@ -1,4 +1,5 @@
-//! MagicaVoxel `.vox` read and write, including the `MVRG` rig chunk.
+//! MagicaVoxel `.vox` read and write, including the `MVRG` rig chunk
+//! and the `MVAN` animation chunk.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,7 @@ pub(super) struct Loaded {
     pub(super) materials: [Material; 256],
     pub(super) graph: Option<VoxGraph>,
     pub(super) skeleton: Skeleton,
+    pub(super) clips: Vec<crate::rig::Clip>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

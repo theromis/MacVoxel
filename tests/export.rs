@@ -44,6 +44,8 @@ fn vertex_colors_keep_a_linear_color_attribute() {
         &MeshExport {
             vertex_colors: true,
             merge: false,
+            export_hidden: false,
+            split_objects: false,
         },
     )
     .unwrap();
@@ -66,6 +68,8 @@ fn unmerged_row_keeps_one_quad_per_face() {
         &MeshExport {
             vertex_colors: false,
             merge: false,
+            export_hidden: false,
+            split_objects: false,
         },
     );
     assert_eq!(built.indices.len() / 6, 10);
@@ -204,6 +208,8 @@ fn still_export_omits_texcoord_1_and_stays_stable() {
     let options = MeshExport {
         vertex_colors: false,
         merge: true,
+        export_hidden: false,
+        split_objects: false,
     };
     let first = super::encode(&session, &options).unwrap();
     let second = super::encode(&session, &options).unwrap();
@@ -216,6 +222,8 @@ fn still_export_omits_texcoord_1_and_stays_stable() {
         &MeshExport {
             vertex_colors: true,
             merge: false,
+            export_hidden: false,
+            split_objects: false,
         },
     )
     .unwrap();
@@ -238,6 +246,8 @@ fn motion_writes_texcoord_1_for_each_slot() {
     let options = MeshExport {
         vertex_colors: false,
         merge: true,
+        export_hidden: false,
+        split_objects: false,
     };
     let bytes = super::encode(&session, &options).unwrap();
     let uvs = texcoord_1(&bytes);
@@ -250,6 +260,8 @@ fn motion_writes_texcoord_1_for_each_slot() {
         &MeshExport {
             vertex_colors: true,
             merge: false,
+            export_hidden: false,
+            split_objects: false,
         },
     )
     .unwrap();
@@ -280,9 +292,66 @@ fn different_motion_stays_on_separate_quads() {
         &MeshExport {
             vertex_colors: false,
             merge: true,
+            export_hidden: false,
+            split_objects: false,
         },
     );
     assert_eq!(built.indices.len() / 6, 10);
+}
+
+#[test]
+fn a_clip_is_a_gltf_animation_and_hidden_parts_can_be_their_own_nodes() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    session.objects[0].name = "Body".into();
+    session
+        .add_object(Some("Face"), [4, 0, 0], None, false)
+        .unwrap();
+    session.objects[1].cells.insert((0, 0, 0), 2);
+    session.objects[1].hidden = true;
+    session
+        .add_bone("root", None, [0.0, 0.0, 0.0], None)
+        .unwrap();
+    session.bind_object(0, Some("root")).unwrap();
+    session.bind_object(1, Some("root")).unwrap();
+    session.add_clip("wave").unwrap();
+    session
+        .set_clip_keys(
+            "wave",
+            "root",
+            vec![crate::rig::ClipKey {
+                time: 0.0,
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                translation: [0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+            }],
+        )
+        .unwrap();
+    let options = MeshExport {
+        vertex_colors: true,
+        merge: false,
+        export_hidden: false,
+        split_objects: false,
+    };
+    let bytes = super::encode(&session, &options).unwrap();
+    let json = glb_json(&bytes);
+    let text = serde_json::to_string(&json).unwrap();
+    assert!(text.contains("\"animations\""));
+    assert!(text.contains("\"wave\""));
+    assert!(text.contains("\"node\""));
+    assert!(!text.contains("Face"));
+    let split = MeshExport {
+        vertex_colors: true,
+        merge: false,
+        export_hidden: true,
+        split_objects: true,
+    };
+    let bytes = super::encode(&session, &split).unwrap();
+    let text = serde_json::to_string(&glb_json(&bytes)).unwrap();
+    assert!(text.contains("Face"));
+    assert!(text.contains("Body"));
+    assert!(text.contains("\"skin\""));
 }
 
 #[test]
@@ -294,6 +363,8 @@ fn neighbouring_quads_share_corners_of_one_slot_and_face() {
     let options = MeshExport {
         vertex_colors: true,
         merge: false,
+        export_hidden: false,
+        split_objects: false,
     };
     let built = build_with(&session, &options);
     // Ten faces; the four long sides each share two corners between the two

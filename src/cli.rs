@@ -163,6 +163,7 @@ fn render_args(args: &[String]) -> Result<Option<RenderJob>, String> {
             yaw,
             pitch,
             distance,
+            orthographic: None,
         },
         albedo,
         normal,

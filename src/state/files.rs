@@ -33,6 +33,8 @@ impl Session {
         self.path = None;
         self.graph = None;
         self.skeleton = Skeleton::default();
+        self.pose.clear();
+        self.clips.clear();
         self.selected_bone = None;
         self.palette = default_palette();
         self.materials = [Material::default(); 256];
@@ -154,6 +156,8 @@ impl Session {
         self.materials = loaded.materials;
         self.graph = loaded.graph;
         self.skeleton = loaded.skeleton;
+        self.clips = loaded.clips;
+        self.pose.clear();
         self.selected_bone = None;
         self.clear_picked();
         self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
@@ -166,6 +170,7 @@ impl Session {
             &self.materials,
             self.graph.as_ref(),
             &self.skeleton,
+            &self.clips,
         )
     }
 
@@ -232,6 +237,9 @@ impl Session {
         if self.skeleton != other.skeleton {
             out.push("bones differ".into());
         }
+        if self.clips != other.clips {
+            out.push("clips differ".into());
+        }
         out.extend(graph_differences(self.graph.as_ref(), other.graph.as_ref()));
         out
     }
@@ -260,6 +268,8 @@ impl Session {
         self.path = None;
         self.graph = None;
         self.skeleton = Skeleton::default();
+        self.pose.clear();
+        self.clips.clear();
         self.selected_bone = None;
         self.palette = default_palette();
         self.materials = [Material::default(); 256];
@@ -404,6 +414,7 @@ impl Session {
             &self.materials,
             self.graph.as_ref(),
             &self.skeleton,
+            &self.clips,
         ) {
             Ok(bytes) => bytes,
             Err(e) => {

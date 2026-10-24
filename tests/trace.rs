@@ -369,8 +369,58 @@ fn a_fixed_cpu_still_has_a_stable_png() {
             yaw: 30.0,
             pitch: 25.0,
             distance: 1.0,
+            orthographic: None,
         },
     );
     let png = encode_png(&image, &session).expect("png");
     assert_eq!(md5(&png), "514a25acad366a621a41c108d747d528");
+}
+
+#[test]
+fn yaw_zero_sits_the_camera_on_positive_x() {
+    let mut session = Session::new();
+    session.target = Vec3::ZERO;
+    session.distance = 10.0;
+    session.yaw = 0.0;
+    session.pitch = 0.0;
+    let eye = session.eye();
+    assert!((eye.x - 10.0).abs() < 1e-4, "{eye}");
+    assert!(eye.y.abs() < 1e-4 && eye.z.abs() < 1e-4, "{eye}");
+    let look = (session.target - eye).normalize();
+    assert!((look - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-4);
+}
+
+#[test]
+fn orthographic_primary_rays_share_a_direction() {
+    let eye = Vec3::new(10.0, 0.0, 0.0);
+    let target = Vec3::ZERO;
+    let mut left = super::Rng(1);
+    let mut right = super::Rng(2);
+    let (origin_a, dir_a) = super::ortho_primary(8, 8, 1, 1, eye, target, &mut left);
+    let (origin_b, dir_b) = super::ortho_primary(8, 8, 6, 4, eye, target, &mut right);
+    assert!((dir_a - dir_b).length() < 1e-5);
+    assert!((dir_a - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-4);
+    assert!((origin_a - origin_b).length() > 0.1);
+}
+
+#[test]
+fn show_bones_paints_the_joint_into_the_png() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    session
+        .skeleton
+        .add("root", None, [0.5, 0.5, 0.5], None)
+        .unwrap();
+    session.target = Vec3::new(0.5, 0.5, 0.5);
+    session.distance = 8.0;
+    session.yaw = 0.0;
+    session.pitch = 0.0;
+    let mut image = Image::new(16, 16);
+    image.samples = 1;
+    session.show_bones = false;
+    let plain = encode_png(&image, &session).unwrap();
+    session.show_bones = true;
+    let marked = encode_png(&image, &session).unwrap();
+    assert_ne!(plain, marked);
 }

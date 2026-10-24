@@ -473,3 +473,140 @@ fn save_file_counts_the_scene_and_reopen_keeps_the_corner() {
     assert_eq!(world_y.iter().copied().max(), Some(2));
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn set_pose_is_undoable_and_render_pose_does_not_stick() {
+    let mut head = Headless::new();
+    head.ok(
+        "add_bone",
+        json!({"name": "root", "pivot": [0.0, 0.0, 0.0]}),
+    );
+    head.ok(
+        "add_bone",
+        json!({"name": "arm", "parent": "root", "pivot": [2.0, 0.0, 0.0]}),
+    );
+    let bind = head.session.skeleton.bones[1].rotation;
+    head.ok(
+        "set_pose",
+        json!({"pose": {"arm": [0.0, 0.0, 0.70710678, 0.70710678]}}),
+    );
+    assert_eq!(head.session.skeleton.bones[1].rotation, bind);
+    assert!(head.session.pose.contains_key("arm"));
+    head.ok("undo", json!({}));
+    assert!(head.session.pose.is_empty());
+    assert_eq!(head.session.skeleton.bones[1].rotation, bind);
+    head.ok(
+        "set_pose",
+        json!({"pose": {"root": [0.0, 0.0, 0.70710678, 0.70710678]}}),
+    );
+    let window = head.session.pose.clone();
+    head.session.objects[0].cells.insert((0, 0, 0), 4);
+    head.session.yaw = 1.25;
+    let yaw = head.session.yaw;
+    let path = std::env::temp_dir().join("macvoxel-pose-render.png");
+    let _ = std::fs::remove_file(&path);
+    head.ok(
+        "render",
+        json!({
+            "path": path.to_string_lossy(),
+            "width": 2,
+            "height": 2,
+            "samples": 1,
+            "bounces": 0,
+            "denoise": false,
+            "pose": {"arm": [0.0, 0.0, 0.70710678, 0.70710678]}
+        }),
+    );
+    assert_eq!(head.session.pose, window);
+    assert!((head.session.yaw - yaw).abs() < 1e-6);
+    assert!(!head.session.pose.contains_key("arm"));
+    head.ok("clear_pose", json!({}));
+    assert!(head.session.pose.is_empty());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn clips_save_in_vox_and_mirror_and_shapes_follow_the_box_rules() {
+    let mut head = Headless::new();
+    head.ok(
+        "add_bone",
+        json!({"name": "spine", "pivot": [0.0, 0.0, 0.0]}),
+    );
+    head.ok(
+        "add_bone",
+        json!({"name": "arm_l", "parent": "spine", "pivot": [1.0, 2.0, 0.5]}),
+    );
+    head.ok("bind_object", json!({"index": 0, "bone": "arm_l"}));
+    head.session.objects[0].cells.insert((2, 0, 0), 3);
+    head.ok("add_clip", json!({"name": "wave"}));
+    head.ok(
+        "set_clip_keys",
+        json!({
+            "name": "wave",
+            "bone": "arm_l",
+            "keys": [
+                {"time": 0.0, "rotation": [0.0, 0.0, 0.0, 1.0], "translation": [1.0, 2.0, 0.0], "scale": [1.0, 1.0, 1.0]},
+                {"time": 0.5, "rotation": [0.0, 0.0, 0.0, 1.0]}
+            ]
+        }),
+    );
+    let listed = head.ok("list_clips", json!({}));
+    assert_eq!(listed["clips"][0]["name"], "wave");
+    assert_eq!(listed["clips"][0]["bones"][0]["keys"][1]["time"], 0.5);
+    let bytes = head.session.export_bytes().unwrap();
+    assert!(bytes.windows(4).any(|window| window == b"MVAN"));
+    let mut loaded = Session::new();
+    loaded.import_bytes(&bytes).unwrap();
+    assert_eq!(loaded.clips, head.session.clips);
+    head.ok("remove_clip", json!({"name": "wave"}));
+    assert!(head.session.clips.is_empty());
+
+    let copied = head.ok(
+        "mirror_object",
+        json!({"index": 0, "axis": "x", "name": "arm", "mirrorBones": true}),
+    );
+    assert_eq!(copied["bones"][0], "arm_r");
+    let copy = &head.session.objects[copied["index"].as_u64().unwrap() as usize];
+    assert_eq!(copy.bone.as_deref(), Some("arm_r"));
+    let world_x = copy
+        .cells
+        .iter()
+        .find(|(_, slot)| **slot == 3)
+        .map(|((x, _, _), _)| x + copy.translation.0)
+        .unwrap();
+    assert_eq!(world_x, -3);
+    let bone = head
+        .session
+        .skeleton
+        .bones
+        .iter()
+        .find(|bone| bone.name == "arm_r")
+        .unwrap();
+    assert!((bone.pivot[0] + 1.0).abs() < 1e-5, "{:?}", bone.pivot);
+    assert!((bone.pivot[1] - 2.0).abs() < 1e-5);
+    assert!((bone.pivot[2] - 0.5).abs() < 1e-5);
+
+    head.ok("set_active_object", json!({"index": 0}));
+    head.session.objects[0].cells.clear();
+    let ball = head.ok(
+        "fill_ellipsoid",
+        json!({"x0": 0, "y0": 0, "z0": 0, "x1": 4, "y1": 4, "z1": 4, "palette": 7}),
+    );
+    assert!(ball["changed"].as_i64().unwrap() > 0);
+    assert!(head.session.objects[0].cells.contains_key(&(2, 2, 2)));
+    assert!(!head.session.objects[0].cells.contains_key(&(0, 0, 0)));
+    head.session.objects[0].cells.clear();
+    let sharp = head.ok(
+        "fill_rounded_box",
+        json!({"x0": 0, "y0": 0, "z0": 0, "x1": 1, "y1": 1, "z1": 1, "palette": 4, "radius": 0}),
+    );
+    assert_eq!(sharp["changed"], 8);
+    assert_eq!(head.session.objects[0].cells.len(), 8);
+    head.session.objects[0].cells.clear();
+    let dot = head.ok(
+        "fill_ellipsoid",
+        json!({"x0": 3, "y0": 3, "z0": 3, "x1": 3, "y1": 3, "z1": 3, "palette": 1}),
+    );
+    assert_eq!(dot["changed"], 1);
+    assert!(head.session.objects[0].cells.contains_key(&(3, 3, 3)));
+}

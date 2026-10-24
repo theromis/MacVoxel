@@ -37,6 +37,13 @@ fn render_scene(session: &mut Session, params: &Value) -> Result<Value, String> 
     let yaw = opt_f64(params, "yaw")?;
     let pitch = opt_f64(params, "pitch")?;
     let distance = opt_f64(params, "distance")?;
+    let orthographic = opt_bool(params, "orthographic")?.unwrap_or(false);
+    let show_bones = opt_bool(params, "showBones")?.unwrap_or(false);
+    let views = render_views(params)?;
+    let pose = match render_pose(params)? {
+        Some(pose) => Some(session.checked_pose(pose)?),
+        None => None,
+    };
     if let Some(pitch) = pitch {
         if !(-90.0..=90.0).contains(&pitch) {
             return Err("pitch is out of range".into());
@@ -78,24 +85,64 @@ fn render_scene(session: &mut Session, params: &Value) -> Result<Value, String> 
             yaw: yaw.unwrap_or(30.0) as f32,
             pitch: pitch.unwrap_or(25.0) as f32,
             distance: distance.unwrap_or(1.0) as f32,
+            orthographic: Some(orthographic),
         },
     );
-    let image = crate::trace::render_still(
+    let saved_pose = session.pose.clone();
+    let saved_bones = session.show_bones;
+    if let Some(pose) = pose {
+        session.pose = pose;
+    }
+    session.show_bones = show_bones;
+    let written = render_views_to(
         session,
         width as u32,
         height as u32,
         samples as u32,
         seed as u32,
+        &path,
+        &views,
     );
-    let written = crate::trace::write_png(Path::new(&path), &image, session);
+    session.pose = saved_pose;
+    session.show_bones = saved_bones;
     crate::still::finish(session, saved);
-    written?;
-    Ok(json!({
+    let mut reply = json!({
         "path": path,
         "width": width,
         "height": height,
         "samples": samples
-    }))
+    });
+    let files = written?;
+    if !views.is_empty() {
+        reply["views"] = json!(files);
+    }
+    Ok(reply)
+}
+
+fn render_views_to(
+    session: &mut Session,
+    width: u32,
+    height: u32,
+    samples: u32,
+    seed: u32,
+    path: &str,
+    views: &[(f32, f32, String)],
+) -> Result<Vec<Value>, String> {
+    let image = crate::trace::render_still(session, width, height, samples, seed);
+    crate::trace::write_png(Path::new(path), &image, session)?;
+    let mut files = Vec::new();
+    let yaw = session.yaw;
+    let pitch = session.pitch;
+    for (view_yaw, view_pitch, view_path) in views {
+        session.yaw = view_yaw.to_radians();
+        session.pitch = view_pitch.to_radians();
+        let image = crate::trace::render_still(session, width, height, samples, seed);
+        crate::trace::write_png(Path::new(view_path), &image, session)?;
+        files.push(json!({"path": view_path, "yaw": view_yaw, "pitch": view_pitch}));
+    }
+    session.yaw = yaw;
+    session.pitch = pitch;
+    Ok(files)
 }
 
 pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Value, String> {
@@ -184,6 +231,8 @@ pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Valu
             let changed = session.write_cells(&writes)?;
             Ok(json!({"changed": changed, "voxels": session.voxel_count()}))
         }
+        "voxel.ellipsoid" => shape_fill(session, &params, false),
+        "voxel.rounded" => shape_fill(session, &params, true),
         "voxel.get_box" => {
             let (x0, y0, z0, x1, y1, z1) = box_corners(&params)?;
             let mut cells = Vec::new();
@@ -313,6 +362,54 @@ pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Valu
             Ok(json!({"index": index, "bone": bone}))
         }
         "rig.list" => Ok(bones_json(session)),
+        "pose.set" => {
+            let pose = render_pose(&params)?.ok_or("pose is required")?;
+            session.set_pose(pose)?;
+            Ok(json!({"bones": session.pose.len()}))
+        }
+        "pose.clear" => {
+            session.clear_pose();
+            Ok(json!({"bones": 0}))
+        }
+        "clip.add" => {
+            let name = req_str(&params, "name")?;
+            session.add_clip(&name)?;
+            Ok(json!({"name": name}))
+        }
+        "clip.keys" => {
+            let name = req_str(&params, "name")?;
+            let bone = req_str(&params, "bone")?;
+            let keys = clip_keys(&params)?;
+            session.set_clip_keys(&name, &bone, keys)?;
+            Ok(json!({"name": name, "bone": bone}))
+        }
+        "clip.list" => Ok(clips_json(session)),
+        "clip.remove" => {
+            let name = req_str(&params, "name")?;
+            session.remove_clip(&name)?;
+            Ok(json!({"name": name}))
+        }
+        "object.mirror" => {
+            let index = req_i32(&params, "index")?;
+            if index < 0 {
+                return Err(format!(
+                    "object index {index} is out of range ({} objects)",
+                    session.objects.len()
+                ));
+            }
+            let axis = match req_str(&params, "axis")?.as_str() {
+                "x" => 0,
+                "y" => 1,
+                "z" => 2,
+                _ => return Err("axis must be x, y, or z".into()),
+            };
+            let name = req_str(&params, "name")?;
+            let position = opt_ivec3(&params, "position")?;
+            let mirror_bones = opt_bool(&params, "mirrorBones")?.unwrap_or(false);
+            let (created, bones) =
+                session.mirror_object(index as usize, axis, &name, position, mirror_bones)?;
+            Ok(json!({"index": created, "name": name, "bones": bones}))
+        }
         "render" => render_scene(session, &params),
         "script.set" => {
             let index = script_index(session, &params)?;
@@ -378,12 +475,16 @@ pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Valu
             let path = req_str(&params, "path")?;
             let merge = opt_bool(&params, "merge")?.unwrap_or(false);
             let vertex_colors = opt_bool(&params, "vertexColors")?.unwrap_or(false);
+            let export_hidden = opt_bool(&params, "exportHidden")?.unwrap_or(false);
+            let split_objects = opt_bool(&params, "splitObjects")?.unwrap_or(false);
             let quads = crate::export::export_with(
                 session,
                 Path::new(&path),
                 &crate::export::MeshExport {
                     vertex_colors,
                     merge,
+                    export_hidden,
+                    split_objects,
                 },
             )?;
             Ok(json!({
@@ -418,23 +519,26 @@ const METHODS: &[(&str, &str, &str)] = &[
     ("voxel.set", "x, y, z, palette", "Write one cell. One undo step"),
     ("voxel.set_many", "cells", "Write up to 200000 cells as one undo step"),
     ("voxel.fill", "x0, y0, z0, x1, y1, z1, palette", "Fill an inclusive box, at most 2000000 cells"),
+    ("voxel.ellipsoid", "x0, y0, z0, x1, y1, z1, palette", "Fill an ellipsoid inside an inclusive box, at most 2000000 cells checked"),
+    ("voxel.rounded", "x0, y0, z0, x1, y1, z1, palette, radius", "Fill a box with rounded edges. radius 0 is the full box"),
     ("voxel.get_box", "x0, y0, z0, x1, y1, z1", "Non-empty cells inside an inclusive box, at most 100000"),
     ("palette.set", "index, r, g, b, a?, motion?, motion_amount? | entries", "Replace one slot, or many, as one undo step"),
     ("object.set_active", "index", "Edit a different object. Voxel coordinates stay local to it"),
     ("object.add", "name?, position?, size?, make_active?", "Empty object at a world position. Active unless make_active is false"),
     ("object.set", "index, name?, position?, hidden?", "Rename, move, or hide. position is world voxels; local cells stay put"),
     ("object.remove", "index", "Remove an object and its voxels. Later indices shift. The last object stays"),
+    ("object.mirror", "index, axis, name, position?, mirrorBones?", "Copy an object mirrored across x, y, or z. mirrorBones copies the bound subtree and swaps _l/_r"),
     ("edit.undo", "", "Undo the last edit"),
     ("edit.redo", "", "Redo the last undone edit"),
     (
         "render",
         "path, width?, height?, samples?, bounces?, seed?, denoise?, yaw?, pitch?, distance?",
-        "Path-trace the scene to a PNG. width and height default to 256 (1..1024). samples defaults to 16 (1..128). bounces defaults to 4 (0..8). denoise defaults to true. yaw 30 and pitch 25 degrees frame the scene when omitted.",
+        "Path-trace the scene to a PNG. width and height default to 256 (1..1024). samples defaults to 16 (1..128). bounces defaults to 4 (0..8). denoise defaults to true. yaw 30 and pitch 25 degrees frame the scene when omitted. yaw 0 sits the camera on +X looking toward -X. orthographic, views, pose, and showBones are optional.",
     ),
     (
         "mesh.export",
         "path, merge?, vertexColors?",
-        "Write a glTF 2.0 .glb of every object. merge defaults to false. vertexColors defaults to false (palette texture). A skeleton writes a rigid skin.",
+        "Write a glTF 2.0 .glb of every object. merge defaults to false. vertexColors defaults to false (palette texture). exportHidden and splitObjects default to false. A skeleton writes a rigid skin. Clips become glTF animations.",
     ),
     (
         "script.set",
@@ -466,6 +570,12 @@ const METHODS: &[(&str, &str, &str)] = &[
     ("rig.remove", "name", "Delete a bone. Objects bound to it become unbound"),
     ("rig.bind", "index, bone", "Bind an object. bone null unbinds"),
     ("rig.list", "", "Bones with parent, pivot, rotation, and bound objects"),
+    ("pose.set", "pose", "Preview pose. Map of bone name to quaternion [x, y, z, w], on top of the bind pose. One undo step"),
+    ("pose.clear", "", "Clear the preview pose. One undo step"),
+    ("clip.add", "name", "Add an empty animation clip. One undo step"),
+    ("clip.keys", "name, bone, keys", "Replace one bone's keys. time, rotation, translation, scale. One undo step"),
+    ("clip.list", "", "Named clips and their bone keys"),
+    ("clip.remove", "name", "Remove a clip. One undo step"),
     (
         "ui.screenshot",
         "region?, x?, y?, width?, height?, path?",
@@ -561,6 +671,182 @@ fn xyz(params: &Value) -> Result<(i32, i32, i32), String> {
         req_i32(params, "y")?,
         req_i32(params, "z")?,
     ))
+}
+
+fn render_views(params: &Value) -> Result<Vec<(f32, f32, String)>, String> {
+    match params.get("views") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => {
+            if items.is_empty() {
+                return Err("views is empty".into());
+            }
+            let mut views = Vec::new();
+            for item in items {
+                let path = req_str(item, "path")?;
+                if path.is_empty() {
+                    return Err("view path is empty".into());
+                }
+                let yaw = item
+                    .get("yaw")
+                    .and_then(Value::as_f64)
+                    .ok_or("view yaw is required")? as f32;
+                let pitch = item
+                    .get("pitch")
+                    .and_then(Value::as_f64)
+                    .ok_or("view pitch is required")? as f32;
+                if !(-90.0..=90.0).contains(&pitch) {
+                    return Err("pitch is out of range".into());
+                }
+                views.push((yaw, pitch, path));
+            }
+            Ok(views)
+        }
+        Some(_) => Err("views must be a list".into()),
+    }
+}
+
+fn render_pose(
+    params: &Value,
+) -> Result<Option<std::collections::HashMap<String, [f32; 4]>>, String> {
+    match params.get("pose") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(map)) => {
+            let mut pose = std::collections::HashMap::new();
+            for (name, value) in map {
+                let rotation = as_vec(value, 4)
+                    .ok_or_else(|| format!("pose `{name}` must be [x, y, z, w]"))?;
+                pose.insert(
+                    name.clone(),
+                    [rotation[0], rotation[1], rotation[2], rotation[3]],
+                );
+            }
+            Ok(Some(pose))
+        }
+        Some(_) => Err("pose must be an object of bone quaternions".into()),
+    }
+}
+
+fn shape_fill(session: &mut Session, params: &Value, rounded: bool) -> Result<Value, String> {
+    let (x0, y0, z0, x1, y1, z1) = box_corners(params)?;
+    let palette = req_i32(params, "palette")?;
+    let nx = i64::from(x1 - x0) + 1;
+    let ny = i64::from(y1 - y0) + 1;
+    let nz = i64::from(z1 - z0) + 1;
+    let count = nx * ny * nz;
+    if count > 2_000_000 {
+        return Err("box is larger than 2000000 cells".into());
+    }
+    let radius = if rounded {
+        let radius = opt_f64(params, "radius")?.ok_or("radius is required")?;
+        if !radius.is_finite() || radius < 0.0 {
+            return Err("radius must be finite and at least 0".into());
+        }
+        radius.min((nx.min(ny).min(nz) as f64) * 0.5)
+    } else {
+        0.0
+    };
+    let cx = (f64::from(x0) + f64::from(x1) + 1.0) / 2.0;
+    let cy = (f64::from(y0) + f64::from(y1) + 1.0) / 2.0;
+    let cz = (f64::from(z0) + f64::from(z1) + 1.0) / 2.0;
+    let rx = nx as f64 / 2.0;
+    let ry = ny as f64 / 2.0;
+    let rz = nz as f64 / 2.0;
+    let mut writes = Vec::new();
+    for z in z0..=z1 {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let keep = if rounded {
+                    rounded_inside(x, y, z, x0, y0, z0, x1, y1, z1, radius)
+                } else {
+                    let nx = (f64::from(x) + 0.5 - cx) / rx;
+                    let ny = (f64::from(y) + 0.5 - cy) / ry;
+                    let nz = (f64::from(z) + 0.5 - cz) / rz;
+                    nx * nx + ny * ny + nz * nz <= 1.0 + 1.0e-9
+                };
+                if keep {
+                    writes.push((x, y, z, palette));
+                }
+            }
+        }
+    }
+    let changed = session.write_cells(&writes)?;
+    Ok(json!({"changed": changed, "voxels": session.voxel_count()}))
+}
+
+fn rounded_inside(
+    x: i32,
+    y: i32,
+    z: i32,
+    x0: i32,
+    y0: i32,
+    z0: i32,
+    x1: i32,
+    y1: i32,
+    z1: i32,
+    radius: f64,
+) -> bool {
+    let point = [f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5];
+    let min = [f64::from(x0), f64::from(y0), f64::from(z0)];
+    let max = [
+        f64::from(x1) + 1.0,
+        f64::from(y1) + 1.0,
+        f64::from(z1) + 1.0,
+    ];
+    let mut dist2 = 0.0;
+    for axis in 0..3 {
+        let low = min[axis] + radius;
+        let high = max[axis] - radius;
+        let delta = if point[axis] < low {
+            low - point[axis]
+        } else if point[axis] > high {
+            point[axis] - high
+        } else {
+            0.0
+        };
+        dist2 += delta * delta;
+    }
+    dist2 <= radius * radius + 1.0e-9
+}
+
+fn clip_keys(params: &Value) -> Result<Vec<crate::rig::ClipKey>, String> {
+    let keys = params
+        .get("keys")
+        .and_then(Value::as_array)
+        .ok_or("keys must be a list")?;
+    let mut out = Vec::new();
+    for key in keys {
+        let time = key
+            .get("time")
+            .and_then(Value::as_f64)
+            .ok_or("key time is required")? as f32;
+        let rotation = opt_vec4(key, "rotation")?.unwrap_or(crate::rig::IDENTITY_ROTATION);
+        let translation = opt_vec3(key, "translation")?.unwrap_or([0.0, 0.0, 0.0]);
+        let scale = opt_vec3(key, "scale")?.unwrap_or([1.0, 1.0, 1.0]);
+        out.push(crate::rig::ClipKey {
+            time,
+            rotation,
+            translation,
+            scale,
+        });
+    }
+    Ok(out)
+}
+
+fn clips_json(session: &Session) -> Value {
+    json!({
+        "clips": session.clips.iter().map(|clip| json!({
+            "name": clip.name,
+            "bones": clip.tracks.iter().map(|track| json!({
+                "bone": track.bone,
+                "keys": track.keys.iter().map(|key| json!({
+                    "time": key.time,
+                    "rotation": key.rotation,
+                    "translation": key.translation,
+                    "scale": key.scale
+                })).collect::<Vec<_>>()
+            })).collect::<Vec<_>>()
+        })).collect::<Vec<_>>()
+    })
 }
 
 fn box_corners(params: &Value) -> Result<(i32, i32, i32, i32, i32, i32), String> {

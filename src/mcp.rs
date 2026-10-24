@@ -333,17 +333,26 @@ fn map_tool(name: &str, args: &Value) -> Result<(String, Value), String> {
         "set_voxel" => "voxel.set",
         "set_voxels" => "voxel.set_many",
         "fill_box" => "voxel.fill",
+        "fill_ellipsoid" => "voxel.ellipsoid",
+        "fill_rounded_box" => "voxel.rounded",
         "get_voxels" => "voxel.get_box",
         "set_palette" => "palette.set",
         "set_active_object" => "object.set_active",
         "add_object" => "object.add",
         "set_object" => "object.set",
         "remove_object" => "object.remove",
+        "mirror_object" => "object.mirror",
         "add_bone" => "rig.add",
         "set_bone" => "rig.set",
         "remove_bone" => "rig.remove",
         "bind_object" => "rig.bind",
         "list_bones" => "rig.list",
+        "set_pose" => "pose.set",
+        "clear_pose" => "pose.clear",
+        "add_clip" => "clip.add",
+        "set_clip_keys" => "clip.keys",
+        "list_clips" => "clip.list",
+        "remove_clip" => "clip.remove",
         "undo" => "edit.undo",
         "redo" => "edit.redo",
         "render" => "render",
@@ -471,10 +480,36 @@ fn tools() -> Vec<Value> {
         tool("remove_object", "Remove an object and its voxels. A bone bound to it stays; the binding goes. Later object indices decrease by one, and the reply says so. Refuses the last object. One undo step.", json!({
             "index": int_prop("Object index")
         }), &["index"]),
-        tool("add_bone", "Add a bone. One undo step. parent is omitted for a root. pivot is a world voxel coordinate.", json!({
+        tool("fill_ellipsoid", "Fill the ellipsoid inscribed in an inclusive local box. Same limits and one undo step as fill_box. The box is checked before any cell is written.", json!({
+            "x0": int_prop("Inclusive minimum x"),
+            "y0": int_prop("Inclusive minimum y"),
+            "z0": int_prop("Inclusive minimum z"),
+            "x1": int_prop("Inclusive maximum x"),
+            "y1": int_prop("Inclusive maximum y"),
+            "z1": int_prop("Inclusive maximum z"),
+            "palette": int_prop("Palette index. 0 erases.")
+        }), &["x0", "y0", "z0", "x1", "y1", "z1", "palette"]),
+        tool("fill_rounded_box", "Fill an inclusive local box with rounded edges. radius is the bevel, clamped to half the shortest side. radius 0 fills the whole box. Same limits and one undo step as fill_box.", json!({
+            "x0": int_prop("Inclusive minimum x"),
+            "y0": int_prop("Inclusive minimum y"),
+            "z0": int_prop("Inclusive minimum z"),
+            "x1": int_prop("Inclusive maximum x"),
+            "y1": int_prop("Inclusive maximum y"),
+            "z1": int_prop("Inclusive maximum z"),
+            "palette": int_prop("Palette index. 0 erases."),
+            "radius": num_prop("Edge bevel in voxels. 0 fills the box.")
+        }), &["x0", "y0", "z0", "x1", "y1", "z1", "palette", "radius"]),
+        tool("mirror_object", "Copy an object mirrored across a world axis through the origin. Cells use -coord-1 on that axis. One undo step. mirrorBones also copies the bound bone and its descendants, swapping an _l/_r suffix. The copy is unbound unless mirrorBones is true.", json!({
+            "index": int_prop("Object index to copy"),
+            "axis": str_prop("x, y, or z"),
+            "name": str_prop("Name of the copy"),
+            "position": ivec3_prop("World cell of the copy's local (0, 0, 0). Omit to use the minimum corner of the mirrored cells."),
+            "mirrorBones": {"type": "boolean", "description": "Copy the bound bone subtree and swap _l/_r. Default false."}
+        }), &["index", "axis", "name"]),
+        tool("add_bone", "Add a bone. One undo step. parent is omitted for a root. pivot is a fractional world coordinate, so a joint can sit between cells.", json!({
             "name": str_prop("Unique bone name"),
             "parent": {"type": ["string", "null"], "description": "Parent bone name. Omit or null for a root."},
-            "pivot": vec3_prop("World pivot [x, y, z] in voxel coordinates"),
+            "pivot": vec3_prop("World pivot [x, y, z]. Fractional values sit between cells."),
             "rotation": vec4_prop("Quaternion [x, y, z, w] in voxel space. Defaults to identity.")
         }), &["name", "pivot"]),
         tool("set_bone", "Change a bone's parent, pivot, rotation, or name. One undo step. Omit a field to leave it. parent null makes a root.", json!({
@@ -491,7 +526,23 @@ fn tools() -> Vec<Value> {
             "index": int_prop("Object index from inspect_document"),
             "bone": {"type": ["string", "null"], "description": "Bone name. null unbinds."}
         }), &["index", "bone"]),
-        tool("list_bones", "Bones with parent, pivot, rotation, and the object indices bound to each.", json!({}), &[]),
+        tool("list_bones", "Bones with parent, pivot, rotation, and the object indices bound to each. Pivots are fractional world coordinates.", json!({}), &[]),
+        tool("set_pose", "Preview a pose in the window. Each quaternion is local and multiplied on the right of the bind rotation, so a parent orbits its children. Omitted bones stay at the bind pose. Identity is a no-op. Does not change the bind pose. One undo step.", json!({
+            "pose": {"type": "object", "description": "Map of bone name to quaternion [x, y, z, w]. Replaces the preview.", "additionalProperties": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}}
+        }), &["pose"]),
+        tool("clear_pose", "Remove the preview pose. The bind pose stays. One undo step.", json!({}), &[]),
+        tool("add_clip", "Add an empty named clip. Keys are local TRS in voxel space: translation is the full offset from the parent, not a delta. One undo step. Saved in the .vox MVAN chunk and written to glTF as an animation.", json!({
+            "name": str_prop("Unique clip name")
+        }), &["name"]),
+        tool("set_clip_keys", "Replace one bone's keys in a clip. Times must be finite, >= 0, and increasing. rotation defaults to identity, translation to [0, 0, 0], scale to [1, 1, 1]. One undo step.", json!({
+            "name": str_prop("Clip name"),
+            "bone": str_prop("Bone name"),
+            "keys": {"type": "array", "description": "Keyframes. time is required. rotation is [x, y, z, w]. translation and scale are [x, y, z].", "items": {"type": "object"}}
+        }), &["name", "bone", "keys"]),
+        tool("list_clips", "Named clips and their bone keys.", json!({}), &[]),
+        tool("remove_clip", "Remove a clip. One undo step.", json!({
+            "name": str_prop("Clip name")
+        }), &["name"]),
         tool("undo", "Undo the last edit.", json!({}), &[]),
         tool("redo", "Redo the last undone edit.", json!({}), &[]),
         tool("render", "Path-trace the whole scene to a PNG. Blocks until the file is written. The camera frames the scene; yaw, pitch, and distance orbit that frame.", {
@@ -514,9 +565,13 @@ fn tools() -> Vec<Value> {
             "glass-mode": str_prop("probabilistic or absorption. Omit to keep the document setting."),
             "aperture": num_prop("Lens aperture. Omit to keep the document setting."),
             "focus": num_prop("Focus distance. Omit to keep the document setting."),
-            "yaw": num_prop("Orbit yaw in degrees. Omit to keep the framing angle (30)."),
+            "yaw": num_prop("Orbit yaw in degrees. 0 puts the camera on +X, looking toward -X. A model facing -Y is face-on at yaw -90. Omit to keep the framing angle (30)."),
             "pitch": num_prop("Orbit pitch in degrees, -90..90. 90 looks straight down. Omit to keep the framing angle (25)."),
-            "distance": num_prop("Multiple of the framing distance, greater than 0 and at most 100. Default 1.")
+            "distance": num_prop("Multiple of the framing distance, greater than 0 and at most 100. Default 1."),
+            "orthographic": {"type": "boolean", "description": "Parallel rays. The frame matches the perspective view at the same distance. Default false."},
+            "pose": {"type": "object", "description": "Temporary preview pose for this still. Bone name to quaternion [x, y, z, w], on top of the bind pose. The document pose is restored afterwards.", "additionalProperties": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}},
+            "showBones": {"type": "boolean", "description": "Draw joint points and parent links on the PNG. Default false."},
+            "views": {"type": "array", "description": "Extra PNGs. The required path is still written with the top-level yaw and pitch. Each item is {yaw, pitch, path}.", "items": {"type": "object"}}
             })
         }, &["path"]),
         tool("screenshot", "PNG of the whole editor window. Only when connected to a window.", json!({"path": str_prop("Optional file to write")}), &[]),
@@ -553,7 +608,9 @@ fn tools() -> Vec<Value> {
         tool("export_mesh", "Write a glTF 2.0 .glb of every object. Exposed faces only. The default material is a 256-wide palette texture. A swaying or bobbing slot adds TEXCOORD_1 (sway, bob) on every vertex. A skeleton writes one rigid skin: each vertex belongs to one bone with weight 1.", json!({
             "path": str_prop("Where to write the .glb"),
             "merge": {"type": "boolean", "description": "Greedy-merge coplanar faces of one palette slot. Defaults to false."},
-            "vertexColors": {"type": "boolean", "description": "Store a linear COLOR_0 on each vertex instead of the palette texture. Defaults to false."}
+            "vertexColors": {"type": "boolean", "description": "Store a linear COLOR_0 on each vertex instead of the palette texture. Defaults to false."},
+            "exportHidden": {"type": "boolean", "description": "Include hidden objects. Default false, which omits them."},
+            "splitObjects": {"type": "boolean", "description": "One mesh node per object, still sharing one skin, so a game can hide a part. Default false is a single mesh."}
         }), &["path"]),
     ]
 }

@@ -1,11 +1,14 @@
 //! Rigid skeleton. Each object binds to one bone or to none.
 //!
-//! A pivot is a world voxel position, so it can sit on a corner or a centre.
-//! Orientation is a quaternion in voxel space, local to the parent, `(x, y, z, w)`.
-//! glTF is Y-up `(x, z, -y)`; joint matrices conjugate by that basis.
+//! A pivot is a world voxel position, so it can sit on a corner, a centre, or
+//! anywhere between cells. Orientation is a quaternion in voxel space, local
+//! to the parent, `(x, y, z, w)`. glTF is Y-up `(x, z, -y)`; joint matrices
+//! conjugate by that basis.
 //!
-//! The `.vox` chunk is `MVRG`, version 1. MagicaVoxel skips unknown chunks.
-//! An unknown version is an error.
+//! The `.vox` chunk is `MVRG`, version 1. Named clips live in `MVAN`.
+//! MagicaVoxel skips unknown chunks. An unknown version is an error.
+
+use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3};
 
@@ -37,6 +40,29 @@ pub struct StoredBind {
     pub index: u32,
     pub name: String,
     pub bone: String,
+}
+
+/// One sample of a bone's local transform, in voxel space.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipKey {
+    pub time: f32,
+    pub rotation: [f32; 4],
+    pub translation: [f32; 3],
+    pub scale: [f32; 3],
+}
+
+/// Keys for one bone, sorted by time.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoneTrack {
+    pub bone: String,
+    pub keys: Vec<ClipKey>,
+}
+
+/// A named clip. glTF writes it as one animation on the joint nodes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Clip {
+    pub name: String,
+    pub tracks: Vec<BoneTrack>,
 }
 
 /// Local joint transform in glTF space, and the inverse bind matrix.
@@ -565,6 +591,238 @@ fn read_n<'a>(body: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8]
     let slice = &body[*cursor..*cursor + len];
     *cursor += len;
     Ok(slice)
+}
+
+/// Joint worlds in voxel space. `pose` is a local quaternion multiplied on
+/// the right of the bind rotation, so identity leaves the bind pose. Child
+/// pivots orbit with the parent.
+pub fn posed_joints(
+    skeleton: &Skeleton,
+    pose: &HashMap<String, [f32; 4]>,
+) -> Result<Vec<(Vec3, Quat)>, String> {
+    let order = parent_first(skeleton)?;
+    let mut bind_rot = vec![Quat::IDENTITY; skeleton.bones.len()];
+    let mut bind_pos = vec![Vec3::ZERO; skeleton.bones.len()];
+    for index in &order {
+        let index = *index;
+        let bone = &skeleton.bones[index];
+        let local = quat(bone.rotation)?;
+        if let Some(parent) = skeleton.parent_index(index) {
+            bind_rot[index] = bind_rot[parent] * local;
+        } else {
+            bind_rot[index] = local;
+        }
+        bind_pos[index] = Vec3::from_array(bone.pivot);
+    }
+    let mut frames = vec![(Vec3::ZERO, Quat::IDENTITY); skeleton.bones.len()];
+    for index in &order {
+        let index = *index;
+        let bone = &skeleton.bones[index];
+        let extra = match pose.get(&bone.name) {
+            Some(rotation) => quat(*rotation)?,
+            None => Quat::IDENTITY,
+        };
+        let local = (quat(bone.rotation)? * extra).normalize();
+        if let Some(parent) = skeleton.parent_index(index) {
+            let local_t = bind_rot[parent].inverse() * (bind_pos[index] - bind_pos[parent]);
+            let (parent_pos, parent_rot) = frames[parent];
+            frames[index] = (parent_pos + parent_rot * local_t, parent_rot * local);
+        } else {
+            frames[index] = (bind_pos[index], local);
+        }
+    }
+    Ok(frames)
+}
+
+/// Rigid map from a bind-pose point to the posed point, one matrix per bone.
+/// Empty `pose` is the identity on every bone.
+pub fn skin_deltas(
+    skeleton: &Skeleton,
+    pose: &HashMap<String, [f32; 4]>,
+) -> Result<Vec<Mat4>, String> {
+    let bind = posed_joints(skeleton, &HashMap::new())?;
+    let posed = posed_joints(skeleton, pose)?;
+    Ok(bind
+        .into_iter()
+        .zip(posed)
+        .map(|((bind_pos, bind_rot), (posed_pos, posed_rot))| {
+            Mat4::from_rotation_translation(posed_rot, posed_pos)
+                * Mat4::from_rotation_translation(bind_rot, bind_pos).inverse()
+        })
+        .collect())
+}
+
+pub fn checked_rotation(rotation: [f32; 4]) -> Result<[f32; 4], String> {
+    check_rotation(rotation)
+}
+
+/// Reflection of a local quaternion across a world axis through the origin.
+pub fn mirror_rotation(rotation: [f32; 4], axis: usize) -> [f32; 4] {
+    let mut out = rotation;
+    for other in 0..3 {
+        if other != axis {
+            out[other] = -out[other];
+        }
+    }
+    out
+}
+
+pub fn mirrored_bone_name(name: &str) -> String {
+    if let Some(stem) = name.strip_suffix("_l") {
+        format!("{stem}_r")
+    } else if let Some(stem) = name.strip_suffix("_r") {
+        format!("{stem}_l")
+    } else {
+        format!("{name}_r")
+    }
+}
+
+/// Voxel `(x, y, z)` quaternion to the glTF joint basis.
+pub fn gltf_rotation(rotation: [f32; 4]) -> [f32; 4] {
+    let quat = voxel_to_gltf_quat(Quat::from_xyzw(
+        rotation[0],
+        rotation[1],
+        rotation[2],
+        rotation[3],
+    ));
+    [quat.x, quat.y, quat.z, quat.w]
+}
+
+/// Voxel vector to glTF `(x, z, -y)`.
+pub fn gltf_vector(vector: [f32; 3]) -> [f32; 3] {
+    [vector[0], vector[2], -vector[1]]
+}
+
+/// Scale axes follow the same swap, without the sign flip.
+pub fn gltf_scale(scale: [f32; 3]) -> [f32; 3] {
+    [scale[0], scale[2], scale[1]]
+}
+
+pub fn encode_clips(clips: &[Clip]) -> Result<Option<Vec<u8>>, String> {
+    if clips.is_empty() {
+        return Ok(None);
+    }
+    let mut body = Vec::new();
+    push_u32(&mut body, 1);
+    push_u32(&mut body, clips.len() as u32);
+    for clip in clips {
+        let name = check_name(&clip.name)?;
+        push_str(&mut body, &name);
+        push_u32(&mut body, clip.tracks.len() as u32);
+        for track in &clip.tracks {
+            push_str(&mut body, &check_name(&track.bone)?);
+            push_u32(&mut body, track.keys.len() as u32);
+            for key in &track.keys {
+                body.extend_from_slice(&key.time.to_le_bytes());
+                for axis in key.rotation {
+                    body.extend_from_slice(&axis.to_le_bytes());
+                }
+                for axis in key.translation {
+                    body.extend_from_slice(&axis.to_le_bytes());
+                }
+                for axis in key.scale {
+                    body.extend_from_slice(&axis.to_le_bytes());
+                }
+            }
+        }
+    }
+    Ok(Some(body))
+}
+
+pub fn decode_clips(body: &[u8]) -> Result<Vec<Clip>, String> {
+    let mut cursor = 0;
+    let version = read_u32(body, &mut cursor)?;
+    if version != 1 {
+        return Err(format!("MVAN version {version} is not supported"));
+    }
+    let count = read_u32(body, &mut cursor)? as usize;
+    if count > 256 {
+        return Err("MVAN has too many clips".into());
+    }
+    let mut clips = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = read_str(body, &mut cursor)?;
+        let tracks_len = read_u32(body, &mut cursor)? as usize;
+        if tracks_len > 256 {
+            return Err(format!("clip `{name}` has too many bones"));
+        }
+        let mut tracks = Vec::with_capacity(tracks_len);
+        for _ in 0..tracks_len {
+            let bone = read_str(body, &mut cursor)?;
+            let keys_len = read_u32(body, &mut cursor)? as usize;
+            if keys_len > 10_000 {
+                return Err(format!("clip `{name}` bone `{bone}` has too many keys"));
+            }
+            let mut keys = Vec::with_capacity(keys_len);
+            for _ in 0..keys_len {
+                let time = read_f32(body, &mut cursor)?;
+                let mut rotation = [0.0; 4];
+                for axis in &mut rotation {
+                    *axis = read_f32(body, &mut cursor)?;
+                }
+                let mut translation = [0.0; 3];
+                for axis in &mut translation {
+                    *axis = read_f32(body, &mut cursor)?;
+                }
+                let mut scale = [0.0; 3];
+                for axis in &mut scale {
+                    *axis = read_f32(body, &mut cursor)?;
+                }
+                keys.push(ClipKey {
+                    time,
+                    rotation,
+                    translation,
+                    scale,
+                });
+            }
+            tracks.push(BoneTrack { bone, keys });
+        }
+        clips.push(Clip { name, tracks });
+    }
+    if cursor != body.len() {
+        return Err("MVAN chunk has trailing bytes".into());
+    }
+    Ok(clips)
+}
+
+fn parent_first(skeleton: &Skeleton) -> Result<Vec<usize>, String> {
+    let mut order = Vec::with_capacity(skeleton.bones.len());
+    let mut seen = vec![false; skeleton.bones.len()];
+    let mut stack = vec![false; skeleton.bones.len()];
+    fn visit(
+        skeleton: &Skeleton,
+        index: usize,
+        order: &mut Vec<usize>,
+        seen: &mut [bool],
+        stack: &mut [bool],
+    ) -> Result<(), String> {
+        if seen[index] {
+            return Ok(());
+        }
+        if stack[index] {
+            return Err(format!(
+                "bone `{}` is part of a cycle",
+                skeleton.bones[index].name
+            ));
+        }
+        stack[index] = true;
+        if let Some(parent) = skeleton.parent_index(index) {
+            visit(skeleton, parent, order, seen, stack)?;
+        }
+        stack[index] = false;
+        seen[index] = true;
+        order.push(index);
+        Ok(())
+    }
+    for index in 0..skeleton.bones.len() {
+        visit(skeleton, index, &mut order, &mut seen, &mut stack)?;
+    }
+    Ok(order)
+}
+
+fn quat(rotation: [f32; 4]) -> Result<Quat, String> {
+    let rotation = check_rotation(rotation)?;
+    Ok(Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]).normalize())
 }
 
 #[cfg(test)]
