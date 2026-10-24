@@ -16,9 +16,12 @@ pub struct Vert {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 3],
+    /// x sway amount, y bob amount, z height above the object's base, w unused.
+    /// The viewport shader reads this only while motion preview is on.
+    pub motion: [f32; 4],
 }
 
-const _: () = assert!(std::mem::size_of::<Vert>() == 36);
+const _: () = assert!(std::mem::size_of::<Vert>() == 52);
 
 #[derive(Clone, Default)]
 pub struct Mesh {
@@ -86,22 +89,26 @@ pub fn mesh_chunk(
     cells: &HashMap<Cell, u8>,
     chunk: (i32, i32, i32),
     color: impl Fn(u8) -> [u8; 3],
+    motion: impl Fn(u8) -> [f32; 2],
 ) -> Mesh {
+    let base = cells.keys().map(|cell| cell.1).min().unwrap_or(0) as f32;
     let mut listed = Vec::new();
     for (&cell, &slot) in cells {
         if chunk_key(cell) == chunk {
-            listed.push((cell, color(slot)));
+            listed.push((cell, slot, color(slot), motion(slot)));
         }
     }
     let mut mesh = Mesh::default();
-    for (cell, rgb) in &listed {
+    for (cell, _slot, rgb, motion) in &listed {
         for face in 0..6 {
             let (dx, dy, dz) = OFFSETS[face];
             let neighbor = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
             if cells.contains_key(&neighbor) {
                 continue;
             }
-            push_quad(&mut mesh, *cell, face, *rgb, 0.0);
+            push_quad(
+                &mut mesh, *cell, face, *rgb, 0.0, motion[0], motion[1], base,
+            );
         }
     }
     mesh
@@ -120,7 +127,7 @@ pub fn selection_shell(cells: &HashMap<Cell, u8>, picked: &HashSet<Cell>) -> Mes
             if picked.contains(&neighbor) {
                 continue;
             }
-            push_quad(&mut mesh, *cell, face, [255, 214, 90], 0.03);
+            push_quad(&mut mesh, *cell, face, [255, 214, 90], 0.03, 0.0, 0.0, 0.0);
         }
     }
     mesh
@@ -129,7 +136,7 @@ pub fn selection_shell(cells: &HashMap<Cell, u8>, picked: &HashSet<Cell>) -> Mes
 pub fn highlight(cell: Cell, normal: Cell) -> Option<Mesh> {
     let face = OFFSETS.iter().position(|o| *o == normal)?;
     let mut mesh = Mesh::default();
-    push_quad(&mut mesh, cell, face, [255, 214, 90], 0.04);
+    push_quad(&mut mesh, cell, face, [255, 214, 90], 0.04, 0.0, 0.0, 0.0);
     Some(mesh)
 }
 
@@ -212,7 +219,16 @@ const QUADS: [[[f32; 3]; 4]; 6] = [
     ],
 ];
 
-fn push_quad(mesh: &mut Mesh, cell: Cell, face: usize, rgb: [u8; 3], push: f32) {
+fn push_quad(
+    mesh: &mut Mesh,
+    cell: Cell,
+    face: usize,
+    rgb: [u8; 3],
+    push: f32,
+    sway: f32,
+    bob: f32,
+    base_y: f32,
+) {
     let base = mesh.verts.len() as u32;
     let color = [
         rgb[0] as f32 / 255.0,
@@ -230,6 +246,7 @@ fn push_quad(mesh: &mut Mesh, cell: Cell, face: usize, rgb: [u8; 3], push: f32) 
             ],
             normal,
             color,
+            motion: [sway, bob, origin[1] + corner[1] - base_y, 0.0],
         });
     }
     mesh.indices
@@ -264,6 +281,7 @@ fn push_ribbon(mesh: &mut Mesh, a: [f32; 3], b: [f32; 3], along_y: bool, rgb: [u
             pos: corner,
             normal: [0.0, 0.0, 1.0],
             color,
+            motion: [0.0; 4],
         });
     }
     mesh.indices
@@ -298,76 +316,5 @@ fn mark(dirty: &mut std::collections::HashSet<(i32, i32, i32)>, key: (i32, i32, 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn white(_: u8) -> [u8; 3] {
-        [255, 255, 255]
-    }
-
-    #[test]
-    fn selection_shell_drops_the_face_between_two_picked_cells() {
-        let mut cells = HashMap::new();
-        cells.insert((0, 0, 0), 1);
-        cells.insert((1, 0, 0), 1);
-        let mut picked = HashSet::new();
-        picked.insert((0, 0, 0));
-        picked.insert((1, 0, 0));
-        assert_eq!(selection_shell(&cells, &picked).face_count(), 10);
-    }
-
-    #[test]
-    fn translate_mesh_shifts_vertices() {
-        let mut cells = HashMap::new();
-        cells.insert((0, 0, 0), 1);
-        let mut mesh = mesh_chunk(&cells, (0, 0, 0), white);
-        translate_mesh(&mut mesh, (3, 0, 0));
-        assert!(mesh.verts.iter().all(|vert| vert.pos[0] >= 3.0));
-    }
-
-    #[test]
-    fn one_voxel_has_six_faces() {
-        let mut cells = HashMap::new();
-        cells.insert((0, 0, 0), 1);
-        let mesh = mesh_chunk(&cells, (0, 0, 0), white);
-        assert_eq!(mesh.face_count(), 6);
-    }
-
-    #[test]
-    fn neighbors_drop_the_shared_face_across_a_chunk_boundary() {
-        let mut cells = HashMap::new();
-        cells.insert((15, 0, 0), 1);
-        cells.insert((16, 0, 0), 1);
-        let a = mesh_chunk(&cells, chunk_key((15, 0, 0)), white);
-        let b = mesh_chunk(&cells, chunk_key((16, 0, 0)), white);
-        assert_eq!(a.face_count() + b.face_count(), 10);
-    }
-
-    #[test]
-    fn negative_coordinates_stay_in_their_own_chunk() {
-        assert_eq!(chunk_key((-1, 0, 0)), (-1, 0, 0));
-        assert_eq!(chunk_key((-16, -17, 3)), (-1, -2, 0));
-    }
-
-    #[test]
-    fn a_changed_chunk_dirties_its_neighbors() {
-        let mut prev = HashMap::new();
-        prev.insert((0, 0, 0), 1);
-        let mut next = HashMap::new();
-        next.insert((0, 0, 0), 2);
-        let dirty = dirty_chunks(&prev, &next);
-        assert!(dirty.contains(&(0, 0, 0)));
-        assert!(dirty.contains(&(1, 0, 0)));
-        assert!(dirty.contains(&(-1, 0, 0)));
-        assert_eq!(dirty.len(), 7);
-    }
-
-    #[test]
-    fn hash_ignores_insertion_order() {
-        let a = occupancy_hash(&[((1, 2, 3), [9, 8, 7]), ((4, 5, 6), [1, 2, 3])]);
-        let b = occupancy_hash(&[((4, 5, 6), [1, 2, 3]), ((1, 2, 3), [9, 8, 7])]);
-        assert_eq!(a, b);
-        let c = occupancy_hash(&[((1, 2, 3), [9, 8, 8]), ((4, 5, 6), [1, 2, 3])]);
-        assert_ne!(a, c);
-    }
-}
+#[path = "../tests/mesh.rs"]
+mod tests;

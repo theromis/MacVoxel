@@ -1,0 +1,400 @@
+//! Path-traced shading: diffuse, glass, emissive, and sky.
+
+use super::world::*;
+use super::*;
+
+pub(super) fn radiance(
+    world: &World,
+    session: &Shade,
+    origin: Vec3,
+    dir: Vec3,
+    bounce: i32,
+    rng: &mut Rng,
+) -> [f32; 3] {
+    let bounces = session.max_bounces.clamp(1, 8);
+    if bounce > bounces {
+        return [0.0; 3];
+    }
+    let Some(hit) = march(world, origin, dir) else {
+        return sky(session, dir, bounce == 0);
+    };
+    let material = session.materials[hit.slot as usize];
+    let albedo = linear_rgb(session.palette[hit.slot as usize]);
+    let color = match material.ty {
+        MaterialType::Emissive => {
+            // Next-event estimation already samples these faces. Counting them
+            // again on a bounce would light the scene twice.
+            if bounce > 0 && session.stochastic_gi {
+                [0.0; 3]
+            } else {
+                scale(albedo, emission_gain(&material))
+            }
+        }
+        MaterialType::Metal => {
+            let reflect = reflect(-dir, hit.normal);
+            let rough = material.roughness.clamp(0.0, 1.0);
+            let wi = if rough > 0.02 {
+                lerp_dir(reflect, cosine_hemisphere(hit.normal, rng), rough).normalize_or_zero()
+            } else {
+                reflect
+            };
+            if wi.dot(hit.normal) <= 0.0 || bounce == bounces {
+                [0.0; 3]
+            } else {
+                let next = radiance(world, session, hit.point + wi * 0.001, wi, bounce + 1, rng);
+                mul(albedo, next)
+            }
+        }
+        MaterialType::Glass => glass(world, session, &hit, albedo, &material, dir, bounce, rng),
+        MaterialType::Diffuse => diffuse(world, session, &hit, albedo, dir, bounce, rng),
+    };
+    if bounce > 0 {
+        clamp_indirect(color, session.indirect_clamp)
+    } else {
+        color
+    }
+}
+
+pub(super) fn diffuse(
+    world: &World,
+    session: &Shade,
+    hit: &Hit,
+    albedo: [f32; 3],
+    _dir: Vec3,
+    bounce: i32,
+    rng: &mut Rng,
+) -> [f32; 3] {
+    let sun = sun_radiance(session);
+    let ndotl = hit.normal.dot(session.sun_dir()).max(0.0);
+    let mut color = if ndotl > 0.0 && !occluded(world, hit.point, session.sun_dir(), f32::MAX) {
+        scale(mul(albedo, sun), ndotl)
+    } else {
+        [0.0; 3]
+    };
+    if session.stochastic_gi && bounce < session.max_bounces.clamp(1, 8) {
+        if !world.lights.is_empty() {
+            color = add(color, nee(world, session, hit, albedo, bounce, rng));
+        }
+        let wi = cosine_hemisphere(hit.normal, rng);
+        let next = radiance(world, session, hit.point + wi * 0.001, wi, bounce + 1, rng);
+        color = add(color, mul(albedo, next));
+    } else {
+        let ambient = scale(sky(session, hit.normal, false), 0.35);
+        color = add(color, mul(albedo, ambient));
+    }
+    color
+}
+
+pub(super) fn glass(
+    world: &World,
+    session: &Shade,
+    hit: &Hit,
+    albedo: [f32; 3],
+    material: &Material,
+    dir: Vec3,
+    bounce: i32,
+    rng: &mut Rng,
+) -> [f32; 3] {
+    if session.glass_mode == GlassMode::Absorption {
+        let tint = lerp(
+            albedo,
+            [1.0, 1.0, 1.0],
+            material.transparency.clamp(0.0, 1.0),
+        );
+        let next = radiance(
+            world,
+            session,
+            hit.point + dir * 0.002,
+            dir,
+            bounce + 1,
+            rng,
+        );
+        return mul(tint, next);
+    }
+    let ior = material.ior.clamp(1.0, 3.0);
+    let entering = dir.dot(hit.normal) < 0.0;
+    let (n, eta) = if entering {
+        (hit.normal, 1.0 / ior)
+    } else {
+        (-hit.normal, ior)
+    };
+    let cos_i = (-dir).dot(n).clamp(0.0, 1.0);
+    let fresnel = schlick(cos_i, ior);
+    let reflect_dir = reflect(-dir, n);
+    if rng.next_f32() < fresnel {
+        return radiance(
+            world,
+            session,
+            hit.point + reflect_dir * 0.001,
+            reflect_dir,
+            bounce + 1,
+            rng,
+        );
+    }
+    let Some(refract_dir) = refract(dir, n, eta) else {
+        return radiance(
+            world,
+            session,
+            hit.point + reflect_dir * 0.001,
+            reflect_dir,
+            bounce + 1,
+            rng,
+        );
+    };
+    radiance(
+        world,
+        session,
+        hit.point + refract_dir * 0.001,
+        refract_dir,
+        bounce + 1,
+        rng,
+    )
+}
+
+pub(super) fn nee(
+    world: &World,
+    session: &Shade,
+    hit: &Hit,
+    albedo: [f32; 3],
+    bounce: i32,
+    rng: &mut Rng,
+) -> [f32; 3] {
+    let candidates = session.nee_ris.clamp(1, 32) as u32;
+    let mut chosen: Option<&Light> = None;
+    let mut chosen_w = 0.0;
+    let mut total = 0.0;
+    for _ in 0..candidates {
+        let light = pick_light(world, session.power_weighted_nee, rng);
+        let to = light.point - hit.point;
+        let dist2 = to.length_squared().max(1.0e-4);
+        let wi = to.normalize_or_zero();
+        let cos_l = light.normal.dot(-wi).max(0.0);
+        let cos_h = hit.normal.dot(wi).max(0.0);
+        let weight = light.power * cos_l * cos_h / dist2;
+        total += weight;
+        if rng.next_f32() * (chosen_w + weight) <= weight || chosen.is_none() {
+            chosen = Some(light);
+            chosen_w = weight;
+        }
+    }
+    let Some(light) = chosen else {
+        return [0.0; 3];
+    };
+    let to = light.point - hit.point;
+    let dist = to.length().max(1.0e-3);
+    let wi = to / dist;
+    if occluded(world, hit.point, wi, dist - 0.02) {
+        return [0.0; 3];
+    }
+    let cos_l = light.normal.dot(-wi).max(0.0);
+    let cos_h = hit.normal.dot(wi).max(0.0);
+    let mut contrib = scale(mul(albedo, light.radiance), cos_l * cos_h / (dist * dist));
+    if candidates > 1 && chosen_w > 0.0 {
+        contrib = scale(contrib, total / (candidates as f32 * chosen_w.max(1.0e-6)));
+    }
+    if bounce > 0 {
+        clamp_indirect(contrib, session.indirect_clamp)
+    } else {
+        contrib
+    }
+}
+
+pub(super) fn pick_light<'a>(world: &'a World, power_weighted: bool, rng: &mut Rng) -> &'a Light {
+    if !power_weighted || world.lights.len() == 1 {
+        return &world.lights
+            [(rng.next_f32() * world.lights.len() as f32) as usize % world.lights.len()];
+    }
+    let sum: f32 = world.lights.iter().map(|light| light.power).sum();
+    let mut pick = rng.next_f32() * sum.max(1.0e-6);
+    for light in &world.lights {
+        pick -= light.power;
+        if pick <= 0.0 {
+            return light;
+        }
+    }
+    world.lights.last().expect("lights")
+}
+
+pub(super) fn primary_dir(
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    eye: Vec3,
+    target: Vec3,
+    rng: &mut Rng,
+) -> Vec3 {
+    let forward = (target - eye).normalize_or_zero();
+    let world_up = if forward.dot(Vec3::Z).abs() > 0.95 {
+        Vec3::Y
+    } else {
+        Vec3::Z
+    };
+    let right = forward.cross(world_up).normalize_or_zero();
+    let up = right.cross(forward).normalize_or_zero();
+    let aspect = width as f32 / height.max(1) as f32;
+    let tan = (FOV_Y * 0.5).tan();
+    let jitter_x = rng.next_f32() - 0.5;
+    let jitter_y = rng.next_f32() - 0.5;
+    let u = ((x as f32 + 0.5 + jitter_x) / width as f32) * 2.0 - 1.0;
+    let v = 1.0 - ((y as f32 + 0.5 + jitter_y) / height as f32) * 2.0;
+    (forward + right * (u * aspect * tan) + up * (v * tan)).normalize_or_zero()
+}
+
+pub(super) fn lens_ray(
+    session: &Shade,
+    eye: Vec3,
+    target: Vec3,
+    dir: Vec3,
+    rng: &mut Rng,
+) -> (Vec3, Vec3) {
+    if session.aperture <= 0.0 {
+        return (eye, dir);
+    }
+    let forward = (target - eye).normalize_or_zero();
+    let world_up = if forward.dot(Vec3::Z).abs() > 0.95 {
+        Vec3::Y
+    } else {
+        Vec3::Z
+    };
+    let right = forward.cross(world_up).normalize_or_zero();
+    let up = right.cross(forward);
+    let radius = session.aperture.sqrt() * 0.05 * rng.next_f32().sqrt();
+    let angle = rng.next_f32() * std::f32::consts::TAU;
+    let lens = eye + right * (angle.cos() * radius) + up * (angle.sin() * radius);
+    let focus = eye + dir * session.focus_distance.max(0.05);
+    (lens, (focus - lens).normalize_or_zero())
+}
+
+pub(super) fn sun_radiance(session: &Shade) -> [f32; 3] {
+    scale(session.sun_color, session.sun_intensity.max(0.0))
+}
+
+pub(super) fn sky(session: &Shade, dir: Vec3, include_sun: bool) -> [f32; 3] {
+    let up = dir.z.clamp(-1.0, 1.0);
+    let horizon = (-up.abs() * session.horizon_softness.max(0.0)).exp();
+    let zenith = if session.atmospheric_sky {
+        [0.25, 0.45, 0.85]
+    } else {
+        [0.55, 0.62, 0.72]
+    };
+    let ground = [0.28, 0.26, 0.24];
+    let base = if up >= 0.0 {
+        lerp(zenith, [0.75, 0.78, 0.82], horizon)
+    } else {
+        lerp(ground, [0.75, 0.78, 0.82], horizon)
+    };
+    let mut color = scale(base, session.sky_intensity.max(0.0));
+    if include_sun {
+        let cos = dir
+            .normalize_or_zero()
+            .dot(session.sun_dir())
+            .clamp(-1.0, 1.0);
+        let radius = (session.sun_disc.max(0.1).to_radians() * 0.5).cos();
+        if cos >= radius {
+            color = add(color, sun_radiance(session));
+        }
+    }
+    color
+}
+
+pub(super) fn first_albedo(world: &World, session: &Shade, origin: Vec3, dir: Vec3) -> [f32; 3] {
+    march(world, origin, dir)
+        .map(|hit| linear_rgb(session.palette[hit.slot as usize]))
+        .unwrap_or([0.0; 3])
+}
+
+pub(super) fn denoise(image: &Image) -> Vec<[f32; 3]> {
+    let w = image.width as i32;
+    let h = image.height as i32;
+    let mut out = vec![[0.0; 3]; image.shown.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let mut acc = [0.0; 3];
+            let mut weight = 0.0;
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let nx = x + dx;
+                    let ny = y + dy;
+                    if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                        continue;
+                    }
+                    let j = (ny * w + nx) as usize;
+                    let diff = sub(image.albedo[i], image.albedo[j]);
+                    let dist = (diff[0] * diff[0] + diff[1] * diff[1] + diff[2] * diff[2]).sqrt();
+                    let wgt = (-dist * 12.0).exp();
+                    acc = add(acc, scale(image.shown[j], wgt));
+                    weight += wgt;
+                }
+            }
+            out[i] = scale(acc, 1.0 / weight.max(1.0e-6));
+        }
+    }
+    out
+}
+
+pub(super) fn cosine_hemisphere(normal: Vec3, rng: &mut Rng) -> Vec3 {
+    let u1 = rng.next_f32().clamp(1.0e-6, 1.0);
+    let u2 = rng.next_f32();
+    let r = u1.sqrt();
+    let phi = std::f32::consts::TAU * u2;
+    let local = Vec3::new(r * phi.cos(), r * phi.sin(), (1.0 - u1).sqrt());
+    let tangent = if normal.z.abs() < 0.9 {
+        normal.cross(Vec3::Z).normalize()
+    } else {
+        normal.cross(Vec3::X).normalize()
+    };
+    let bitangent = normal.cross(tangent);
+    (tangent * local.x + bitangent * local.y + normal * local.z).normalize_or_zero()
+}
+
+pub(super) fn reflect(incoming: Vec3, normal: Vec3) -> Vec3 {
+    (incoming - normal * (2.0 * incoming.dot(normal))).normalize_or_zero()
+}
+
+pub(super) fn refract(dir: Vec3, normal: Vec3, eta: f32) -> Option<Vec3> {
+    let cos_i = (-dir).dot(normal).clamp(-1.0, 1.0);
+    let sin2_t = eta * eta * (1.0 - cos_i * cos_i);
+    if sin2_t > 1.0 {
+        return None;
+    }
+    let cos_t = (1.0 - sin2_t).sqrt();
+    Some((dir * eta + normal * (eta * cos_i - cos_t)).normalize_or_zero())
+}
+
+pub(super) fn schlick(cos: f32, ior: f32) -> f32 {
+    let r0 = ((1.0 - ior) / (1.0 + ior)).powi(2);
+    r0 + (1.0 - r0) * (1.0 - cos).powi(5)
+}
+
+pub(super) fn lerp_dir(a: Vec3, b: Vec3, t: f32) -> Vec3 {
+    a * (1.0 - t) + b * t
+}
+
+pub(super) fn clamp_indirect(color: [f32; 3], limit: f32) -> [f32; 3] {
+    if limit <= 0.0 {
+        return color;
+    }
+    let peak = color[0].max(color[1]).max(color[2]);
+    if peak <= limit {
+        color
+    } else {
+        scale(color, limit / peak)
+    }
+}
+
+pub(super) fn aces(x: f32) -> f32 {
+    let x = x.max(0.0);
+    ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0.0, 1.0)
+}
+
+pub(super) fn to_srgb(linear: f32) -> u8 {
+    let linear = linear.clamp(0.0, 1.0);
+    let encoded = if linear <= 0.0031308 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0 + 0.5).clamp(0.0, 255.0) as u8
+}

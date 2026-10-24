@@ -27,6 +27,7 @@ mod native_menu;
 mod panels;
 mod remote;
 mod rig;
+mod script;
 mod state;
 mod tools;
 mod trace;

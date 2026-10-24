@@ -336,6 +336,9 @@ fn map_tool(name: &str, args: &Value) -> Result<(String, Value), String> {
         "get_voxels" => "voxel.get_box",
         "set_palette" => "palette.set",
         "set_active_object" => "object.set_active",
+        "add_object" => "object.add",
+        "set_object" => "object.set",
+        "remove_object" => "object.remove",
         "add_bone" => "rig.add",
         "set_bone" => "rig.set",
         "remove_bone" => "rig.remove",
@@ -350,6 +353,11 @@ fn map_tool(name: &str, args: &Value) -> Result<(String, Value), String> {
         "ui_inspect" => "ui.inspect",
         "ui_click" => "ui.click",
         "export_mesh" => "mesh.export",
+        "set_script" => "script.set",
+        "get_script" => "script.get",
+        "set_params" => "script.params",
+        "list_params" => "script.params.list",
+        "regenerate" => "script.regenerate",
         other => return Err(format!("unknown tool `{other}`")),
     };
     let params = match name {
@@ -414,15 +422,15 @@ fn tools() -> Vec<Value> {
         tool("new_document", "Replace the session with an empty one-object document and the default palette.", json!({}), &[]),
         tool("open_file", "Open a .vox file, replacing the session document.", json!({"path": str_prop("Path of a .vox file")}), &["path"]),
         tool("save_file", "Write every non-empty object as a .vox scene.", json!({"path": str_prop("Where to write. Omit to overwrite the open file.")}), &[]),
-        tool("inspect_document", "Path, voxel count, bounds, objects, and the 256-color palette.", json!({}), &[]),
-        tool("get_voxel", "Read one local cell of the active object. 0 is empty.", xyz_props(), &["x", "y", "z"]),
-        tool("set_voxel", "Write one local cell of the active object. One undo step.", {
+        tool("inspect_document", "Path, voxel count, world bounds, objects (name, world position, local bounds), and the 256-color palette.", json!({}), &[]),
+        tool("get_voxel", "Read one local cell of the active object. 0 is empty. Coordinates are local to that object.", xyz_props(), &["x", "y", "z"]),
+        tool("set_voxel", "Write one local cell of the active object. Coordinates are local. One undo step.", {
             let mut p = xyz_props();
             p["palette"] = int_prop("Palette index. 0 erases. 1..255 paint.");
             p
         }, &["x", "y", "z", "palette"]),
-        tool("set_voxels", "Write up to 200000 cells of the active object as one undo step.", json!({"cells": {"type": "array", "description": "Each item is {x,y,z,palette} or [x,y,z,palette]. Last duplicate wins."}}), &["cells"]),
-        tool("fill_box", "Fill an inclusive box in the active object. At most 2000000 cells. One undo step.", {
+        tool("set_voxels", "Write up to 200000 local cells of the active object as one undo step. Coordinates are local to that object.", json!({"cells": {"type": "array", "description": "Each item is {x,y,z,palette} or [x,y,z,palette], in the active object's local cells. Last duplicate wins."}}), &["cells"]),
+        tool("fill_box", "Fill an inclusive box of local cells in the active object. At most 2000000 cells. One undo step.", {
             let mut p = json!({});
             for key in ["x0", "y0", "z0", "x1", "y1", "z1"] {
                 p[key] = int_prop("Inclusive box corner");
@@ -430,23 +438,40 @@ fn tools() -> Vec<Value> {
             p["palette"] = int_prop("Palette index. 0 erases.");
             p
         }, &["x0", "y0", "z0", "x1", "y1", "z1", "palette"]),
-        tool("get_voxels", "List non-empty cells of the active object inside an inclusive box. At most 100000.", {
+        tool("get_voxels", "List non-empty local cells of the active object inside an inclusive box. At most 100000.", {
             let mut p = json!({});
             for key in ["x0", "y0", "z0", "x1", "y1", "z1"] {
                 p[key] = int_prop("Inclusive box corner");
             }
             p
         }, &["x0", "y0", "z0", "x1", "y1", "z1"]),
-        tool("set_palette", "Replace one palette slot, or many via entries, as one undo step.", json!({
+        tool("set_palette", "Replace one palette slot, or many via entries, as one undo step. motion is none, sway, or bob.", json!({
             "index": int_prop("Palette slot 0..255"),
             "r": int_prop("Red 0..255"),
             "g": int_prop("Green 0..255"),
             "b": int_prop("Blue 0..255"),
             "a": int_prop("Alpha 0..255. Defaults to 255."),
-            "entries": {"type": "array", "description": "Batch of {index,r,g,b,a?}. Omit when passing index."}
+            "motion": str_prop("none, sway, or bob. Omit to leave the slot's motion."),
+            "motion_amount": num_prop("Motion strength, 0..4. Omit to leave it. Default 1 when a kind is first set."),
+            "entries": {"type": "array", "description": "Batch of {index,r,g,b,a?,motion?,motion_amount?}. Omit when passing index."}
         }), &[]),
-        tool("set_active_object", "Edit a different object from inspect_document.", json!({"index": int_prop("Object index")}), &["index"]),
-        tool("add_bone", "Add a bone. One undo step. parent is omitted for a root.", json!({
+        tool("set_active_object", "Edit a different object from inspect_document. Later voxel tools use that object's local cells.", json!({"index": int_prop("Object index")}), &["index"]),
+        tool("add_object", "Add an empty object at a world voxel position and return its index. It becomes active unless make_active is false. size is a local capacity hint; the object still grows up to 256 per axis. One undo step.", json!({
+            "name": str_prop("Object name. Omit for Object N."),
+            "position": ivec3_prop("World position [x, y, z] in voxel units. Defaults to [0, 0, 0]."),
+            "size": ivec3_prop("Optional SIZE box [x, y, z], each axis 1..=256. Does not cap later growth below the per-object limit."),
+            "make_active": {"type": "boolean", "description": "Select the new object. Defaults to true."}
+        }), &[]),
+        tool("set_object", "Rename, move, or hide an object. position is a world voxel coordinate; local cells stay put, so the voxels move with the object. One undo step.", json!({
+            "index": int_prop("Object index"),
+            "name": str_prop("New name"),
+            "position": ivec3_prop("World position [x, y, z] in voxel units"),
+            "hidden": {"type": "boolean", "description": "Hide the object. Hidden objects stay in the file and outliner."}
+        }), &["index"]),
+        tool("remove_object", "Remove an object and its voxels. A bone bound to it stays; the binding goes. Later object indices decrease by one, and the reply says so. Refuses the last object. One undo step.", json!({
+            "index": int_prop("Object index")
+        }), &["index"]),
+        tool("add_bone", "Add a bone. One undo step. parent is omitted for a root. pivot is a world voxel coordinate.", json!({
             "name": str_prop("Unique bone name"),
             "parent": {"type": ["string", "null"], "description": "Parent bone name. Omit or null for a root."},
             "pivot": vec3_prop("World pivot [x, y, z] in voxel coordinates"),
@@ -495,7 +520,24 @@ fn tools() -> Vec<Value> {
             "x": num_prop("X in window points, origin at the top-left of the client area"),
             "y": num_prop("Y in window points, origin at the top-left of the client area")
         }), &["x", "y"]),
-        tool("export_mesh", "Write a glTF 2.0 .glb of every object. Exposed faces only. The default material is a 256-wide palette texture. A skeleton writes one rigid skin: each vertex belongs to one bone with weight 1.", json!({
+        tool("set_script", "Store a Rhai script on an object and read its parameters. One undo step. Voxels change only when regenerate runs. A failure keeps the source and reports the script line.", json!({
+            "object": int_prop("Object index. Omit for the active object."),
+            "source": str_prop("Rhai source. Empty clears the script.")
+        }), &["source"]),
+        tool("get_script", "Script source, auto flag, and declared parameters.", json!({
+            "object": int_prop("Object index. Omit for the active object.")
+        }), &[]),
+        tool("set_params", "Set script parameters by name. One undo step. Does not run the script.", json!({
+            "object": int_prop("Object index. Omit for the active object."),
+            "values": {"type": "object", "description": "Map of parameter name to a number, bool, or [r, g, b]."}
+        }), &["values"]),
+        tool("list_params", "Parameters from the last successful run of the object's script.", json!({
+            "object": int_prop("Object index. Omit for the active object.")
+        }), &[]),
+        tool("regenerate", "Run the object's script and replace the voxels it writes. One undo step. A limit or runtime error leaves the document unchanged and includes the script line.", json!({
+            "object": int_prop("Object index. Omit for the active object.")
+        }), &[]),
+        tool("export_mesh", "Write a glTF 2.0 .glb of every object. Exposed faces only. The default material is a 256-wide palette texture. A swaying or bobbing slot adds TEXCOORD_1 (sway, bob) on every vertex. A skeleton writes one rigid skin: each vertex belongs to one bone with weight 1.", json!({
             "path": str_prop("Where to write the .glb"),
             "merge": {"type": "boolean", "description": "Greedy-merge coplanar faces of one palette slot. Defaults to false."},
             "vertexColors": {"type": "boolean", "description": "Store a linear COLOR_0 on each vertex instead of the palette texture. Defaults to false."}
@@ -538,6 +580,16 @@ fn vec3_prop(description: &str) -> Value {
     })
 }
 
+fn ivec3_prop(description: &str) -> Value {
+    json!({
+        "type": "array",
+        "items": {"type": "integer"},
+        "minItems": 3,
+        "maxItems": 3,
+        "description": description
+    })
+}
+
 fn vec4_prop(description: &str) -> Value {
     json!({
         "type": "array",
@@ -574,102 +626,5 @@ render path-traces a PNG in this process. The window path-traces in Render mode.
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn headless_tool_call_edits_and_refuses_a_screenshot() {
-        let mut state = Proto::default();
-        let mut session = Session::new();
-        session.replace_empty();
-        dispatch(
-            &mut state,
-            &mut session,
-            None,
-            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
-        );
-        let reply = dispatch(
-            &mut state,
-            &mut session,
-            None,
-            &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "set_voxel", "arguments": {"x": 0, "y": 0, "z": 0, "palette": 9}}}),
-        )
-        .unwrap();
-        assert_eq!(reply["result"]["isError"], false);
-        assert_eq!(session.active().cells.get(&(0, 0, 0)), Some(&9));
-        let reply = dispatch(
-            &mut state,
-            &mut session,
-            None,
-            &json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "screenshot_viewport", "arguments": {}}}),
-        )
-        .unwrap();
-        assert_eq!(reply["result"]["isError"], true);
-        let reply = dispatch(
-            &mut state,
-            &mut session,
-            None,
-            &json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "ui_inspect", "arguments": {}}}),
-        )
-        .unwrap();
-        assert_eq!(reply["result"]["isError"], true);
-        let reply = dispatch(
-            &mut state,
-            &mut session,
-            None,
-            &json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "ui_click", "arguments": {"x": 1, "y": 1}}}),
-        )
-        .unwrap();
-        assert_eq!(reply["result"]["isError"], true);
-    }
-
-    #[test]
-    fn headless_render_writes_a_png_and_leaves_the_camera() {
-        let mut state = Proto::default();
-        let mut session = Session::new();
-        session.replace_empty();
-        session.objects[0].cells.insert((0, 0, 0), 4);
-        session.yaw = 1.25;
-        let path = std::env::temp_dir().join("macvoxel-egui-mcp-render.png");
-        let _ = std::fs::remove_file(&path);
-        dispatch(
-            &mut state,
-            &mut session,
-            None,
-            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
-        );
-        let reply = dispatch(
-            &mut state,
-            &mut session,
-            None,
-            &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "render", "arguments": {
-                "path": path.to_string_lossy(),
-                "width": 2,
-                "height": 2,
-                "samples": 1,
-                "bounces": 1,
-                "denoise": false
-            }}}),
-        )
-        .unwrap();
-        assert_eq!(reply["result"]["isError"], false, "{reply}");
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(&bytes[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
-        assert!((session.yaw - 1.25).abs() < 1e-5);
-        let _ = std::fs::remove_file(&path);
-
-        let empty = dispatch(
-            &mut state,
-            &mut session,
-            None,
-            &json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "render", "arguments": {
-                "path": path.to_string_lossy(),
-                "pitch": 120
-            }}}),
-        )
-        .unwrap();
-        assert_eq!(empty["result"]["isError"], true);
-        let text = empty["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("pitch"), "{text}");
-    }
-}
+#[path = "../tests/mcp.rs"]
+mod tests;

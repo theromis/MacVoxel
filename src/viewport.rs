@@ -67,6 +67,8 @@ pub fn show(
 
     let left =
         egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 10.0), egui::vec2(168.0, 32.0));
+    let motion_chip =
+        egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 48.0), egui::vec2(118.0, 28.0));
     let right = egui::Rect::from_min_size(
         egui::pos2(rect.right() - 178.0, rect.top() + 10.0),
         egui::vec2(168.0, 32.0),
@@ -74,7 +76,7 @@ pub fn show(
     let pointer = ctx.input(|i| i.pointer.clone());
     let on_hud = pointer
         .hover_pos()
-        .is_some_and(|p| left.contains(p) || right.contains(p));
+        .is_some_and(|p| left.contains(p) || right.contains(p) || motion_chip.contains(p));
     let hover = pointer.hover_pos().filter(|p| rect.contains(*p) && !on_hud);
     let space = ctx.input(|i| i.key_down(egui::Key::Space));
     let scroll = if hover.is_some() {
@@ -176,7 +178,8 @@ pub fn show(
                 );
                 scene = gpu.lock().expect("voxel viewport");
             }
-            scene.sync(&rs.device, &rs.queue, session, view_proj);
+            let time = ctx.input(|input| input.time) as f32;
+            scene.sync(&rs.device, &rs.queue, session, view_proj, time);
             drop(scene);
             painter.image(
                 texture,
@@ -217,6 +220,14 @@ pub fn show(
         );
     }
 
+    if session.motion_preview {
+        ctx.request_repaint();
+    }
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(motion_chip), |ui| {
+        hud_frame(ui, |ui| {
+            ui.checkbox(&mut session.motion_preview, "Motion");
+        });
+    });
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left), |ui| {
         hud_frame(ui, |ui| {
             let model = ui.selectable_value(&mut session.editor_mode, EditorMode::Model, "Model");
@@ -868,32 +879,5 @@ pub(crate) fn ray_through(session: &Session, rect: egui::Rect, pos: egui::Pos2) 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn marquee_contains_the_cell_under_its_projection() {
-        let session = Session::new();
-        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
-        let cell = session.active().cells.keys().copied().next().unwrap();
-        let aspect = rect.width() / rect.height();
-        let vp = projection(aspect) * view_matrix(&session);
-        let center = Vec3::new(
-            cell.0 as f32 + 0.5,
-            cell.1 as f32 + 0.5,
-            cell.2 as f32 + 0.5,
-        );
-        let ndc = to_ndc(vp, center).unwrap();
-        let sx = rect.min.x + (ndc.x * 0.5 + 0.5) * rect.width();
-        let sy = rect.min.y + (1.0 - (ndc.y * 0.5 + 0.5)) * rect.height();
-        let hit = marquee_cells(
-            &session,
-            rect,
-            egui::pos2(sx - 4.0, sy - 4.0),
-            egui::pos2(sx + 4.0, sy + 4.0),
-        );
-        assert!(hit.contains(&cell));
-        let click = marquee_cells(&session, rect, egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        assert!(click.is_empty());
-    }
-}
+#[path = "../tests/viewport.rs"]
+mod tests;

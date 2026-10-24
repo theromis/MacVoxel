@@ -94,20 +94,26 @@ failures as `isError: true`. The default revision is `2025-06-18`.
 
 ### Coordinates
 
-Edits apply to the **active object**, in that object's local cells. `x` and `y`
-are horizontal, `z` is up. The object's `translation` from `inspect_document`
-is only where it sits in the window. Palette index `0` is empty and erases a
-cell. Indices `1..255` are colors. A cell must lie in `[-1024, 1024)`. A write
-that would make the active object longer than 256 on any axis is refused and
-changes nothing.
+Edits from the voxel tools apply to the **active object**, in that object's
+**local** cells. `x` and `y` are horizontal, `z` is up. Add the object's
+world `position` (the same three integers as `translation`) to a local cell
+to get its world cell. `add_object` and `set_object` take that world
+position; moving an object moves its voxels in the world and leaves the local
+cells where they are. Bone pivots are world voxel coordinates too. Palette
+index `0` is empty and erases a cell. Indices `1..255` are colors. A cell
+must lie in `[-1024, 1024)`. A write that would make the active object longer
+than 256 on any axis is refused and changes nothing.
 
-`save_file` writes every object. A file that had a scene graph is written
-back with that graph: groups, layers, hidden objects, and animation frames
-after the first stay. Frame 0 takes the edited translation, rotation, name,
-and `_hidden`. Each model is at most 256 cells on an axis. A rotation read
-from the file is baked into the cells for editing and written back as `_r`.
-Resizing that object keeps the rotation. A new document, or a file with no
-scene graph, is saved as one group of objects.
+`save_file` writes every non-empty object. A new object is a normal model:
+its own `SIZE`/`XYZI`, an `nTRN`/`nSHP` pair under the scene group, `_name`
+on the transform, and the world position in that transform, so MagicaVoxel
+opens the parts in place. An object with no voxels is omitted. A file that
+had a scene graph is written back with that graph: groups, layers, hidden
+objects, and animation frames after the first stay. Frame 0 takes the edited
+translation, rotation, name, and `_hidden`. Each model is at most 256 cells
+on an axis. A rotation read from the file is baked into the cells for editing
+and written back as `_r`. Resizing that object keeps the rotation. A new
+document, or a file with no scene graph, is saved as one group of objects.
 `open_file` loads every object. `nTRN` translation and rotation are applied,
 and `_hidden` on a node or an ancestor hides that object in the mesh and the
 tracer. A file with no scene graph still loads its first model.
@@ -119,14 +125,22 @@ tracer. A file with no scene graph still loads its first model.
 | `new_document` | — | Empty document, default palette, cleared path and undo stack |
 | `open_file` | `path` | Open a `.vox`, replacing the session |
 | `save_file` | — | Write every non-empty object. `path` overwrites the open file when omitted |
-| `inspect_document` | — | Path, counts, bounds, objects, palette |
-| `get_voxel` | `x`, `y`, `z` | Palette index of one local cell. `0` is empty |
-| `set_voxel` | `x`, `y`, `z`, `palette` | Write one cell. One undo step |
-| `set_voxels` | `cells` | Write up to 200000 cells as one undo step |
-| `fill_box` | `x0`, `y0`, `z0`, `x1`, `y1`, `z1`, `palette` | Fill an inclusive box, at most 2000000 cells, one undo step |
-| `get_voxels` | `x0`, `y0`, `z0`, `x1`, `y1`, `z1` | Non-empty cells inside an inclusive box, at most 100000 |
-| `set_palette` | `index`, `r`, `g`, `b` or `entries` | Replace one slot, or many via `entries`, as one undo step. `a` defaults to 255 |
-| `set_active_object` | `index` | Edit a different object from `inspect_document` |
+| `inspect_document` | — | Path, counts, world bounds, objects (name and world position), palette, and each slot's motion |
+| `get_voxel` | `x`, `y`, `z` | Palette index of one **local** cell of the active object. `0` is empty |
+| `set_voxel` | `x`, `y`, `z`, `palette` | Write one **local** cell. One undo step |
+| `set_voxels` | `cells` | Write up to 200000 **local** cells as one undo step |
+| `fill_box` | `x0`, `y0`, `z0`, `x1`, `y1`, `z1`, `palette` | Fill an inclusive box of **local** cells, at most 2000000, one undo step |
+| `get_voxels` | `x0`, `y0`, `z0`, `x1`, `y1`, `z1` | Non-empty **local** cells inside an inclusive box, at most 100000 |
+| `set_palette` | `index`, `r`, `g`, `b` or `entries` | Replace one slot, or many via `entries`, as one undo step. `a` defaults to 255. Optional `motion` (`none`, `sway`, `bob`) and `motion_amount` (0..4) |
+| `set_active_object` | `index` | Edit a different object. Later voxel tools use its local cells |
+| `add_object` | — | Empty object. Optional `name`, world `position` `[x, y, z]` (default `[0, 0, 0]`), `size` `[x, y, z]` (capacity hint, each axis 1..=256), `make_active` (default true). Returns the index. One undo step |
+| `set_object` | `index` | Optional `name`, world `position`, `hidden`. Moving changes the scene-graph translation, so voxels move in the world. One undo step |
+| `remove_object` | `index` | Remove the object and its voxels. Its bone stays; the binding goes. Later indices decrease by one. Refuses the last object. One undo step |
+| `add_bone` | `name`, `pivot` | Add a bone. `pivot` is a world voxel coordinate `[x, y, z]`. Optional `parent` (omit or null for a root) and `rotation` quaternion `[x, y, z, w]` (default identity `[0, 0, 0, 1]`). One undo step |
+| `set_bone` | `name` | Optional `parent` (null makes a root; omit leaves it), world `pivot`, `rotation` `[x, y, z, w]`, `rename`. One undo step |
+| `remove_bone` | `name` | Delete a bone. Objects bound to it become unbound. Children keep its parent. One undo step |
+| `bind_object` | `index`, `bone` | Bind an object to one bone, or `bone: null` to unbind. Rigid: one bone, weight 1. One undo step |
+| `list_bones` | — | Each bone's parent, world pivot, quaternion, and the object indices bound to it |
 | `undo` | — | Undo the last edit |
 | `redo` | — | Redo the last undone edit |
 | `render` | `path` | Path-trace the scene to a PNG. `width` and `height` default to 256. `samples` defaults to 16. `bounces` defaults to 4. `denoise` defaults to true. `yaw` defaults to 30°, `pitch` to 25° |
@@ -135,7 +149,12 @@ tracer. A file with no scene graph still loads its first model.
 | `screenshot_region` | `x`, `y`, `width`, `height` | PNG of a rectangle in window points. Connected mode only |
 | `ui_inspect` | — | Previous frame's controls, tool, mode, active object, voxel count, and status. Connected mode only |
 | `ui_click` | `x`, `y` | Click the topmost registered control. A viewport hit stamps the active tool. A slider sets its value from the point. A palette cell selects that slot. Connected mode only |
-| `export_mesh` | `path` | Write a glTF 2.0 `.glb` of every object. `merge` defaults to false. `vertexColors` defaults to false |
+| `export_mesh` | `path` | Write a glTF 2.0 `.glb` of every object. `merge` defaults to false. `vertexColors` defaults to false. A slot with motion adds `TEXCOORD_1` |
+| `set_script` | `source`, optional `object` | Store a Rhai script and read its parameters. One undo step. Does not rebuild voxels |
+| `get_script` | optional `object` | Source, auto flag, and parameters |
+| `set_params` | `values`, optional `object` | Set parameter values by name. One undo step. Does not run the script |
+| `list_params` | optional `object` | Parameters from the last successful run |
+| `regenerate` | optional `object` | Run the script. One undo step. A failure leaves voxels unchanged and names the script line |
 
 `set_voxels` accepts each cell as `{"x","y","z","palette"}` or as
 `[x, y, z, palette]`. A later duplicate of the same coordinate wins. Cells
@@ -145,7 +164,10 @@ that already hold the requested index are not an undo step.
 
 `set_palette` takes either one slot (`index`, `r`, `g`, `b`, optional `a`) or
 `entries`: an array of those objects, at most 256. Pass one form or the other,
-not both. A call that changes nothing does not push undo.
+not both. Optional `motion` is `none`, `sway`, or `bob`. Optional
+`motion_amount` is a number from 0 to 4. Omit either field to leave it.
+A call that changes nothing does not push undo. Motion is stored on the
+slot's material and is one undo step together with the color.
 
 `inspect_document` returns:
 
@@ -154,8 +176,12 @@ not both. A call that changes nothing does not push undo.
   being edited (`null` when empty). Each box is `{min: [x,y,z], max: [x,y,z]}`
 - `unsynced` (always false; edits are already in the window), `canUndo`, `canRedo`
 - `objects`: `index`, `name`, `hidden`, `active`, `model`,
-  `voxels`, local `bounds`, and `translation` `[x,y,z]`
+  `voxels`, local `bounds`, world `position` `[x,y,z]`, and `translation`
+  (the same three integers as `position`). `bone` is the bound bone name, or
+  null. `bounds` is local cells; add `position` for the world box.
 - `palette`: 256 strings, `#rrggbbaa`, index 0 first
+- `motion`: 256 objects `{kind, amount}`, index 0 first. `kind` is `none`,
+  `sway`, or `bob`. `amount` is 0..4 and defaults to 1. `none` is still
 
 A screenshot tool returns a text block with `width`, `height`, and `path`, plus
 an MCP `image` block (`image/png`). `path` also writes that file. Omit it to
@@ -194,12 +220,86 @@ only. Hidden objects are left out. `merge` defaults to false, one quad per
 exposed face. `true` greedy-merges coplanar faces that share a palette slot,
 then splits an edge where a corner of a neighbouring face on a different
 plane or palette slot lands in the open span, so the seam is not a
-T-junction. `vertexColors` defaults to false:
+T-junction. Slots are never merged together, so different motion stays on
+separate faces. `vertexColors` defaults to false:
 one material, a 256-wide palette texture, and each face's UVs point at its
 palette slot. `true` stores a linear `COLOR_0` and no image. The palette
 texture keeps the sRGB bytes. `COLOR_0` is converted with the sRGB transfer
-curve. The file is Y-up, positions `(x, z, −y)`. File → Export Mesh… uses the
-palette texture and always merges. An empty scene is an error.
+curve. When any palette slot has motion, every vertex also gets
+`TEXCOORD_1`: x is the sway amount and y is the bob amount, or 0 for a still
+slot. Godot imports that as UV2. A document with no motion omits
+`TEXCOORD_1`. The file is Y-up, positions `(x, z, −y)`. File → Export Mesh…
+uses the palette texture and always merges. An empty scene is an error.
+
+When the document has a skeleton, `export_mesh` writes a skinned mesh
+instead of a rigid one. Each bone is a joint node (name, translation,
+rotation) parented as in the skeleton. The mesh node carries `skin` 0. That
+skin lists every joint and an `inverseBindMatrices` accessor, the inverse of
+each bone's bind-pose matrix. Every vertex has `JOINTS_0` (one joint index,
+the other three 0) and `WEIGHTS_0` (`[1, 0, 0, 0]`). Binding is rigid: an
+object uses one bone, weight 1. An unbound object follows the skeleton root.
+A merged quad never shares a vertex between two bones; faces are grouped by
+bone before the T-junction split. `TEXCOORD_1` is still written when any slot
+has motion.
+
+`add_object` appends an empty object and returns its index. `position` is
+the world voxel coordinate of local cell `(0, 0, 0)` and defaults to
+`[0, 0, 0]`. `size` is an optional local SIZE box, each axis `1..=256`. It
+does not stop later edits from growing the object up to the 256-per-axis
+limit. `make_active` defaults to true; `false` leaves the previous object
+active, so `fill_box` still edits that one. `set_object` changes the name,
+the world position, or `hidden`. A new position replaces the translation;
+local cells are not rewritten, and the world bounds move by the same offset.
+`remove_object` deletes the object and its voxels. The bone it was bound to
+stays in the skeleton. Object indices after the removed one decrease by one,
+and the reply sets `indicesShifted` with a `note` when that happens. The
+last remaining object cannot be removed.
+
+`add_bone` requires `name` and a world `pivot` `[x, y, z]`. `parent` omitted
+or null is a root. `rotation` is a quaternion `[x, y, z, w]` in voxel space
+and defaults to `[0, 0, 0, 1]`. `set_bone` edits one bone; omit a field to
+leave it, and pass `parent: null` to make it a root. `remove_bone` unbinds
+every object that used that bone and reparents its children to its parent.
+`bind_object` takes an object `index` and `bone` (a name, or null to unbind).
+One object has one bone. `list_bones` returns `parent`, `pivot`, `rotation`,
+and the object indices currently bound to each bone.
+
+A two-part character, headless:
+
+```
+new_document
+set_voxel            x=0 y=0 z=0 palette=1          # body, local cell of object 0
+add_object           name="leg" position=[2, 0, 0]  # becomes active, index 1
+fill_box             x0=0 y0=0 z0=0 x1=0 y1=2 z1=0 palette=2
+add_bone             name="root" pivot=[0, 0, 0]
+add_bone             name="leg" parent="root" pivot=[2, 0, 0]
+bind_object          index=0 bone="root"
+bind_object          index=1 bone="leg"
+export_mesh          path="character.glb"
+```
+
+The body voxel is local to object 0. The leg box is local to the new object,
+so those cells sit at world x = 2. The glTF has joint nodes `root` and
+`leg`, a skin, `inverseBindMatrices`, and `JOINTS_0` / `WEIGHTS_0`.
+
+`set_script` stores `source` on `object` (the active object when `object` is
+omitted) and runs it once only to discover parameters. The voxels stay as
+they were. A script that does not run is still stored, and the error text
+includes the line. `set_params` takes `values`, an object whose keys are
+parameter names. Numbers fill float and int parameters, booleans fill bool
+parameters, and `[r, g, b]` fills a color. Values outside the declared range
+are an error. `list_params` and `get_script` return each parameter as
+`{name, kind, value}` plus `min` and `max` for float and int. `kind` is
+`float`, `int`, `bool`, or `color`.
+
+`regenerate` runs the stored script in the sandbox and, on success, replaces
+every object the script wrote. That is one undo step. A loop that passes the
+operation limit, a call-depth limit, or any other runtime error leaves the
+voxels, palette, and parameters as they were. The error includes the script
+line. Opening a `.vox` never regenerates; call `regenerate` yourself. The
+language and the `MVSC` chunk are described in `docs/scripting.md`.
+`examples/lily_pad.rhai` is a pad with `radius`, `notch`, `direction`, and
+`seed`.
 
 ### What this server does not do
 

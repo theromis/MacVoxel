@@ -1,0 +1,286 @@
+use super::quads::*;
+use super::*;
+use crate::state::{Motion, Session};
+
+#[test]
+fn translated_voxel_shifts_the_vertex_and_the_glb_starts_with_magic() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    session.objects[0].translation = (2, 0, 0);
+    let built = build(&session);
+    let positions: Vec<[f32; 3]> = built
+        .positions
+        .chunks(3)
+        .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+        .collect();
+    assert!(positions.iter().all(|p| p[0] == 2.0 || p[0] == 3.0));
+    assert!(positions.iter().any(|p| p[0] == 2.0));
+    let path = std::env::temp_dir().join("macvoxel-egui-export.glb");
+    let quads = export_glb(&session, &path).unwrap();
+    assert_eq!(quads, 6);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[..4], b"glTF");
+    let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let json = &bytes[20..20 + json_len];
+    assert!(json.windows(10).any(|window| window == b"TEXCOORD_0"));
+    assert!(bytes
+        .windows(8)
+        .any(|window| window == [137, 80, 78, 71, 13, 10, 26, 10]));
+    let u = (1.0_f32 + 0.5) / 256.0;
+    assert!(built.extra.chunks(2).all(|uv| uv[0] == u && uv[1] == 0.5));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn vertex_colors_keep_a_linear_color_attribute() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    let path = std::env::temp_dir().join("macvoxel-egui-export-vertex.glb");
+    export_with(
+        &session,
+        &path,
+        &MeshExport {
+            vertex_colors: true,
+            merge: false,
+        },
+    )
+    .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let json = &bytes[20..20 + json_len];
+    assert!(json.windows(7).any(|window| window == b"COLOR_0"));
+    assert!(!json.windows(10).any(|window| window == b"TEXCOORD_0"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn unmerged_row_keeps_one_quad_per_face() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    session.objects[0].cells.insert((1, 0, 0), 1);
+    let built = build_with(
+        &session,
+        &MeshExport {
+            vertex_colors: false,
+            merge: false,
+        },
+    );
+    assert_eq!(built.indices.len() / 6, 10);
+}
+
+#[test]
+fn unit_rectangle_matches_the_face_winding() {
+    for face in 0..6 {
+        let corners = quad_corners(face, (3, 4, 5), 1, 1);
+        for (i, corner) in corners.iter().enumerate() {
+            assert_eq!(corner[0], 3 + QUADS[face][i][0] as i32);
+            assert_eq!(corner[1], 4 + QUADS[face][i][1] as i32);
+            assert_eq!(corner[2], 5 + QUADS[face][i][2] as i32);
+        }
+    }
+}
+
+#[test]
+fn greedy_merges_a_row_of_one_color() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    session.objects[0].cells.insert((1, 0, 0), 1);
+    assert_eq!(build(&session).indices.len() / 6, 6);
+}
+
+#[test]
+fn different_colors_stay_split() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    session.objects[0].cells.insert((1, 0, 0), 2);
+    assert_eq!(build(&session).indices.len() / 6, 10);
+}
+
+#[test]
+fn a_different_slot_splits_the_long_edge() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    session.objects[0].cells.insert((1, 0, 0), 1);
+    session.objects[0].cells.insert((2, 0, 0), 1);
+    session.objects[0].cells.insert((2, 1, 0), 2);
+    let merged = merged_quads(&session.objects[0].cells, true);
+    let area = |quads: &[GreedyQuad]| {
+        quads
+            .iter()
+            .filter(|quad| quad.face == 4 && quad.slot == 1)
+            .map(|quad| quad.w * quad.h)
+            .sum::<i32>()
+    };
+    assert!(merged
+        .iter()
+        .any(|quad| quad.face == 4 && quad.slot == 1 && quad.w == 3));
+    assert_eq!(area(&merged), 3);
+    let before = merged.len();
+    let split = split_junctions(merged);
+    assert!(split
+        .iter()
+        .filter(|quad| quad.face == 4 && quad.slot == 1)
+        .all(|quad| quad.w < 3));
+    assert_eq!(area(&split), 3);
+    assert!(split.len() > before);
+}
+
+#[test]
+fn hidden_object_is_left_out_of_the_mesh() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    session.objects.push(crate::state::Volume {
+        name: "Hidden".into(),
+        cells: session.objects[0].cells.clone(),
+        translation: (3, 0, 0),
+        box_min: (0, 0, 0),
+        dims: (0, 0, 0),
+        rot: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        pivot: (0, 0, 0),
+        model_dims: (0, 0, 0),
+        hidden: true,
+        file: None,
+        bone: None,
+        script: Default::default(),
+    });
+    assert_eq!(build(&session).indices.len() / 6, 6);
+}
+
+#[test]
+fn empty_scene_is_refused() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    let err = export_glb(&session, Path::new("/tmp/macvoxel-egui-empty.glb")).unwrap_err();
+    assert!(err.contains("Nothing"));
+}
+
+fn glb_json(bytes: &[u8]) -> serde_json::Value {
+    let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let json = &bytes[20..20 + json_len];
+    let end = json
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .unwrap()
+        + 1;
+    serde_json::from_slice(&json[..end]).unwrap()
+}
+
+fn texcoord_1(bytes: &[u8]) -> Vec<[f32; 2]> {
+    let json = glb_json(bytes);
+    let index = json["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"]
+        .as_u64()
+        .expect("TEXCOORD_1") as usize;
+    let accessor = &json["accessors"][index];
+    let view_index = accessor["bufferView"].as_u64().unwrap() as usize;
+    let count = accessor["count"].as_u64().unwrap() as usize;
+    let offset = json["bufferViews"][view_index]["byteOffset"]
+        .as_u64()
+        .unwrap() as usize;
+    let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let bin = 20 + json_len + 8;
+    (0..count)
+        .map(|i| {
+            let at = bin + offset + i * 8;
+            [
+                f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()),
+                f32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()),
+            ]
+        })
+        .collect()
+}
+
+#[test]
+fn still_export_omits_texcoord_1_and_stays_stable() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    let options = MeshExport {
+        vertex_colors: false,
+        merge: true,
+    };
+    let first = super::encode(&session, &options).unwrap();
+    let second = super::encode(&session, &options).unwrap();
+    assert_eq!(first, second);
+    assert!(!first
+        .windows(b"TEXCOORD_1".len())
+        .any(|window| window == b"TEXCOORD_1"));
+    let colored = super::encode(
+        &session,
+        &MeshExport {
+            vertex_colors: true,
+            merge: false,
+        },
+    )
+    .unwrap();
+    assert!(!colored
+        .windows(b"TEXCOORD_1".len())
+        .any(|window| window == b"TEXCOORD_1"));
+    assert!(colored.windows(7).any(|window| window == b"COLOR_0"));
+}
+
+#[test]
+fn motion_writes_texcoord_1_for_each_slot() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    session.objects[0].cells.insert((2, 0, 0), 2);
+    session.materials[1].motion = Motion::Sway;
+    session.materials[1].motion_amount = 1.5;
+    session.materials[2].motion = Motion::Bob;
+    session.materials[2].motion_amount = 0.5;
+    let options = MeshExport {
+        vertex_colors: false,
+        merge: true,
+    };
+    let bytes = super::encode(&session, &options).unwrap();
+    let uvs = texcoord_1(&bytes);
+    assert!(uvs.iter().any(|uv| uv == &[1.5, 0.0]));
+    assert!(uvs.iter().any(|uv| uv == &[0.0, 0.5]));
+    assert!(uvs.iter().all(|uv| *uv == [1.5, 0.0] || *uv == [0.0, 0.5]));
+
+    let colored = super::encode(
+        &session,
+        &MeshExport {
+            vertex_colors: true,
+            merge: false,
+        },
+    )
+    .unwrap();
+    assert!(colored.windows(7).any(|window| window == b"COLOR_0"));
+    let uvs = texcoord_1(&colored);
+    assert!(uvs.iter().any(|uv| uv == &[1.5, 0.0]));
+
+    session
+        .add_bone("root", None, [0.5, 0.0, 0.5], None)
+        .unwrap();
+    let skinned = super::encode(&session, &options).unwrap();
+    assert!(skinned.windows(8).any(|window| window == b"JOINTS_0"));
+    let uvs = texcoord_1(&skinned);
+    assert!(uvs.iter().any(|uv| uv == &[1.5, 0.0]));
+    assert!(uvs.iter().any(|uv| uv == &[0.0, 0.5]));
+}
+
+#[test]
+fn different_motion_stays_on_separate_quads() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    session.objects[0].cells.insert((1, 0, 0), 2);
+    session.materials[1].motion = Motion::Sway;
+    session.materials[2].motion = Motion::Bob;
+    let built = build_with(
+        &session,
+        &MeshExport {
+            vertex_colors: false,
+            merge: true,
+        },
+    );
+    assert_eq!(built.indices.len() / 6, 10);
+}

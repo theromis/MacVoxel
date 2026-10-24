@@ -23,6 +23,8 @@ pub type SharedGpu = Arc<Mutex<SceneGpu>>;
 struct Uniforms {
     view_proj: [[f32; 4]; 4],
     sun: [f32; 4],
+    /// x time in seconds, y 1 when motion preview is on.
+    anim: [f32; 4],
 }
 
 struct GpuMesh {
@@ -140,6 +142,7 @@ impl SceneGpu {
         queue: &wgpu::Queue,
         session: &Session,
         view_proj: Mat4,
+        time: f32,
     ) {
         if session.mesh_epoch != self.epoch {
             self.sync_chunks(device, session);
@@ -150,6 +153,12 @@ impl SceneGpu {
         let uniforms = Uniforms {
             view_proj: view_proj.to_cols_array_2d(),
             sun: [sun.x, sun.y, sun.z, session.sun_intensity],
+            anim: [
+                time,
+                if session.motion_preview { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
         self.sync_hover(device, session);
@@ -173,7 +182,24 @@ impl SceneGpu {
             }
             let next: HashMap<(i32, i32, i32), u64> = buckets
                 .iter()
-                .map(|(key, listed)| (*key, mesh::occupancy_hash(listed)))
+                .map(|(key, listed)| {
+                    let mut hash = mesh::occupancy_hash(listed);
+                    for (cell, slot) in &object.cells {
+                        if mesh::chunk_key(*cell) != *key {
+                            continue;
+                        }
+                        let uv = session.motion_uv(*slot);
+                        if uv == [0.0, 0.0] {
+                            continue;
+                        }
+                        hash = hash.wrapping_add(
+                            (cell.0 as u64).wrapping_mul(0x9E37_79B1)
+                                ^ (uv[0].to_bits() as u64)
+                                ^ (uv[1].to_bits() as u64).wrapping_mul(0xC2B2_AE3D),
+                        );
+                    }
+                    (*key, hash)
+                })
                 .collect();
             let previous: HashMap<(i32, i32, i32), u64> = self
                 .chunks
@@ -186,8 +212,12 @@ impl SceneGpu {
                 let full = (index, key.0, key.1, key.2);
                 match next.get(&key).copied() {
                     Some(hash) => {
-                        let mut built =
-                            mesh::mesh_chunk(&object.cells, key, |slot| session.color(slot));
+                        let mut built = mesh::mesh_chunk(
+                            &object.cells,
+                            key,
+                            |slot| session.color(slot),
+                            |slot| session.motion_uv(slot),
+                        );
                         mesh::translate_mesh(&mut built, object.translation);
                         if built.is_empty() {
                             self.chunks.remove(&full);
@@ -401,6 +431,11 @@ fn make_pipeline(
                         offset: 24,
                         shader_location: 2,
                     },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 36,
+                        shader_location: 3,
+                    },
                 ],
             }],
         },
@@ -449,6 +484,7 @@ const SHADER: &str = r#"
 struct Uniforms {
     view_proj: mat4x4<f32>,
     sun: vec4<f32>,
+    anim: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -456,6 +492,7 @@ struct In {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
+    @location(3) motion: vec4<f32>,
 }
 struct Out {
     @builtin(position) clip: vec4<f32>,
@@ -472,7 +509,12 @@ fn to_linear(c: vec3<f32>) -> vec3<f32> {
 @vertex
 fn vs_main(i: In) -> Out {
     var o: Out;
-    o.clip = u.view_proj * vec4<f32>(i.pos, 1.0);
+    // Sway bends along x and grows with height above the object base.
+    // Bob moves the vertex up and down. anim.y is 0 unless preview is on.
+    let sway = sin(u.anim.x * 1.8) * i.motion.x * i.motion.z * 0.05 * u.anim.y;
+    let bob = sin(u.anim.x * 2.4) * i.motion.y * 0.15 * u.anim.y;
+    let pos = i.pos + vec3<f32>(sway, bob, 0.0);
+    o.clip = u.view_proj * vec4<f32>(pos, 1.0);
     o.normal = i.normal;
     o.color = i.color;
     return o;

@@ -1,18 +1,21 @@
 # MacVoxel
 
 The editor is the Rust crate at the repository root. `cargo run` opens it.
-The binary is `macvoxel-egui`. The Swift/Metal app is in `legacy/` and is not
+The binary is `macvoxel`. The Swift/Metal app is in `legacy/` and is not
 linked.
 
 ## Layout
 
-`src/main.rs` is the window. `state.rs` holds the document, tools, and `.vox`
-load/save. `viewport.rs` is orbit and pointer input. `panels.rs` is the side
-UI. `tools.rs` is brush, shapes, and generators. `mesh.rs` and `gpu.rs` draw
-the edit-mode mesh. `trace.rs` is the CPU path tracer and the scene packer.
-`trace_gpu.rs` is the wgpu compute tracer used by Render mode. `export.rs`
-writes glTF. `native_menu.rs` is the macOS menu. `mcp.rs`, `remote.rs`, and
-`control.rs` are the MCP server and the `--control` port.
+`src/main.rs` is the window. `state/` is the session: `document` (palette and
+camera), `files` (open and save), `objects` (bones and undo), `pointer`,
+`selection`, `drag`, `pick`, `geom`, and `vox/` (`.vox` read, write, and the
+rig chunk). `viewport.rs` is orbit and pointer input. `panels/` is the side
+UI. `tools/` is brush shapes and generators. `mesh.rs` and `gpu.rs` draw the
+edit-mode mesh. `trace/` is the CPU path tracer. `trace_gpu.rs` plus
+`trace.wgsl` and `blit.wgsl` are the wgpu tracer used by Render mode.
+`export/` writes glTF. `native_menu.rs` is the macOS menu. `mcp.rs`,
+`remote.rs`, and `control.rs` are the MCP server and the `--control` port.
+Unit tests live in `tests/` and are included from the module they cover.
 
 ## .vox
 
@@ -35,7 +38,7 @@ linear. MCP `export_mesh` leaves merge off unless the caller sets it.
 
 ## Render
 
-Render mode dispatches the compute shader in `trace_gpu.rs`. It is not
+Render mode dispatches the compute shader in `trace.wgsl`. It is not
 `legacy/src/PathTrace.metal`. The CPU tracer is the fallback and the tested
 algorithm. Save Render writes the accumulated frame, not an offline sample
 count. The Denoise checkbox is a small edge-aware filter. OIDN stays in the
@@ -44,7 +47,7 @@ legacy app.
 ## Tests
 
 ```sh
-cargo test --offline --bin macvoxel-egui -- --skip ping_round_trips
+cargo test --offline --bin macvoxel -- --skip ping_round_trips
 ```
 
 `ping_round_trips_with_the_token` needs a socket the sandbox does not allow.

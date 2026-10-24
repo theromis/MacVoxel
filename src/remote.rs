@@ -34,12 +34,13 @@ fn render_scene(session: &mut Session, params: &Value) -> Result<Value, String> 
             return Err("distance is out of range".into());
         }
     }
-    let voxels = session.objects.iter().filter(|object| !object.hidden).fold(
-        0usize,
-        |count, object| {
+    let voxels = session
+        .objects
+        .iter()
+        .filter(|object| !object.hidden)
+        .fold(0usize, |count, object| {
             count + object.cells.values().filter(|slot| **slot != 0).count()
-        },
-    );
+        });
     if voxels == 0 {
         return Err("document has no voxels".into());
     }
@@ -196,6 +197,49 @@ pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Valu
             session.select_object(index as usize);
             Ok(json!({"activeObject": session.selected}))
         }
+        "object.add" => {
+            let name = opt_str(&params, "name")?;
+            let position = opt_ivec3(&params, "position")?.unwrap_or([0, 0, 0]);
+            let size = opt_ivec3(&params, "size")?;
+            let make_active = opt_bool(&params, "make_active")?.unwrap_or(true);
+            let index = session.add_object(name.as_deref(), position, size, make_active)?;
+            Ok(json!({
+                "index": index,
+                "name": session.objects[index].name,
+                "position": position,
+                "activeObject": session.selected,
+            }))
+        }
+        "object.set" => {
+            let index = object_index(&params, session)?;
+            let name = opt_str(&params, "name")?;
+            let position = opt_ivec3(&params, "position")?;
+            let hidden = opt_bool(&params, "hidden")?;
+            session.set_object(index, name.as_deref(), position, hidden)?;
+            let object = &session.objects[index];
+            Ok(json!({
+                "index": index,
+                "name": object.name,
+                "position": [object.translation.0, object.translation.1, object.translation.2],
+                "hidden": object.hidden,
+            }))
+        }
+        "object.remove" => {
+            let index = object_index(&params, session)?;
+            let count = session.objects.len();
+            session.remove_object(index)?;
+            let shifted = index + 1 < count;
+            let mut body = json!({
+                "removed": index,
+                "objectCount": session.objects.len(),
+                "activeObject": session.selected,
+                "indicesShifted": shifted,
+            });
+            if shifted {
+                body["note"] = json!(format!("object indices after {index} decreased by 1"));
+            }
+            Ok(body)
+        }
         "edit.undo" => {
             if !session.can_undo() {
                 return Err("nothing to undo".into());
@@ -247,6 +291,66 @@ pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Valu
         }
         "rig.list" => Ok(bones_json(session)),
         "render" => render_scene(session, &params),
+        "script.set" => {
+            let index = script_index(session, &params)?;
+            let source = req_str(&params, "source")?;
+            session.set_script(index, &source)?;
+            Ok(script_json(session, index))
+        }
+        "script.get" => {
+            let index = script_index(session, &params)?;
+            Ok(script_json(session, index))
+        }
+        "script.params" => {
+            let index = script_index(session, &params)?;
+            let values = params
+                .get("values")
+                .and_then(Value::as_object)
+                .ok_or("values must be an object")?;
+            let mut updates = Vec::new();
+            for (name, value) in values {
+                let Some(spec) = session.objects[index]
+                    .script
+                    .params
+                    .iter()
+                    .find(|param| param.name == *name)
+                else {
+                    return Err(format!("unknown parameter `{name}`"));
+                };
+                let parsed = crate::script::parse_param(&spec.value, value)
+                    .map_err(|err| format!("`{name}`: {err}"))?;
+                updates.push((name.clone(), parsed));
+            }
+            session.set_script_params(index, &updates)?;
+            Ok(serde_json::json!({
+                "params": session.objects[index]
+                    .script
+                    .params
+                    .iter()
+                    .map(crate::script::param_json)
+                    .collect::<Vec<_>>()
+            }))
+        }
+        "script.params.list" => {
+            let index = script_index(session, &params)?;
+            Ok(serde_json::json!({
+                "params": session.objects[index]
+                    .script
+                    .params
+                    .iter()
+                    .map(crate::script::param_json)
+                    .collect::<Vec<_>>()
+            }))
+        }
+        "script.regenerate" => {
+            let index = script_index(session, &params)?;
+            session.regenerate_script(index)?;
+            Ok(serde_json::json!({
+                "object": index,
+                "voxels": session.objects[index].cells.len(),
+                "objects": session.objects.len(),
+            }))
+        }
         "mesh.export" => {
             let path = req_str(&params, "path")?;
             let merge = opt_bool(&params, "merge")?.unwrap_or(false);
@@ -292,8 +396,11 @@ const METHODS: &[(&str, &str, &str)] = &[
     ("voxel.set_many", "cells", "Write up to 200000 cells as one undo step"),
     ("voxel.fill", "x0, y0, z0, x1, y1, z1, palette", "Fill an inclusive box, at most 2000000 cells"),
     ("voxel.get_box", "x0, y0, z0, x1, y1, z1", "Non-empty cells inside an inclusive box, at most 100000"),
-    ("palette.set", "index, r, g, b, a? | entries", "Replace one slot, or many, as one undo step"),
-    ("object.set_active", "index", "Edit a different object"),
+    ("palette.set", "index, r, g, b, a?, motion?, motion_amount? | entries", "Replace one slot, or many, as one undo step"),
+    ("object.set_active", "index", "Edit a different object. Voxel coordinates stay local to it"),
+    ("object.add", "name?, position?, size?, make_active?", "Empty object at a world position. Active unless make_active is false"),
+    ("object.set", "index, name?, position?, hidden?", "Rename, move, or hide. position is world voxels; local cells stay put"),
+    ("object.remove", "index", "Remove an object and its voxels. Later indices shift. The last object stays"),
     ("edit.undo", "", "Undo the last edit"),
     ("edit.redo", "", "Redo the last undone edit"),
     (
@@ -305,6 +412,31 @@ const METHODS: &[(&str, &str, &str)] = &[
         "mesh.export",
         "path, merge?, vertexColors?",
         "Write a glTF 2.0 .glb of every object. merge defaults to false. vertexColors defaults to false (palette texture). A skeleton writes a rigid skin.",
+    ),
+    (
+        "script.set",
+        "source, object?",
+        "Store a script on an object and read its parameters. One undo step. A script that fails to run is kept, and the voxels stay as they were. The error includes the script line.",
+    ),
+    (
+        "script.get",
+        "object?",
+        "Script source, auto flag, and parameters. object defaults to the active object.",
+    ),
+    (
+        "script.params",
+        "values, object?",
+        "Set parameter values by name. One undo step. Does not run the script.",
+    ),
+    (
+        "script.params.list",
+        "object?",
+        "Parameters declared by the last successful run.",
+    ),
+    (
+        "script.regenerate",
+        "object?",
+        "Run the script and replace the objects it writes. One undo step. A limit or runtime error leaves the document as it was and includes the script line.",
     ),
     ("rig.add", "name, pivot, parent?, rotation?", "Add a bone. rotation is [x, y, z, w]"),
     ("rig.set", "name, parent?, pivot?, rotation?, rename?", "Change a bone. parent null makes a root"),
@@ -344,6 +476,7 @@ fn inspect(session: &Session) -> Value {
                 "model": index,
                 "voxels": object.cells.len(),
                 "bounds": bounds_json(object.cells.keys().copied()),
+                "position": [object.translation.0, object.translation.1, object.translation.2],
                 "translation": [object.translation.0, object.translation.1, object.translation.2],
                 "bone": object.bone,
             })
@@ -367,6 +500,10 @@ fn inspect(session: &Session) -> Value {
         "objects": objects,
         "bones": bone_rows(session),
         "palette": (0..256).map(|i| hex_color(session.palette[i])).collect::<Vec<_>>(),
+        "motion": (0..256).map(|i| {
+            let material = session.materials[i];
+            json!({"kind": material.motion.as_str(), "amount": material.motion_amount})
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -440,7 +577,35 @@ fn read_cell(value: &Value) -> Result<(i32, i32, i32, i32), String> {
     ))
 }
 
-fn palette_slots(params: &Value) -> Result<Vec<(u8, [u8; 4])>, String> {
+fn script_index(session: &Session, params: &Value) -> Result<usize, String> {
+    match params.get("object") {
+        None | Some(Value::Null) => Ok(session
+            .selected
+            .min(session.objects.len().saturating_sub(1))),
+        Some(value) => {
+            let index = value.as_i64().ok_or("object must be an integer")?;
+            if index < 0 || index as usize >= session.objects.len() {
+                return Err(format!(
+                    "object index {index} is out of range ({} objects)",
+                    session.objects.len()
+                ));
+            }
+            Ok(index as usize)
+        }
+    }
+}
+
+fn script_json(session: &Session, index: usize) -> Value {
+    let script = &session.objects[index].script;
+    json!({
+        "object": index,
+        "source": script.source,
+        "auto": script.auto,
+        "params": script.params.iter().map(crate::script::param_json).collect::<Vec<_>>(),
+    })
+}
+
+fn palette_slots(params: &Value) -> Result<Vec<crate::state::PaletteChange>, String> {
     let one = params.get("index").is_some();
     let many = params.get("entries").is_some();
     if one == many {
@@ -463,7 +628,7 @@ fn palette_slots(params: &Value) -> Result<Vec<(u8, [u8; 4])>, String> {
     Ok(slots)
 }
 
-fn one_slot(value: &Value) -> Result<(u8, [u8; 4]), String> {
+fn one_slot(value: &Value) -> Result<crate::state::PaletteChange, String> {
     let index = req_i32(value, "index")?;
     if !(0..=255).contains(&index) {
         return Err("palette index must be 0..255".into());
@@ -475,7 +640,28 @@ fn one_slot(value: &Value) -> Result<(u8, [u8; 4]), String> {
         None => 255,
         Some(_) => byte(value, "a")?,
     };
-    Ok((index as u8, [r, g, b, a]))
+    let motion = match value.get("motion") {
+        None => None,
+        Some(found) => {
+            let text = found.as_str().ok_or("motion must be none, sway, or bob")?;
+            Some(crate::state::Motion::parse(text).ok_or("motion must be none, sway, or bob")?)
+        }
+    };
+    let amount = match opt_f64(value, "motion_amount")? {
+        None => None,
+        Some(number) => {
+            if !(0.0..=4.0).contains(&number) {
+                return Err("motion_amount is out of range".into());
+            }
+            Some(number as f32)
+        }
+    };
+    Ok(crate::state::PaletteChange {
+        index: index as u8,
+        rgba: [r, g, b, a],
+        motion,
+        amount,
+    })
 }
 
 fn byte(value: &Value, key: &str) -> Result<u8, String> {
@@ -515,6 +701,48 @@ fn opt_f64(value: &Value, key: &str) -> Result<Option<f64>, String> {
             Ok(Some(number))
         }
     }
+}
+
+fn object_index(params: &Value, session: &Session) -> Result<usize, String> {
+    let index = req_i32(params, "index")?;
+    if index < 0 || index as usize >= session.objects.len() {
+        return Err(format!(
+            "object index {index} is out of range ({} objects)",
+            session.objects.len()
+        ));
+    }
+    Ok(index as usize)
+}
+
+fn opt_ivec3(value: &Value, key: &str) -> Result<Option<[i32; 3]>, String> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(found) => Ok(Some(ivec3(found, key)?)),
+    }
+}
+
+fn ivec3(value: &Value, key: &str) -> Result<[i32; 3], String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| format!("{key} must be [x, y, z]"))?;
+    if items.len() != 3 {
+        return Err(format!("{key} must be [x, y, z]"));
+    }
+    let mut out = [0; 3];
+    for (axis, item) in items.iter().enumerate() {
+        let number = if let Some(number) = item.as_i64() {
+            number
+        } else if let Some(number) = item.as_f64() {
+            if !number.is_finite() || number.fract() != 0.0 {
+                return Err(format!("{key} must be integer voxel coordinates"));
+            }
+            number as i64
+        } else {
+            return Err(format!("{key} must be integer voxel coordinates"));
+        };
+        out[axis] = i32::try_from(number).map_err(|_| format!("{key} is out of range"))?;
+    }
+    Ok(out)
 }
 
 fn opt_bool(value: &Value, key: &str) -> Result<Option<bool>, String> {
@@ -573,7 +801,8 @@ fn bind_name(value: &Value) -> Result<Option<String>, String> {
 
 fn req_vec3(value: &Value, key: &str) -> Result<[f32; 3], String> {
     let found = value.get(key).ok_or_else(|| format!("missing {key}"))?;
-    as_vec(found, 3).ok_or_else(|| format!("{key} must be [x, y, z]"))
+    as_vec(found, 3)
+        .ok_or_else(|| format!("{key} must be [x, y, z]"))
         .map(|v| [v[0], v[1], v[2]])
 }
 
@@ -708,76 +937,5 @@ pub fn base64_encode(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn set_voxel_undoes_and_a_region_png_crops() {
-        let mut session = Session::new();
-        session.replace_empty();
-        apply(
-            &mut session,
-            "voxel.set",
-            &json!({"x": 1, "y": 2, "z": 3, "palette": 4}),
-        )
-        .unwrap();
-        let got = apply(&mut session, "voxel.get", &json!({"x": 1, "y": 2, "z": 3})).unwrap();
-        assert_eq!(got["palette"], 4);
-        apply(&mut session, "edit.undo", &json!({})).unwrap();
-        let got = apply(&mut session, "voxel.get", &json!({"x": 1, "y": 2, "z": 3})).unwrap();
-        assert_eq!(got["palette"], 0);
-        let err = apply(&mut session, "ui.screenshot", &json!({})).unwrap_err();
-        assert!(err.contains("--control"));
-
-        let pixels = [
-            [255, 0, 0, 255],
-            [0, 255, 0, 255],
-            [0, 0, 255, 255],
-            [1, 2, 3, 4],
-        ];
-        let (png, w, h) = png_region(&pixels, 2, 2, Some((1, 0, 1, 2))).unwrap();
-        assert_eq!((w, h), (1, 2));
-        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
-    }
-
-    #[test]
-    fn export_mesh_writes_a_palette_texture() {
-        let mut session = Session::new();
-        session.replace_empty();
-        apply(
-            &mut session,
-            "voxel.set",
-            &json!({"x": 0, "y": 0, "z": 0, "palette": 4}),
-        )
-        .unwrap();
-        apply(
-            &mut session,
-            "voxel.set",
-            &json!({"x": 1, "y": 0, "z": 0, "palette": 4}),
-        )
-        .unwrap();
-        let path = std::env::temp_dir().join("macvoxel-egui-mcp-export.glb");
-        let got = apply(
-            &mut session,
-            "mesh.export",
-            &json!({"path": path.display().to_string()}),
-        )
-        .unwrap();
-        assert_eq!(got["quads"], 10);
-        assert_eq!(got["merge"], false);
-        assert_eq!(got["vertexColors"], false);
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(&bytes[..4], b"glTF");
-        let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-        let json = &bytes[20..20 + json_len];
-        assert!(json.windows(10).any(|window| window == b"TEXCOORD_0"));
-        let merged = apply(
-            &mut session,
-            "mesh.export",
-            &json!({"path": path.display().to_string(), "merge": true}),
-        )
-        .unwrap();
-        assert_eq!(merged["quads"], 6);
-        let _ = std::fs::remove_file(path);
-    }
-}
+#[path = "../tests/remote.rs"]
+mod tests;
