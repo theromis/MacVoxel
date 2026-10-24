@@ -847,18 +847,10 @@ fn pad(buf: &mut Vec<u8>, fill: u8) {
     }
 }
 
-/// Palette texture, greedy-merged. The menu export uses this.
+/// The menu export, with the options from the Export panel. A new session
+/// writes a palette texture, greedy-merged.
 pub fn export_glb(session: &Session, path: &Path) -> Result<u32, String> {
-    export_with(
-        session,
-        path,
-        &MeshExport {
-            vertex_colors: false,
-            merge: true,
-            export_hidden: false,
-            split_objects: false,
-        },
-    )
+    export_with(session, path, &session.export)
 }
 
 /// Write a `.glb` and return the quad count. An empty scene is an error

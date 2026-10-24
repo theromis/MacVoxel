@@ -1680,3 +1680,141 @@ fn edit_speed_of_a_256_object() {
          extrude 128×128 {extrude_ms} ms, mesh {extrude_mesh_ms} ms ({extrude_quads} quads)"
     );
 }
+
+#[test]
+fn panel_actions_hide_mirror_and_set_export_options() {
+    let mut session = Session::new();
+    session.replace_empty();
+    session.active_mut().cells.insert((1, 0, 0), 5);
+    let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0));
+    let press = |session: &mut Session, action: UiAction| {
+        session.ui_regions.clear();
+        session.note_ui("test", "Test", rect, action);
+        let hit = session.ui_target(1.0, 1.0).unwrap();
+        session.activate_ui(&hit, None)
+    };
+    press(&mut session, UiAction::ObjectHidden(0)).unwrap();
+    assert!(session.objects[0].hidden);
+    session.undo();
+    assert!(!session.objects[0].hidden);
+
+    session.active_mut().name = "arm_l".into();
+    press(&mut session, UiAction::Mirror(0)).unwrap();
+    assert_eq!(session.objects.len(), 2);
+    assert_eq!(session.selected, 1);
+    assert_eq!(session.objects[1].name, "arm_r");
+    let world: Vec<i32> = session.objects[1]
+        .cells
+        .keys()
+        .map(|cell| cell.0 + session.objects[1].translation.0)
+        .collect();
+    assert_eq!(world, vec![-2]);
+    session.undo();
+    assert_eq!(session.objects.len(), 1);
+
+    press(&mut session, UiAction::Export(ExportFlag::Split)).unwrap();
+    press(&mut session, UiAction::Export(ExportFlag::Merge)).unwrap();
+    assert!(session.export.split_objects);
+    assert!(!session.export.merge);
+    press(&mut session, UiAction::ShowBones).unwrap();
+    assert!(session.show_bones);
+    assert!(press(&mut session, UiAction::KeyPose).is_err());
+}
+
+#[test]
+fn a_panel_drag_is_one_undo_step() {
+    let mut session = Session::new();
+    session.replace_empty();
+    session.active_mut().cells.insert((0, 0, 0), 5);
+    let start = session.objects[0].translation;
+    session.begin_gesture();
+    for x in 1..=3 {
+        session.set_object(0, None, Some([x, 0, 0]), None).unwrap();
+    }
+    session.end_gesture();
+    assert_eq!(session.objects[0].translation.0, 3);
+    session.undo();
+    assert_eq!(session.objects[0].translation, start);
+    assert!(!session.can_undo());
+}
+
+#[test]
+fn key_pose_keys_the_bind_rotation_times_the_pose() {
+    let mut session = Session::new();
+    session.replace_empty();
+    let half = std::f32::consts::FRAC_1_SQRT_2;
+    session
+        .add_bone("root", None, [0.0, 0.0, 0.0], Some([0.0, 0.0, half, half]))
+        .unwrap();
+    session.add_bone("tip", Some("root"), [0.0, 0.0, 4.0], None).unwrap();
+    let turn = crate::rig::BonePose {
+        rotation: [half, 0.0, 0.0, half],
+        scale: [1.0, 2.0, 1.0],
+    };
+    session.set_bone_pose(0, turn).unwrap();
+    session.selected_bone = Some(1);
+    session.add_drafted_clip().unwrap();
+    assert_eq!(session.clips[0].name, "Clip 1");
+    session.clip_time = 0.5;
+    assert_eq!(session.key_pose().unwrap(), 2);
+    let clip = &session.clips[0];
+    let root = clip.tracks.iter().find(|track| track.bone == "root").unwrap();
+    let want = (glam::Quat::from_array([0.0, 0.0, half, half])
+        * glam::Quat::from_array(turn.rotation))
+    .normalize();
+    let got = glam::Quat::from_array(root.keys[0].rotation.unwrap());
+    assert!(got.dot(want).abs() > 0.9999);
+    assert_eq!(root.keys[0].scale, [1.0, 2.0, 1.0]);
+    let tip = clip.tracks.iter().find(|track| track.bone == "tip").unwrap();
+    assert_eq!(tip.keys[0].rotation, None);
+
+    // A second key at the same time replaces the first; another time adds one.
+    session.key_pose().unwrap();
+    session.clip_time = 1.0;
+    session.key_pose().unwrap();
+    assert_eq!(session.clips[0].tracks[0].keys.len(), 2);
+    // Both bones keyed in one press are one undo step.
+    session.undo();
+    assert!(session.clips[0].tracks.iter().all(|track| track.keys.len() == 1));
+}
+
+#[test]
+fn rounded_box_generator_matches_fill_rounded_box() {
+    let gen = crate::tools::Gen {
+        kind: GeneratorKind::RoundedBox,
+        round_radius: 2.5,
+        palette: 3,
+        ..Default::default()
+    };
+    let mut drawn: Vec<Cell> = crate::tools::generate((0, 0, 0), (5, 6, 7), &gen)
+        .into_iter()
+        .map(|(cell, _)| cell)
+        .collect();
+    drawn.sort();
+    let mut session = Session::new();
+    session.replace_empty();
+    session.active_mut().cells.clear();
+    crate::remote::apply(
+        &mut session,
+        "voxel.rounded",
+        &serde_json::json!({"x0": 0, "y0": 0, "z0": 0, "x1": 5, "y1": 6, "z1": 7, "palette": 3, "radius": 2.5}),
+    )
+    .unwrap();
+    let mut filled: Vec<Cell> = session.active().cells.keys().copied().collect();
+    filled.sort();
+    assert!(!drawn.is_empty());
+    assert!(drawn.len() < 6 * 7 * 8);
+    assert_eq!(drawn, filled);
+}
+
+#[test]
+fn the_export_dialog_names_its_options() {
+    let mut session = Session::new();
+    assert_eq!(
+        session.export_summary(),
+        "Export Mesh — glTF binary (.glb): merged faces, palette texture"
+    );
+    session.export.split_objects = true;
+    session.export.vertex_colors = true;
+    assert!(session.export_summary().ends_with("vertex colors, one mesh per object"));
+}

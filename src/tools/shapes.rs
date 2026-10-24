@@ -6,6 +6,30 @@ use crate::state::Cell;
 
 use super::*;
 
+/// The bevel actually used for a box of `dims`: at most half the shortest side.
+pub fn rounded_radius(radius: f64, dims: [f64; 3]) -> f64 {
+    radius.min(dims[0].min(dims[1]).min(dims[2]) * 0.5)
+}
+
+/// Whether `point` lies in the box `min..max` with edges rounded by
+/// `radius`: its distance to the box inset by `radius` is at most `radius`.
+pub fn rounded_inside(point: [f64; 3], min: [f64; 3], max: [f64; 3], radius: f64) -> bool {
+    let mut dist2 = 0.0;
+    for axis in 0..3 {
+        let low = min[axis] + radius;
+        let high = max[axis] - radius;
+        let delta = if point[axis] < low {
+            low - point[axis]
+        } else if point[axis] > high {
+            point[axis] - high
+        } else {
+            0.0
+        };
+        dist2 += delta * delta;
+    }
+    dist2 <= radius * radius + 1.0e-9
+}
+
 pub fn bresenham(a: Cell, b: Cell) -> Vec<Cell> {
     let (mut x, mut y, mut z) = a;
     let dx = (b.0 - a.0).abs();

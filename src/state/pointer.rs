@@ -487,6 +487,7 @@ impl Session {
             apex_at_max: self.apex_at_max,
             palette: self.active_slot,
             torus_tube: self.torus_tube,
+            round_radius: self.round_radius,
             helix_turns: self.helix_turns,
             helix_radius: self.helix_radius,
             helix_tube: self.helix_tube,

@@ -444,6 +444,7 @@ impl Session {
     pub fn export_mesh_dialog(&mut self) {
         let name = format!("{}.glb", self.active().name);
         let Some(path) = rfd::FileDialog::new()
+            .set_title(self.export_summary())
             .add_filter("glTF", &["glb"])
             .set_file_name(name)
             .save_file()
@@ -461,6 +462,26 @@ impl Session {
             }
             Err(err) => self.status = err,
         }
+    }
+
+    /// The export dialog's message: what kind of file, with the Export panel options.
+    pub fn export_summary(&self) -> String {
+        let options = &self.export;
+        let mut parts = vec![
+            if options.merge { "merged faces" } else { "unmerged faces" },
+            if options.vertex_colors {
+                "vertex colors"
+            } else {
+                "palette texture"
+            },
+        ];
+        if options.split_objects {
+            parts.push("one mesh per object");
+        }
+        if options.export_hidden {
+            parts.push("hidden objects included");
+        }
+        format!("Export Mesh — glTF binary (.glb): {}", parts.join(", "))
     }
 
     /// Queue a PNG of the Render-mode frame. The file is written once the
@@ -599,6 +620,30 @@ impl Session {
                 }
                 self.delete_object();
             }
+            UiAction::ObjectHidden(index) => {
+                let hidden = !self.objects.get(index).ok_or("no such object")?.hidden;
+                self.set_object(index, None, None, Some(hidden))?;
+            }
+            UiAction::Mirror(axis) => {
+                self.mirror_selected(axis)?;
+            }
+            UiAction::MirrorBones => self.mirror_bones = !self.mirror_bones,
+            UiAction::ClearPose => self.clear_pose(),
+            UiAction::AddClip => self.add_drafted_clip()?,
+            UiAction::KeyPose => {
+                self.key_pose()?;
+            }
+            UiAction::RemoveClip => self.remove_selected_clip()?,
+            UiAction::ShowBones => self.show_bones = !self.show_bones,
+            UiAction::Export(flag) => {
+                let value = match flag {
+                    ExportFlag::Merge => &mut self.export.merge,
+                    ExportFlag::VertexColors => &mut self.export.vertex_colors,
+                    ExportFlag::Hidden => &mut self.export.export_hidden,
+                    ExportFlag::Split => &mut self.export.split_objects,
+                };
+                *value = !*value;
+            }
             UiAction::Palette(slot) => self.select_palette_slot(slot, false),
             UiAction::Slider(spec) => {
                 let (x, _) = at.ok_or("slider click needs a point")?;
@@ -632,6 +677,7 @@ impl Session {
             SliderTarget::FoliageSeed => self.foliage_seed = whole.clamp(1, 255),
             SliderTarget::FoliageDensity => self.foliage_density = value.clamp(0.0, 1.0),
             SliderTarget::TorusTube => self.torus_tube = value.clamp(0.05, 1.0),
+            SliderTarget::RoundRadius => self.round_radius = value.clamp(0.0, 32.0),
             SliderTarget::NoiseScale => self.noise_scale = value.clamp(1.0, 64.0),
             SliderTarget::NoiseThreshold => self.noise_threshold = value.clamp(0.0, 1.0),
             SliderTarget::NoiseOctaves => self.noise_octaves = whole.clamp(1, 6),

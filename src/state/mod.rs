@@ -87,6 +87,7 @@ pub enum FaceWith {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GeneratorKind {
     Ellipsoid,
+    RoundedBox,
     Cylinder,
     Cone,
     Pyramid,
@@ -101,6 +102,7 @@ impl GeneratorKind {
     pub fn name(self) -> &'static str {
         match self {
             GeneratorKind::Ellipsoid => "Ellipsoid",
+            GeneratorKind::RoundedBox => "Rounded box",
             GeneratorKind::Cylinder => "Cylinder",
             GeneratorKind::Cone => "Cone",
             GeneratorKind::Pyramid => "Pyramid",
@@ -331,9 +333,29 @@ pub enum UiAction {
     NewObject,
     Duplicate,
     DeleteObject,
+    /// Show or hide one object.
+    ObjectHidden(usize),
+    /// Mirror the active object across x, y, or z (0, 1, 2).
+    Mirror(usize),
+    MirrorBones,
+    ClearPose,
+    AddClip,
+    KeyPose,
+    RemoveClip,
+    ShowBones,
+    Export(ExportFlag),
     Viewport,
     Palette(u8),
     Slider(SliderSpec),
+}
+
+/// A checkbox in the Export panel.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ExportFlag {
+    Merge,
+    VertexColors,
+    Hidden,
+    Split,
 }
 
 /// A slider `ui_click` can set. `min` and `max` match the widget range.
@@ -350,6 +372,7 @@ pub enum SliderTarget {
     FoliageSeed,
     FoliageDensity,
     TorusTube,
+    RoundRadius,
     NoiseScale,
     NoiseThreshold,
     NoiseOctaves,
@@ -400,6 +423,7 @@ impl SliderTarget {
             SliderTarget::FoliageSeed => "slider.foliage-seed",
             SliderTarget::FoliageDensity => "slider.foliage-density",
             SliderTarget::TorusTube => "slider.torus-tube",
+            SliderTarget::RoundRadius => "slider.round-radius",
             SliderTarget::NoiseScale => "slider.noise-scale",
             SliderTarget::NoiseThreshold => "slider.noise-threshold",
             SliderTarget::NoiseOctaves => "slider.noise-octaves",
@@ -544,6 +568,8 @@ pub struct Session {
     pub gen_axis: Axis,
     pub apex_at_max: bool,
     pub torus_tube: f32,
+    /// Edge bevel of the Rounded box generator, in voxels.
+    pub round_radius: f32,
     pub tree_depth: i32,
     pub tree_wildness: f32,
     pub tree_trunk: f32,
@@ -593,8 +619,19 @@ pub struct Session {
     pub selected_bone: Option<usize>,
     /// Parallel rays for a still. The window leaves this false.
     pub orthographic: bool,
-    /// Draw joints on a still PNG. The window draws them whenever a skeleton exists.
+    /// Draw joints on a still PNG and on Save render. The viewport draws
+    /// them whenever a skeleton exists.
     pub show_bones: bool,
+    /// Clip highlighted in the Clips panel. Not part of undo.
+    pub selected_clip: Option<usize>,
+    /// Name typed for the next clip.
+    pub clip_draft: String,
+    /// Time in seconds that Key pose writes.
+    pub clip_time: f32,
+    /// Mirror copies the bound bone subtree too.
+    pub mirror_bones: bool,
+    /// Options for File > Export Mesh.
+    pub export: crate::export::MeshExport,
 
     pub editor_mode: EditorMode,
     pub render_mode: RenderMode,
@@ -668,6 +705,8 @@ pub struct Session {
     palette_shift: bool,
     pub palette_anchor: u8,
     pending: Option<Snapshot>,
+    /// A panel drag in progress: edits gather into one undo step until it ends.
+    gesture: bool,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     /// Controls drawn last frame, in paint order. A click hits the last match.

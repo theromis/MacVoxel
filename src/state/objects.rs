@@ -665,6 +665,131 @@ impl Session {
         self.commit();
     }
 
+    /// Gather the edits of a panel drag into one undo step. The Session
+    /// methods it calls still checkpoint and commit as they would from MCP.
+    pub fn begin_gesture(&mut self) {
+        self.commit();
+        self.gesture = true;
+    }
+
+    pub fn end_gesture(&mut self) {
+        if self.gesture {
+            self.gesture = false;
+            self.commit();
+        }
+    }
+
+    /// Mirror the active object through the origin and make the copy active.
+    /// `mirror_bones` decides whether its bone subtree is copied too.
+    pub fn mirror_selected(&mut self, axis: usize) -> Result<usize, String> {
+        let name = crate::rig::mirrored_bone_name(&self.active().name);
+        let (created, _) =
+            self.mirror_object(self.selected, axis, &name, None, self.mirror_bones)?;
+        self.select_object(created);
+        Ok(created)
+    }
+
+    /// Replace one bone's preview transform. Identity drops it from the pose.
+    pub fn set_bone_pose(&mut self, index: usize, extra: crate::rig::BonePose) -> Result<(), String> {
+        let name = self
+            .skeleton
+            .bones
+            .get(index)
+            .map(|bone| bone.name.clone())
+            .ok_or("no bone selected")?;
+        let mut pose = self.pose.clone();
+        pose.insert(name, extra);
+        self.set_pose(pose)
+    }
+
+    /// Add a clip named by `clip_draft`, or `Clip N` when it is blank, and select it.
+    pub fn add_drafted_clip(&mut self) -> Result<(), String> {
+        let mut name = self.clip_draft.trim().to_string();
+        if name.is_empty() {
+            let mut number = self.clips.len() + 1;
+            loop {
+                name = format!("Clip {number}");
+                if !self.clips.iter().any(|clip| clip.name == name) {
+                    break;
+                }
+                number += 1;
+            }
+        }
+        self.add_clip(&name)?;
+        self.selected_clip = Some(self.clips.len() - 1);
+        self.clip_draft.clear();
+        Ok(())
+    }
+
+    pub fn remove_selected_clip(&mut self) -> Result<(), String> {
+        let name = self
+            .selected_clip
+            .and_then(|index| self.clips.get(index))
+            .map(|clip| clip.name.clone())
+            .ok_or("no clip selected")?;
+        self.remove_clip(&name)?;
+        self.selected_clip = None;
+        Ok(())
+    }
+
+    /// Key the selected bone and every posed bone at `clip_time` in the
+    /// selected clip, as one undo step. A key at the same time is replaced.
+    /// The rotation is the bind rotation times the pose; an unposed bone
+    /// keeps its bind rotation. Returns how many bones were keyed.
+    pub fn key_pose(&mut self) -> Result<usize, String> {
+        let clip = self
+            .selected_clip
+            .and_then(|index| self.clips.get(index))
+            .cloned()
+            .ok_or("no clip selected")?;
+        let time = self.clip_time;
+        let bones: Vec<usize> = (0..self.skeleton.bones.len())
+            .filter(|index| {
+                self.selected_bone == Some(*index)
+                    || self.pose.contains_key(&self.skeleton.bones[*index].name)
+            })
+            .collect();
+        if bones.is_empty() {
+            return Err("select or pose a bone to key".into());
+        }
+        let mut writes = Vec::new();
+        for index in bones {
+            let bone = &self.skeleton.bones[index];
+            let extra = self.pose.get(&bone.name).copied();
+            let rotation = extra.map(|extra| {
+                let bind = glam::Quat::from_array(bone.rotation);
+                let turn = glam::Quat::from_array(extra.rotation);
+                (bind * turn).normalize().to_array()
+            });
+            let key = crate::rig::ClipKey {
+                time,
+                rotation,
+                translation: None,
+                scale: extra.map_or([1.0, 1.0, 1.0], |extra| extra.scale),
+            };
+            let mut keys: Vec<crate::rig::ClipKey> = clip
+                .tracks
+                .iter()
+                .find(|track| track.bone == bone.name)
+                .map(|track| track.keys.clone())
+                .unwrap_or_default();
+            keys.retain(|old| (old.time - time).abs() > 1.0e-4);
+            keys.push(key);
+            writes.push((bone.name.clone(), keys));
+        }
+        let count = writes.len();
+        self.begin_gesture();
+        let mut result = Ok(());
+        for (bone, keys) in writes {
+            result = self.set_clip_keys(&clip.name, &bone, keys);
+            if result.is_err() {
+                break;
+            }
+        }
+        self.end_gesture();
+        result.map(|_| count)
+    }
+
     pub fn fresh_bone_name(&self) -> String {
         let mut number = 1;
         loop {
@@ -803,6 +928,9 @@ impl Session {
     }
 
     pub(super) fn commit(&mut self) {
+        if self.gesture {
+            return;
+        }
         if let Some(prev) = self.pending.take() {
             if prev.objects != self.objects
                 || prev.palette != self.palette

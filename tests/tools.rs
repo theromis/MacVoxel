@@ -28,6 +28,7 @@ fn ellipsoid_fills_the_center_and_not_the_corner() {
         apex_at_max: true,
         palette: 4,
         torus_tube: 0.3,
+        round_radius: 2.0,
         helix_turns: 2.0,
         helix_radius: 0.75,
         helix_tube: 0.16,

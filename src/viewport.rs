@@ -406,7 +406,7 @@ fn paint_gpu(
             .trace
             .as_ref()
             .expect("tracer")
-            .save_png(&rs.device, &rs.queue, &path)
+            .save_png(&rs.device, &rs.queue, &path, session)
         {
             Ok(()) => {
                 let file = path
@@ -828,8 +828,19 @@ fn paint_bones(painter: egui::Painter, session: &Session, rect: egui::Rect) {
     if session.skeleton.bones.is_empty() {
         return;
     }
-    for (index, bone) in session.skeleton.bones.iter().enumerate() {
-        let Some(at) = project_point(session, rect, Vec3::from_array(bone.pivot)) else {
+    // Joints follow the preview pose; a broken chain falls back to the pivots.
+    let joints: Vec<Vec3> = crate::rig::posed_joints(&session.skeleton, &session.pose)
+        .map(|joints| joints.into_iter().map(|(point, _)| point).collect())
+        .unwrap_or_else(|_| {
+            session
+                .skeleton
+                .bones
+                .iter()
+                .map(|bone| Vec3::from_array(bone.pivot))
+                .collect()
+        });
+    for (index, joint) in joints.iter().enumerate() {
+        let Some(at) = project_point(session, rect, *joint) else {
             continue;
         };
         let selected = session.selected_bone == Some(index);
@@ -838,13 +849,8 @@ fn paint_bones(painter: egui::Painter, session: &Session, rect: egui::Rect) {
         } else {
             egui::Color32::from_rgb(120, 170, 220)
         };
-        if let Some(parent) = bone
-            .parent
-            .as_deref()
-            .and_then(|name| session.skeleton.index_of(name))
-            .map(|parent| &session.skeleton.bones[parent])
-        {
-            if let Some(from) = project_point(session, rect, Vec3::from_array(parent.pivot)) {
+        if let Some(parent) = session.skeleton.parent_index(index) {
+            if let Some(from) = project_point(session, rect, joints[parent]) {
                 painter.line_segment(
                     [from, at],
                     egui::Stroke::new(if selected { 2.5_f32 } else { 1.5_f32 }, color),

@@ -576,7 +576,7 @@ pub(crate) fn linear_channel(channel: u8) -> f32 {
     }
 }
 
-fn draw_bone_overlay(rgba: &mut [u8], width: u32, height: u32, session: &Session) {
+pub(crate) fn draw_bone_overlay(rgba: &mut [u8], width: u32, height: u32, session: &Session) {
     if session.skeleton.bones.is_empty() {
         return;
     }

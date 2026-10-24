@@ -290,8 +290,12 @@ impl Tracer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         path: &std::path::Path,
+        session: &crate::state::Session,
     ) -> Result<(), String> {
-        let rgba = self.read_color(device, queue)?;
+        let mut rgba = self.read_color(device, queue)?;
+        if session.show_bones {
+            crate::trace::draw_bone_overlay(&mut rgba, self.size[0], self.size[1], session);
+        }
         crate::trace::write_rgba_png(path, self.size[0], self.size[1], &rgba)
     }
 

@@ -20,20 +20,72 @@ pub fn right(ui: &mut Ui, session: &mut Session) {
     ui.separator();
     outliner::bones(ui, session);
     ui.separator();
+    outliner::pose(ui, session);
+    ui.separator();
+    outliner::clips(ui, session);
+    ui.separator();
     script::script(ui, session);
     ui.separator();
     render::document(ui, session);
+    ui.separator();
+    render::export(ui, session);
     ui.separator();
     render::render(ui, session);
     ui.separator();
     render::light(ui, session);
     ui.separator();
     render::selection(ui, session);
+    // A drag on a panel field ends with the button; its edits are one undo step.
+    if !ui.input(|input| input.pointer.any_down()) {
+        session.end_gesture();
+    }
 }
 
 pub(super) fn section(ui: &mut Ui, title: &str) {
     ui.add_space(4.0);
     ui.label(RichText::new(title.to_ascii_uppercase()).small().strong());
+}
+
+/// A button `ui_click` can press. Both run [`Session::activate_ui`].
+pub(super) fn action_button(
+    ui: &mut Ui,
+    session: &mut Session,
+    id: &str,
+    label: &str,
+    action: UiAction,
+) {
+    let resp = ui.button(label);
+    run_action(session, id, label, resp, action);
+}
+
+/// A checkbox `ui_click` can toggle. The action flips the value.
+pub(super) fn action_checkbox(
+    ui: &mut Ui,
+    session: &mut Session,
+    id: &str,
+    label: &str,
+    on: bool,
+    action: UiAction,
+) {
+    let mut shown = on;
+    let resp = ui.checkbox(&mut shown, label);
+    run_action(session, id, label, resp, action);
+}
+
+fn run_action(
+    session: &mut Session,
+    id: &str,
+    label: &str,
+    resp: egui::Response,
+    action: UiAction,
+) {
+    session.note_ui(id, label, resp.rect, action);
+    if resp.clicked() {
+        let region = session.ui_regions.last().cloned().expect("noted above");
+        if let Err(err) = session.activate_ui(&region, None) {
+            session.status = err;
+        }
+    }
 }
 
 pub(super) fn segment<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(&str, T)]) {
@@ -110,6 +162,7 @@ pub(super) fn slider_value(session: &Session, target: SliderTarget) -> f32 {
         SliderTarget::FoliageSeed => session.foliage_seed as f32,
         SliderTarget::FoliageDensity => session.foliage_density,
         SliderTarget::TorusTube => session.torus_tube,
+        SliderTarget::RoundRadius => session.round_radius,
         SliderTarget::NoiseScale => session.noise_scale,
         SliderTarget::NoiseThreshold => session.noise_threshold,
         SliderTarget::NoiseOctaves => session.noise_octaves as f32,

@@ -38,6 +38,38 @@ pub(super) fn format_count(n: usize) -> String {
     out.chars().rev().collect()
 }
 
+/// Options for File > Export Mesh, the same ones `export_mesh` takes.
+pub(super) fn export(ui: &mut Ui, session: &mut Session) {
+    section(ui, "Export");
+    let options = [
+        ("export.merge", "Merge faces", session.export.merge, ExportFlag::Merge),
+        (
+            "export.vertex-colors",
+            "Vertex colors",
+            session.export.vertex_colors,
+            ExportFlag::VertexColors,
+        ),
+        (
+            "export.hidden",
+            "Hidden objects",
+            session.export.export_hidden,
+            ExportFlag::Hidden,
+        ),
+        (
+            "export.split",
+            "One mesh per object",
+            session.export.split_objects,
+            ExportFlag::Split,
+        ),
+    ];
+    for (id, label, on, flag) in options {
+        action_checkbox(ui, session, id, label, on, UiAction::Export(flag));
+    }
+    if ui.button("Export mesh…").clicked() {
+        session.export_mesh_dialog();
+    }
+}
+
 pub(super) fn render(ui: &mut Ui, session: &mut Session) {
     section(ui, "Render");
     ui.checkbox(&mut session.stochastic_gi, "Stochastic Sampling GI")
@@ -107,6 +139,15 @@ pub(super) fn render(ui: &mut Ui, session: &mut Session) {
     if ui.button("Save render…").clicked() {
         session.save_render();
     }
+    let show_bones = session.show_bones;
+    action_checkbox(
+        ui,
+        session,
+        "render.bones",
+        "Bones on saved render",
+        show_bones,
+        UiAction::ShowBones,
+    );
 
     ui.separator();
     section(ui, "Material");

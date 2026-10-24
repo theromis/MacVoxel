@@ -754,7 +754,7 @@ fn shape_fill(session: &mut Session, params: &Value, rounded: bool) -> Result<Va
         if !radius.is_finite() || radius < 0.0 {
             return Err("radius must be finite and at least 0".into());
         }
-        radius.min((nx.min(ny).min(nz) as f64) * 0.5)
+        crate::tools::rounded_radius(radius, [nx as f64, ny as f64, nz as f64])
     } else {
         0.0
     };
@@ -805,20 +805,7 @@ fn rounded_inside(
         f64::from(y1) + 1.0,
         f64::from(z1) + 1.0,
     ];
-    let mut dist2 = 0.0;
-    for axis in 0..3 {
-        let low = min[axis] + radius;
-        let high = max[axis] - radius;
-        let delta = if point[axis] < low {
-            low - point[axis]
-        } else if point[axis] > high {
-            point[axis] - high
-        } else {
-            0.0
-        };
-        dist2 += delta * delta;
-    }
-    dist2 <= radius * radius + 1.0e-9
+    crate::tools::rounded_inside(point, min, max, radius)
 }
 
 fn clip_keys(params: &Value) -> Result<Vec<crate::rig::ClipKey>, String> {

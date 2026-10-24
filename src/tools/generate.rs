@@ -12,6 +12,7 @@ pub struct Gen {
     pub apex_at_max: bool,
     pub palette: u8,
     pub torus_tube: f32,
+    pub round_radius: f32,
     pub helix_turns: f32,
     pub helix_radius: f32,
     pub helix_tube: f32,
@@ -44,6 +45,7 @@ impl Default for Gen {
             apex_at_max: true,
             palette: 1,
             torus_tube: 0.3,
+            round_radius: 2.0,
             helix_turns: 2.0,
             helix_radius: 0.75,
             helix_tube: 0.16,
@@ -155,6 +157,13 @@ fn gen_cell(cell: Cell, min: Cell, max: Cell, gen: &Gen) -> Option<u8> {
                 dot += n * n;
             }
             (dot <= 1.0).then_some(gen.palette)
+        }
+        GeneratorKind::RoundedBox => {
+            let size = dims.map(f64::from);
+            let min = lo.map(f64::from);
+            let max = [min[0] + size[0], min[1] + size[1], min[2] + size[2]];
+            let radius = rounded_radius(f64::from(gen.round_radius.max(0.0)), size);
+            rounded_inside(pos.map(f64::from), min, max, radius).then_some(gen.palette)
         }
         GeneratorKind::Cylinder => {
             let (u, v) = plane_axes(axis as i32);

@@ -166,6 +166,7 @@ pub(super) fn tools(ui: &mut Ui, session: &mut Session) {
                 .show_ui(ui, |ui| {
                     for kind in [
                         GeneratorKind::Ellipsoid,
+                        GeneratorKind::RoundedBox,
                         GeneratorKind::Cylinder,
                         GeneratorKind::Cone,
                         GeneratorKind::Pyramid,
@@ -221,6 +222,16 @@ pub(super) fn generator(ui: &mut Ui, session: &mut Session) {
                 RichText::new("(shape derives from bounds)")
                     .small()
                     .color(DIM),
+            );
+        }
+        GeneratorKind::RoundedBox => {
+            slider_f32(
+                ui,
+                session,
+                "Radius",
+                SliderTarget::RoundRadius,
+                0.0..=32.0,
+                1,
             );
         }
         GeneratorKind::Cylinder => axis_row(ui, &mut session.gen_axis),
