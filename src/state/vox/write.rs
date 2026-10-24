@@ -570,8 +570,11 @@ pub(crate) fn layer_body(layer: &VoxLayer) -> Vec<u8> {
 
 /// Every non-empty object, each as its own model. Local cells are shifted
 /// so the SIZE box origin is zero. That box keeps an empty margin when the
-/// editor grew the object. The leaf translation puts the model back where
-/// the editor had it. A loaded rotation is written back as `_r`.
+/// editor grew the object. The leaf translation is the model centre
+/// (`SIZE / 2`, integer division), which is what MagicaVoxel stores in
+/// `nTRN`. The editor's position is that centre minus the rotated offset,
+/// the world cell of local `(0, 0, 0)`. A loaded rotation is written back
+/// as `_r`.
 pub(crate) fn save_scene(
     objects: &[Volume],
     palette: &[[u8; 4]; 256],

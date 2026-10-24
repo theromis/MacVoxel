@@ -111,7 +111,17 @@ pub fn apply(session: &mut Session, method: &str, params: &Value) -> Result<Valu
                     .ok_or_else(|| "document has no path; pass path".to_string())?,
             };
             session.write_vox(Path::new(&path))?;
-            Ok(json!({"path": path, "voxels": session.voxel_count()}))
+            let voxels: usize = session
+                .objects
+                .iter()
+                .map(|object| object.cells.values().filter(|slot| **slot != 0).count())
+                .sum();
+            let objects = session
+                .objects
+                .iter()
+                .filter(|object| object.cells.values().any(|slot| *slot != 0))
+                .count();
+            Ok(json!({"path": path, "voxels": voxels, "objects": objects}))
         }
         "document.inspect" => Ok(inspect(session)),
         "voxel.get" => {

@@ -1096,6 +1096,207 @@ fn scene_rotation_is_baked_into_the_cells() {
     assert_eq!((high.0 - low.0, high.1 - low.1, high.2 - low.2), (0, 1, 0));
 }
 
+fn world_cells(object: &LoadedObject) -> Vec<(Cell, u8)> {
+    let mut cells: Vec<_> = object
+        .cells
+        .iter()
+        .map(|(cell, slot)| {
+            (
+                (
+                    cell.0 + object.translation.0,
+                    cell.1 + object.translation.1,
+                    cell.2 + object.translation.2,
+                ),
+                *slot,
+            )
+        })
+        .collect();
+    cells.sort_unstable();
+    cells
+}
+
+fn local_bounds(object: &LoadedObject) -> (Cell, Cell) {
+    let mut keys = object.cells.keys().copied();
+    let first = keys.next().expect("cells");
+    let mut min = first;
+    let mut max = first;
+    for cell in keys {
+        min.0 = min.0.min(cell.0);
+        min.1 = min.1.min(cell.1);
+        min.2 = min.2.min(cell.2);
+        max.0 = max.0.max(cell.0);
+        max.1 = max.1.max(cell.1);
+        max.2 = max.2.max(cell.2);
+    }
+    (min, max)
+}
+
+#[test]
+fn corner_position_round_trips_odd_and_even_sizes() {
+    let mut anchor = HashMap::new();
+    anchor.insert((0, 0, 0), 1);
+    let mut even = HashMap::new();
+    even.insert((0, 0, 0), 2);
+    even.insert((1, 1, 0), 3);
+    let mut odd = HashMap::new();
+    odd.insert((0, 0, 0), 4);
+    odd.insert((0, 1, 0), 5);
+    odd.insert((0, 2, 0), 6);
+    let objects = vec![
+        bare_volume("anchor", anchor, (0, 0, 0)),
+        bare_volume("even", even, (6, 2, 0)),
+        bare_volume("odd", odd, (2, 0, 3)),
+    ];
+    let before: Vec<_> = objects
+        .iter()
+        .map(|object| {
+            (
+                object.name.clone(),
+                object.translation,
+                local_bounds_volume(object),
+                world_cells_volume(object),
+            )
+        })
+        .collect();
+    let bytes = save_scene(
+        &objects,
+        &default_palette(),
+        &[Material::default(); 256],
+        &Skeleton::default(),
+    )
+    .unwrap();
+    let loaded = load_vox(&bytes).expect("scene");
+    assert_eq!(loaded.objects.len(), 3);
+    for (object, (name, translation, bounds, world)) in loaded.objects.iter().zip(before) {
+        assert_eq!(object.name, name);
+        assert_eq!(object.translation, translation);
+        assert_eq!(local_bounds(object), bounds);
+        assert_eq!(world_cells(object), world);
+    }
+}
+
+#[test]
+fn rotated_object_round_trips_world_cells() {
+    let mut size = Vec::new();
+    for dim in [2u32, 2, 2] {
+        size.extend_from_slice(&dim.to_le_bytes());
+    }
+    let mut xyzi = Vec::new();
+    xyzi.extend_from_slice(&2u32.to_le_bytes());
+    xyzi.extend_from_slice(&[0, 0, 0, 3]);
+    xyzi.extend_from_slice(&[0, 0, 1, 7]);
+    let mut rot = Vec::new();
+    push_i32(&mut rot, 0);
+    push_dict(&mut rot, &[("_name", "spun")]);
+    push_i32(&mut rot, 1);
+    push_i32(&mut rot, -1);
+    push_i32(&mut rot, -1);
+    push_i32(&mut rot, 1);
+    push_dict(&mut rot, &[("_t", "0 0 4"), ("_r", "8")]);
+    let mut shape = Vec::new();
+    push_i32(&mut shape, 1);
+    push_dict(&mut shape, &[]);
+    push_i32(&mut shape, 1);
+    push_i32(&mut shape, 0);
+    push_dict(&mut shape, &[]);
+    let mut children = chunk(b"SIZE", &size);
+    children.extend(chunk(b"XYZI", &xyzi));
+    children.extend(chunk(b"nTRN", &rot));
+    children.extend(chunk(b"nSHP", &shape));
+    let loaded = load_vox(&wrap_vox(children)).expect("rotated");
+    let object = &loaded.objects[0];
+    assert_eq!(object.cells.get(&(0, 0, 0)), Some(&3));
+    let world = world_cells(object);
+    let bytes = save_scene(
+        &[volume_from(object)],
+        &default_palette(),
+        &[Material::default(); 256],
+        &Skeleton::default(),
+    )
+    .unwrap();
+    let again = load_vox(&bytes).expect("resaved");
+    assert_eq!(world_cells(&again.objects[0]), world);
+    assert_eq!(rot_to_byte(again.objects[0].rot), 8);
+}
+
+#[test]
+fn magicavoxel_fixture_keeps_world_cells() {
+    let bytes = include_bytes!("fixtures/magicavoxel.vox");
+    let loaded = load_vox(bytes).expect("fixture");
+    assert_eq!(loaded.objects.len(), 3);
+    let mut by_name = HashMap::new();
+    for object in &loaded.objects {
+        by_name.insert(object.name.as_str(), object);
+    }
+    let even = by_name["even"];
+    let odd = by_name["odd"];
+    let spun = by_name["spun"];
+    assert_eq!(world_cells(even), vec![((0, -1, 0), 1), ((1, 0, 1), 2)]);
+    assert_eq!(
+        world_cells(odd),
+        vec![((7, 0, 1), 3), ((7, 1, 1), 4), ((7, 2, 1), 5)]
+    );
+    assert_eq!(world_cells(spun), vec![((-4, -1, 2), 8), ((-4, 0, 2), 9)]);
+    assert_eq!(even.cells.get(&(0, 0, 0)), Some(&1));
+    assert_eq!(odd.cells.get(&(0, 0, 0)), Some(&3));
+    assert_eq!(odd.translation, (7, 0, 1));
+    assert_eq!(local_bounds(odd).0 .1, 0);
+    assert_eq!(local_bounds(odd).1 .1, 2);
+    assert_eq!(spun.cells.get(&(0, 0, 0)), Some(&8));
+}
+
+fn bare_volume(name: &str, cells: HashMap<Cell, u8>, translation: Cell) -> Volume {
+    Volume {
+        name: name.into(),
+        cells,
+        translation,
+        box_min: (0, 0, 0),
+        dims: (0, 0, 0),
+        rot: ROT_IDENTITY,
+        pivot: (0, 0, 0),
+        model_dims: (0, 0, 0),
+        hidden: false,
+        file: None,
+        bone: None,
+        script: Default::default(),
+    }
+}
+
+fn local_bounds_volume(object: &Volume) -> (Cell, Cell) {
+    let mut keys = object.cells.keys().copied();
+    let first = keys.next().expect("cells");
+    let mut min = first;
+    let mut max = first;
+    for cell in keys {
+        min.0 = min.0.min(cell.0);
+        min.1 = min.1.min(cell.1);
+        min.2 = min.2.min(cell.2);
+        max.0 = max.0.max(cell.0);
+        max.1 = max.1.max(cell.1);
+        max.2 = max.2.max(cell.2);
+    }
+    (min, max)
+}
+
+fn world_cells_volume(object: &Volume) -> Vec<(Cell, u8)> {
+    let mut cells: Vec<_> = object
+        .cells
+        .iter()
+        .map(|(cell, slot)| {
+            (
+                (
+                    cell.0 + object.translation.0,
+                    cell.1 + object.translation.1,
+                    cell.2 + object.translation.2,
+                ),
+                *slot,
+            )
+        })
+        .collect();
+    cells.sort_unstable();
+    cells
+}
+
 /// After `MacVoxel voxrt --output` resaves a sample, the geometry,
 /// palette, and materials must still match. Skipped unless
 /// `MACVOXEL_RESAVE_VOX` points at that file.

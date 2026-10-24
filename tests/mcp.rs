@@ -441,3 +441,35 @@ fn worked_example_exports_a_glb_with_two_joints() {
     assert!(bytes.windows(5).any(|chunk| chunk == b"\"leg\""));
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn save_file_counts_the_scene_and_reopen_keeps_the_corner() {
+    let mut head = Headless::new();
+    head.ok("set_voxel", json!({"x": 0, "y": 0, "z": 0, "palette": 1}));
+    head.ok("add_object", json!({"name": "leg", "position": [2, 0, 0]}));
+    head.ok(
+        "fill_box",
+        json!({"x0": 0, "y0": 0, "z0": 0, "x1": 0, "y1": 2, "z1": 0, "palette": 2}),
+    );
+    let path = std::env::temp_dir().join("macvoxel-mcp-char.vox");
+    let _ = std::fs::remove_file(&path);
+    let saved = head.ok("save_file", json!({"path": path.to_string_lossy()}));
+    assert_eq!(saved["voxels"], 4);
+    assert_eq!(saved["objects"], 2);
+    head.ok("open_file", json!({"path": path.to_string_lossy()}));
+    let doc = head.ok("inspect_document", json!({}));
+    let objects = doc["objects"].as_array().unwrap();
+    assert_eq!(objects[1]["name"], "leg");
+    assert_eq!(objects[1]["position"], json!([2, 0, 0]));
+    assert_eq!(objects[1]["bounds"]["min"][1], 0);
+    assert_eq!(objects[1]["bounds"]["max"][1], 2);
+    let leg = &head.session.objects[1];
+    let world_y: Vec<i32> = leg
+        .cells
+        .keys()
+        .map(|cell| cell.1 + leg.translation.1)
+        .collect();
+    assert_eq!(world_y.iter().copied().min(), Some(0));
+    assert_eq!(world_y.iter().copied().max(), Some(2));
+    let _ = std::fs::remove_file(&path);
+}

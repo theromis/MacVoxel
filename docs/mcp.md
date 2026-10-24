@@ -99,15 +99,23 @@ Edits from the voxel tools apply to the **active object**, in that object's
 world `position` (the same three integers as `translation`) to a local cell
 to get its world cell. `add_object` and `set_object` take that world
 position; moving an object moves its voxels in the world and leaves the local
-cells where they are. Bone pivots are world voxel coordinates too. Palette
+cells where they are. `position` is the world cell of local `(0, 0, 0)`, in a
+new document and in a file just opened. MagicaVoxel stores `nTRN` `_t` at
+the model centre, `SIZE / 2` with integer division. A rotation `_r`, and a
+parent group's translation, turn that centre. Loading subtracts the rotated
+centre offset so the SIZE corner stays local `(0, 0, 0)`. Saving adds the
+offset back, so MagicaVoxel still opens the parts in place. Bone pivots are
+world voxel coordinates too. Palette
 index `0` is empty and erases a cell. Indices `1..255` are colors. A cell
 must lie in `[-1024, 1024)`. A write that would make the active object longer
 than 256 on any axis is refused and changes nothing.
 
 `save_file` writes every non-empty object. A new object is a normal model:
 its own `SIZE`/`XYZI`, an `nTRN`/`nSHP` pair under the scene group, `_name`
-on the transform, and the world position in that transform, so MagicaVoxel
-opens the parts in place. An object with no voxels is omitted. A file that
+on the transform, and the model centre in that transform, so MagicaVoxel
+opens the parts in place. The reply is `path`, `voxels` (solid cells in the
+whole file, not only the active object), and `objects` (models written).
+An object with no voxels is omitted. A file that
 had a scene graph is written back with that graph: groups, layers, hidden
 objects, and animation frames after the first stay. Frame 0 takes the edited
 translation, rotation, name, and `_hidden`. Each model is at most 256 cells
@@ -124,7 +132,7 @@ tracer. A file with no scene graph still loads its first model.
 |---|---|---|
 | `new_document` | — | Empty document, default palette, cleared path and undo stack |
 | `open_file` | `path` | Open a `.vox`, replacing the session |
-| `save_file` | — | Write every non-empty object. `path` overwrites the open file when omitted |
+| `save_file` | — | Write every non-empty object. `path` overwrites the open file when omitted. Replies with `voxels` and `objects` |
 | `inspect_document` | — | Path, counts, world bounds, objects (name and world position), palette, and each slot's motion |
 | `get_voxel` | `x`, `y`, `z` | Palette index of one **local** cell of the active object. `0` is empty |
 | `set_voxel` | `x`, `y`, `z`, `palette` | Write one **local** cell. One undo step |

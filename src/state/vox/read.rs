@@ -352,6 +352,8 @@ pub(crate) fn place_models(
             continue;
         };
         let half = [dims[0] / 2, dims[1] / 2, dims[2] / 2];
+        // nTRN `_t` is the model centre. Keep a world copy so the scene
+        // can still be recentered, and a corner copy for the editor.
         let mut cells = HashMap::new();
         for (x, y, z, color) in voxels {
             if *color == 0 {
@@ -367,12 +369,18 @@ pub(crate) fn place_models(
                 *color,
             );
         }
-        let boxed = size_box_world(*dims, half, placement.world_t, placement.world_r);
+        let centre = rot_apply(placement.world_r, half);
+        let corner = [
+            placement.world_t[0] - centre[0],
+            placement.world_t[1] - centre[1],
+            placement.world_t[2] - centre[2],
+        ];
         world.push((
             placement.name,
             cells,
+            voxels.clone(),
+            corner,
             placement.world_t,
-            boxed,
             placement.world_r,
             *dims,
             placement.hidden,
@@ -403,16 +411,17 @@ pub(crate) fn place_models(
     }
     let shift0 = world
         .iter()
-        .find_map(|(_, cells, _, _, _, _, _, _, _, _, _)| display_shift(cells))
+        .find_map(|(_, cells, ..)| display_shift(cells))
         .unwrap_or((0, 0, 0));
     let objects = world
         .into_iter()
         .map(
             |(
                 name,
-                cells,
+                _world_cells,
+                file_cells,
+                corner,
                 anchor,
-                (box_min, dims),
                 world_r,
                 file_dims,
                 hidden,
@@ -421,36 +430,29 @@ pub(crate) fn place_models(
                 parent_t,
                 model_id,
             )| {
-                let shift = display_shift(&cells).unwrap_or((0, 0, 0));
-                let local = cells
-                    .into_iter()
-                    .map(|(cell, color)| {
-                        (
-                            (cell.0 + shift.0, cell.1 + shift.1, cell.2 + shift.2),
-                            color,
-                        )
-                    })
-                    .collect();
+                // Local (0, 0, 0) is the SIZE corner. A rotation is baked
+                // into the cells, so a later edit still uses world axes.
+                let mut local = HashMap::new();
+                for (x, y, z, color) in file_cells {
+                    if color == 0 {
+                        continue;
+                    }
+                    let spun = rot_apply(world_r, [x, y, z]);
+                    local.insert((spun[0], spun[1], spun[2]), color);
+                }
                 let link_name = name.clone();
-                let translation = if shift == (0, 0, 0) && local_is_empty(&local) {
-                    (
-                        anchor[0] + shift0.0,
-                        anchor[1] + shift0.1,
-                        anchor[2] + shift0.2,
-                    )
-                } else {
-                    (shift0.0 - shift.0, shift0.1 - shift.1, shift0.2 - shift.2)
-                };
+                let translation = (
+                    corner[0] + shift0.0,
+                    corner[1] + shift0.1,
+                    corner[2] + shift0.2,
+                );
+                let (box_min, box_dims) = corner_box(file_dims, world_r);
                 LoadedObject {
                     name,
                     cells: local,
                     translation,
-                    box_min: (
-                        box_min.0 + shift.0,
-                        box_min.1 + shift.1,
-                        box_min.2 + shift.2,
-                    ),
-                    dims,
+                    box_min,
+                    dims: box_dims,
                     rot: if rot_is_identity(world_r) {
                         ROT_IDENTITY
                     } else {
@@ -525,8 +527,26 @@ pub(crate) fn size_box_world(
     )
 }
 
-pub(crate) fn local_is_empty(cells: &HashMap<Cell, u8>) -> bool {
-    cells.is_empty()
+/// SIZE box in corner-local cells. Identity keeps it on the origin.
+pub(crate) fn corner_box(dims: [i32; 3], rot: [[i32; 3]; 3]) -> (Cell, (i32, i32, i32)) {
+    let mut lo = [i32::MAX; 3];
+    let mut hi = [i32::MIN; 3];
+    for mask in 0..8 {
+        let corner = [
+            if mask & 1 == 0 { 0 } else { dims[0] },
+            if mask & 2 == 0 { 0 } else { dims[1] },
+            if mask & 4 == 0 { 0 } else { dims[2] },
+        ];
+        let spun = rot_apply(rot, corner);
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(spun[axis]);
+            hi[axis] = hi[axis].max(spun[axis]);
+        }
+    }
+    (
+        (lo[0], lo[1], lo[2]),
+        (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]),
+    )
 }
 
 pub(crate) fn display_shift(cells: &HashMap<Cell, u8>) -> Option<Cell> {
