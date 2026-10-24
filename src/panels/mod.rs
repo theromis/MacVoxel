@@ -15,28 +15,32 @@ pub fn left(ui: &mut Ui, session: &mut Session) {
     palette::palette(ui, session);
 }
 
+/// Inspector on top, scene tree docked at the bottom.
 pub fn right(ui: &mut Ui, session: &mut Session) {
-    outliner::outliner(ui, session);
-    ui.separator();
-    outliner::object(ui, session);
-    ui.separator();
-    outliner::bones(ui, session);
-    ui.separator();
-    outliner::pose(ui, session);
-    ui.separator();
-    outliner::clips(ui, session);
-    ui.separator();
-    script::script(ui, session);
-    ui.separator();
-    render::document(ui, session);
-    ui.separator();
-    render::export(ui, session);
-    ui.separator();
-    render::render(ui, session);
-    ui.separator();
-    render::light(ui, session);
-    ui.separator();
-    render::selection(ui, session);
+    outliner::tree_panel(ui, session);
+    egui::ScrollArea::vertical()
+        .id_salt("inspector")
+        .show(ui, |ui| {
+            outliner::object(ui, session);
+            ui.separator();
+            outliner::bone(ui, session);
+            ui.separator();
+            outliner::pose(ui, session);
+            ui.separator();
+            outliner::clips(ui, session);
+            ui.separator();
+            script::script(ui, session);
+            ui.separator();
+            render::document(ui, session);
+            ui.separator();
+            render::export(ui, session);
+            ui.separator();
+            render::render(ui, session);
+            ui.separator();
+            render::light(ui, session);
+            ui.separator();
+            render::selection(ui, session);
+        });
     // A drag on a panel field ends with the button; its edits are one undo step.
     if !ui.input(|input| input.pointer.any_down()) {
         session.end_gesture();

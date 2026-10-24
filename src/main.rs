@@ -195,11 +195,7 @@ impl eframe::App for Shell {
             .resizable(true)
             .default_width(280.0)
             .width_range(260.0..=380.0)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    panels::right(ui, &mut self.session);
-                });
-            });
+            .show(ctx, |ui| panels::right(ui, &mut self.session));
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.viewport_rect = viewport::show(

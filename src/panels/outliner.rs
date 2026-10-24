@@ -1,7 +1,7 @@
-//! Object and bone lists with their inspectors, the pose, and clips.
+//! The object and bone tree, their inspectors, the pose, and clips.
 //!
-//! As in Godot, a list only selects; the selected item's fields sit in an
-//! inspector grid below it, so editing never shifts the rows.
+//! As in Godot, the tree only selects; the selected item's fields sit in an
+//! inspector grid above it, so editing never shifts the rows.
 
 use egui::{RichText, Ui};
 
@@ -16,10 +16,6 @@ const WIDE_WIDTH: f32 = AXIS_WIDTH * 3.0 + 8.0;
 /// Height of every inspector row. Taller than any field's natural height, so
 /// labels, fields, buttons, and combo boxes share one center line.
 const ROW_HEIGHT: f32 = 22.0;
-/// Lists scroll on their own past this height instead of pushing the
-/// inspectors off screen.
-const LIST_HEIGHT: f32 = 220.0;
-
 fn inspector(ui: &mut Ui, id: &str, add_rows: impl FnOnce(&mut Ui)) {
     ui.scope(|ui| {
         ui.spacing_mut().interact_size = egui::vec2(AXIS_WIDTH, ROW_HEIGHT);
@@ -57,14 +53,93 @@ fn axis_button(ui: &mut Ui, session: &mut Session, id: &str, label: &str, action
     run_action(session, id, label, resp, action);
 }
 
-pub(super) fn outliner(ui: &mut Ui, session: &mut Session) {
-    section(ui, "Objects");
+#[derive(Clone, Copy, PartialEq)]
+enum TreeTab {
+    Objects,
+    Bones,
+}
+
+#[derive(Clone, Copy)]
+struct TreeState {
+    tab: TreeTab,
+    open: bool,
+}
+
+impl Default for TreeState {
+    fn default() -> Self {
+        Self {
+            tab: TreeTab::Objects,
+            open: true,
+        }
+    }
+}
+
+/// The scene tree docked under the inspector: objects or bones, one at a
+/// time. Collapsed, it keeps only its header row.
+pub(super) fn tree_panel(ui: &mut Ui, session: &mut Session) {
+    let id = egui::Id::new("tree-state");
+    let mut state: TreeState = ui.data(|data| data.get_temp(id)).unwrap_or_default();
+    let panel = if state.open {
+        egui::TopBottomPanel::bottom("tree-open")
+            .resizable(true)
+            .default_height(300.0)
+            .height_range(120.0..=900.0)
+    } else {
+        egui::TopBottomPanel::bottom("tree-closed").resizable(false)
+    };
+    let frame = egui::Frame::side_top_panel(ui.style()).fill(ui.visuals().window_fill);
+    panel.frame(frame).show_inside(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.selectable_value(&mut state.tab, TreeTab::Objects, "Objects");
+            ui.selectable_value(&mut state.tab, TreeTab::Bones, "Bones");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (icon, hint) = if state.open {
+                    ("⏷", "Hide the tree")
+                } else {
+                    ("⏶", "Show the tree")
+                };
+                if ui.small_button(icon).on_hover_text(hint).clicked() {
+                    state.open = !state.open;
+                }
+            });
+        });
+        if state.open {
+            ui.separator();
+            match state.tab {
+                TreeTab::Objects => object_list(ui, session),
+                TreeTab::Bones => bone_list(ui, session),
+            }
+        }
+    });
+    ui.data_mut(|data| data.insert_temp(id, state));
+}
+
+fn object_list(ui: &mut Ui, session: &mut Session) {
+    ui.horizontal(|ui| {
+        action_button(ui, session, "object.new", "New", UiAction::NewObject);
+        action_button(
+            ui,
+            session,
+            "object.duplicate",
+            "Duplicate",
+            UiAction::Duplicate,
+        );
+        ui.add_enabled_ui(session.objects.len() > 1, |ui| {
+            action_button(
+                ui,
+                session,
+                "object.delete",
+                "Delete",
+                UiAction::DeleteObject,
+            );
+        });
+    });
     let mut select = None;
     let mut frame = false;
     egui::ScrollArea::vertical()
         .id_salt("object-list")
-        .max_height(LIST_HEIGHT)
-        .auto_shrink([false, true])
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             for i in 0..session.objects.len() {
                 let chosen = session.object_selection.contains(&i);
@@ -109,26 +184,6 @@ pub(super) fn outliner(ui: &mut Ui, session: &mut Session) {
     if frame {
         session.frame_camera();
     }
-
-    ui.horizontal(|ui| {
-        action_button(ui, session, "object.new", "New", UiAction::NewObject);
-        action_button(
-            ui,
-            session,
-            "object.duplicate",
-            "Duplicate",
-            UiAction::Duplicate,
-        );
-        ui.add_enabled_ui(session.objects.len() > 1, |ui| {
-            action_button(
-                ui,
-                session,
-                "object.delete",
-                "Delete",
-                UiAction::DeleteObject,
-            );
-        });
-    });
 }
 
 pub(super) fn object(ui: &mut Ui, session: &mut Session) {
@@ -249,13 +304,22 @@ fn bone_tree(skeleton: &crate::rig::Skeleton) -> Vec<(usize, usize)> {
     out
 }
 
-pub(super) fn bones(ui: &mut Ui, session: &mut Session) {
-    section(ui, "Bones");
+fn bone_list(ui: &mut Ui, session: &mut Session) {
+    if ui.button("Add bone").clicked() {
+        let name = session.fresh_bone_name();
+        let parent = session
+            .selected_bone
+            .and_then(|index| session.skeleton.bones.get(index))
+            .map(|bone| bone.name.clone());
+        let pivot = session.active_bone_pivot();
+        if let Err(err) = session.add_bone(&name, parent.as_deref(), pivot, None) {
+            session.status = err;
+        }
+    }
     let mut pick = None;
     egui::ScrollArea::vertical()
         .id_salt("bone-list")
-        .max_height(LIST_HEIGHT)
-        .auto_shrink([false, true])
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             for (index, depth) in bone_tree(&session.skeleton) {
                 ui.horizontal(|ui| {
@@ -273,28 +337,32 @@ pub(super) fn bones(ui: &mut Ui, session: &mut Session) {
     if let Some(index) = pick {
         session.selected_bone = Some(index);
     }
-    if ui.button("Add").clicked() {
-        let name = session.fresh_bone_name();
-        let parent = session
-            .selected_bone
-            .and_then(|index| session.skeleton.bones.get(index))
-            .map(|bone| bone.name.clone());
-        let pivot = session.active_bone_pivot();
-        if let Err(err) = session.add_bone(&name, parent.as_deref(), pivot, None) {
-            session.status = err;
-        }
+}
+
+/// Inspector of the bone picked in the tree.
+pub(super) fn bone(ui: &mut Ui, session: &mut Session) {
+    if session.skeleton.bones.is_empty() {
+        session.selected_bone = None;
+        return;
     }
-    if let Some(index) = session.selected_bone {
-        if index < session.skeleton.bones.len() {
-            section(ui, "Bone");
-            bone_fields(ui, session, index);
-        } else {
+    section(ui, "Bone");
+    match session
+        .selected_bone
+        .filter(|index| *index < session.skeleton.bones.len())
+    {
+        Some(index) => bone_fields(ui, session, index),
+        None => {
             session.selected_bone = None;
+            ui.label(
+                RichText::new("Pick a bone in the Bones tree.")
+                    .small()
+                    .color(DIM),
+            );
         }
     }
 }
 
-pub(super) fn bone_fields(ui: &mut Ui, session: &mut Session, index: usize) {
+fn bone_fields(ui: &mut Ui, session: &mut Session, index: usize) {
     let bone_name = session.skeleton.bones[index].name.clone();
     let parent = session.skeleton.bones[index].parent.clone();
     let pivot = session.skeleton.bones[index].pivot;
