@@ -285,11 +285,17 @@ has motion.
 `exportHidden` defaults to false, so a hidden object stays out of the file.
 `true` includes it. `splitObjects` defaults to false, one mesh named
 `voxels`. `true` writes one mesh node per object, named with the object
-name, still sharing a single skin when the document has a skeleton. A game
+name, still sharing a single skin when the document has a skeleton. A node
+name never repeats a bone's or an earlier part's: the clash gets `_mesh`
+(then `_mesh2`, ...), so an object `jaw` bound to bone `jaw` is node
+`jaw_mesh` and the joint stays `jaw`. Godot makes node names unique and
+would otherwise rename the bone. The mesh itself keeps the object name. A game
 can then hide one part, such as an alternate face, without a second export.
 When the document has a skeleton, clips are written as a glTF `animations` array. Each clip is one animation
 whose name is the clip name. Channels target the joint nodes
-(translation, rotation, and scale, linear). Godot 4 imports that array as
+(rotation and scale, linear, plus translation when any key of that bone sets
+one). A bone whose keys never set `translation` has no translation channel,
+so it stays at its bind offset. Godot 4 imports that array as
 an AnimationLibrary on the AnimationPlayer. A document with no clips omits
 `animations`, so the bytes match a rig-only export.
 
@@ -334,11 +340,15 @@ the skeleton is not empty. That overlay is not a tool default.
 bone in that clip. A key's `time` is seconds, finite and ≥ 0, and times
 must increase. `rotation` is the bone's local quaternion (default identity).
 `translation` is the full local offset from the parent in voxel units, not
-a delta from the bind pose (default `[0, 0, 0]`). `scale` is local
+a delta from the bind pose. Omit it to keep the bind offset: a track with no
+translation writes no glTF translation channel, and a key without one in a
+track that has some repeats the bind offset. `list_clips` shows an omitted
+one as `null`. `scale` is local
 (default `[1, 1, 1]`). A rest key that should match the bind pose repeats
-that local offset and the bind rotation. `list_clips` returns the clips.
+the bind rotation. `list_clips` returns the clips.
 `remove_clip` deletes one. Each of these is one undo step. Save writes
-them in an `MVAN` chunk next to `MVRG`. MagicaVoxel skips the chunk.
+them in an `MVAN` chunk (version 2: a flag per key says whether it has a
+translation; version 1 files still load, every key with one) next to `MVRG`. MagicaVoxel skips the chunk.
 
 `add_bone` requires `name` and a world `pivot` `[x, y, z]`. The components
 are fractional, so the joint can sit between cells. `parent` omitted

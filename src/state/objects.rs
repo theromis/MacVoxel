@@ -394,6 +394,7 @@ impl Session {
             }
             if key
                 .translation
+                .unwrap_or_default()
                 .iter()
                 .chain(key.scale.iter())
                 .any(|value| !value.is_finite())

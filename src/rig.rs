@@ -47,7 +47,8 @@ pub struct StoredBind {
 pub struct ClipKey {
     pub time: f32,
     pub rotation: [f32; 4],
-    pub translation: [f32; 3],
+    /// Full local offset from the parent. `None` keeps the bone's bind offset.
+    pub translation: Option<[f32; 3]>,
     pub scale: [f32; 3],
 }
 
@@ -703,7 +704,8 @@ pub fn encode_clips(clips: &[Clip]) -> Result<Option<Vec<u8>>, String> {
         return Ok(None);
     }
     let mut body = Vec::new();
-    push_u32(&mut body, 1);
+    // Version 2 flags each key's translation; version 1 always stored one.
+    push_u32(&mut body, 2);
     push_u32(&mut body, clips.len() as u32);
     for clip in clips {
         let name = check_name(&clip.name)?;
@@ -717,7 +719,8 @@ pub fn encode_clips(clips: &[Clip]) -> Result<Option<Vec<u8>>, String> {
                 for axis in key.rotation {
                     body.extend_from_slice(&axis.to_le_bytes());
                 }
-                for axis in key.translation {
+                body.push(u8::from(key.translation.is_some()));
+                for axis in key.translation.unwrap_or_default() {
                     body.extend_from_slice(&axis.to_le_bytes());
                 }
                 for axis in key.scale {
@@ -732,7 +735,7 @@ pub fn encode_clips(clips: &[Clip]) -> Result<Option<Vec<u8>>, String> {
 pub fn decode_clips(body: &[u8]) -> Result<Vec<Clip>, String> {
     let mut cursor = 0;
     let version = read_u32(body, &mut cursor)?;
-    if version != 1 {
+    if version != 1 && version != 2 {
         return Err(format!("MVAN version {version} is not supported"));
     }
     let count = read_u32(body, &mut cursor)? as usize;
@@ -760,10 +763,18 @@ pub fn decode_clips(body: &[u8]) -> Result<Vec<Clip>, String> {
                 for axis in &mut rotation {
                     *axis = read_f32(body, &mut cursor)?;
                 }
-                let mut translation = [0.0; 3];
-                for axis in &mut translation {
+                let has_translation = if version == 1 {
+                    true
+                } else {
+                    let flag = *body.get(cursor).ok_or("MVAN chunk is truncated")?;
+                    cursor += 1;
+                    flag != 0
+                };
+                let mut offset = [0.0; 3];
+                for axis in &mut offset {
                     *axis = read_f32(body, &mut cursor)?;
                 }
+                let translation = has_translation.then_some(offset);
                 let mut scale = [0.0; 3];
                 for axis in &mut scale {
                     *axis = read_f32(body, &mut cursor)?;

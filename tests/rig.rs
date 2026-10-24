@@ -99,15 +99,48 @@ fn clips_round_trip_through_the_mvan_body() {
         name: "wave".into(),
         tracks: vec![BoneTrack {
             bone: "root".into(),
-            keys: vec![ClipKey {
-                time: 0.25,
-                rotation: IDENTITY_ROTATION,
-                translation: [1.0, 2.0, 3.0],
-                scale: [1.0, 1.0, 2.0],
-            }],
+            keys: vec![
+                ClipKey {
+                    time: 0.25,
+                    rotation: IDENTITY_ROTATION,
+                    translation: Some([1.0, 2.0, 3.0]),
+                    scale: [1.0, 1.0, 2.0],
+                },
+                ClipKey {
+                    time: 0.5,
+                    rotation: IDENTITY_ROTATION,
+                    translation: None,
+                    scale: [1.0, 1.0, 1.0],
+                },
+            ],
         }],
     };
     let body = encode_clips(&[clip.clone()]).unwrap().unwrap();
     assert_eq!(decode_clips(&body).unwrap(), vec![clip]);
     assert!(encode_clips(&[]).unwrap().is_none());
+}
+
+#[test]
+fn a_version_1_mvan_body_reads_every_key_with_its_translation() {
+    // Version 1 had no flag: time, rotation, translation, scale for every key.
+    let mut body = Vec::new();
+    for word in [1u32, 1] {
+        body.extend_from_slice(&word.to_le_bytes());
+    }
+    for text in ["wave"] {
+        body.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        body.extend_from_slice(text.as_bytes());
+    }
+    body.extend_from_slice(&1u32.to_le_bytes());
+    body.extend_from_slice(&4u32.to_le_bytes());
+    body.extend_from_slice(b"root");
+    body.extend_from_slice(&1u32.to_le_bytes());
+    for value in [0.0f32, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0, 1.0, 1.0, 1.0] {
+        body.extend_from_slice(&value.to_le_bytes());
+    }
+    let clips = decode_clips(&body).unwrap();
+    assert_eq!(
+        clips[0].tracks[0].keys[0].translation,
+        Some([1.0, 2.0, 3.0])
+    );
 }

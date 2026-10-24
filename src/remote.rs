@@ -820,7 +820,7 @@ fn clip_keys(params: &Value) -> Result<Vec<crate::rig::ClipKey>, String> {
             .and_then(Value::as_f64)
             .ok_or("key time is required")? as f32;
         let rotation = opt_vec4(key, "rotation")?.unwrap_or(crate::rig::IDENTITY_ROTATION);
-        let translation = opt_vec3(key, "translation")?.unwrap_or([0.0, 0.0, 0.0]);
+        let translation = opt_vec3(key, "translation")?;
         let scale = opt_vec3(key, "scale")?.unwrap_or([1.0, 1.0, 1.0]);
         out.push(crate::rig::ClipKey {
             time,

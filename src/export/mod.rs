@@ -510,6 +510,18 @@ fn encode_split(session: &Session, options: &MeshExport) -> Result<Vec<u8>, Stri
     let mut meshes = Vec::new();
     let mut nodes = Vec::new();
     let mut blend = false;
+    // Node names must not repeat a joint's or another part's: Godot makes every node name in
+    // the scene unique and would rename the bone (`jaw` -> `jaw_2`), so the mesh node gives way.
+    let mut taken: std::collections::HashSet<String> = if skinned {
+        session
+            .skeleton
+            .bones
+            .iter()
+            .map(|bone| bone.name.clone())
+            .collect()
+    } else {
+        Default::default()
+    };
     for (name, built) in &parts {
         blend |= built.blend;
         let verts = (built.positions.len() / 3) as u32;
@@ -581,7 +593,7 @@ fn encode_split(session: &Session, options: &MeshExport) -> Result<Vec<u8>, Stri
                 "mode": 4
             }]
         }));
-        let mut node = json!({"name": name, "mesh": nodes.len()});
+        let mut node = json!({"name": part_node_name(name, &mut taken), "mesh": nodes.len()});
         if skinned {
             node["skin"] = json!(0);
         }
@@ -694,6 +706,22 @@ fn encode_split(session: &Session, options: &MeshExport) -> Result<Vec<u8>, Stri
     Ok(out)
 }
 
+/// `name`, or `name_mesh`, `name_mesh2`, ... when a joint or an earlier part already has it.
+fn part_node_name(name: &str, taken: &mut std::collections::HashSet<String>) -> String {
+    let mut candidate = name.to_string();
+    let mut n = 1;
+    while taken.contains(&candidate) {
+        candidate = if n == 1 {
+            format!("{name}_mesh")
+        } else {
+            format!("{name}_mesh{n}")
+        };
+        n += 1;
+    }
+    taken.insert(candidate.clone());
+    candidate
+}
+
 fn append_animations(
     root: &mut serde_json::Value,
     bin: &mut Vec<u8>,
@@ -703,6 +731,7 @@ fn append_animations(
     if session.clips.is_empty() {
         return Ok(());
     }
+    let bind = crate::rig::bind_pose(&session.skeleton)?;
     let mut animations = Vec::new();
     for clip in &session.clips {
         let mut samplers = Vec::new();
@@ -718,27 +747,36 @@ fn append_animations(
             let mut rotation = Vec::new();
             let mut translation = Vec::new();
             let mut scale = Vec::new();
+            // A track whose keys never set a translation leaves the joint at its bind offset:
+            // no channel, so an importer keeps the rest position. A key without one in a track
+            // that has some repeats the bind offset.
+            let moves = track.keys.iter().any(|key| key.translation.is_some());
             for key in &track.keys {
                 rotation.extend_from_slice(&crate::rig::gltf_rotation(key.rotation));
-                translation.extend_from_slice(&crate::rig::gltf_vector(key.translation));
+                let offset = key
+                    .translation
+                    .map_or(bind[bone].translation, crate::rig::gltf_vector);
+                translation.extend_from_slice(&offset);
                 scale.extend_from_slice(&crate::rig::gltf_scale(key.scale));
             }
             let time_acc = push_anim(root, bin, &times, "SCALAR", times.len(), true);
-            let trans_acc = push_anim(root, bin, &translation, "VEC3", track.keys.len(), false);
+            let node = joint_base + bone;
+            if moves {
+                let trans_acc = push_anim(root, bin, &translation, "VEC3", track.keys.len(), false);
+                samplers.push(
+                    json!({"input": time_acc, "output": trans_acc, "interpolation": "LINEAR"}),
+                );
+                channels.push(json!({"sampler": samplers.len() - 1, "target": {"node": node, "path": "translation"}}));
+            }
             let rot_acc = push_anim(root, bin, &rotation, "VEC4", track.keys.len(), false);
-            let scale_acc = push_anim(root, bin, &scale, "VEC3", track.keys.len(), false);
-            let base = samplers.len();
-            samplers
-                .push(json!({"input": time_acc, "output": trans_acc, "interpolation": "LINEAR"}));
             samplers.push(json!({"input": time_acc, "output": rot_acc, "interpolation": "LINEAR"}));
+            channels.push(json!({"sampler": samplers.len() - 1, "target": {"node": node, "path": "rotation"}}));
+            let scale_acc = push_anim(root, bin, &scale, "VEC3", track.keys.len(), false);
             samplers
                 .push(json!({"input": time_acc, "output": scale_acc, "interpolation": "LINEAR"}));
-            let node = joint_base + bone;
-            channels
-                .push(json!({"sampler": base, "target": {"node": node, "path": "translation"}}));
-            channels
-                .push(json!({"sampler": base + 1, "target": {"node": node, "path": "rotation"}}));
-            channels.push(json!({"sampler": base + 2, "target": {"node": node, "path": "scale"}}));
+            channels.push(
+                json!({"sampler": samplers.len() - 1, "target": {"node": node, "path": "scale"}}),
+            );
         }
         animations.push(json!({
             "name": clip.name,
