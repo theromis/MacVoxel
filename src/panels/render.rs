@@ -229,17 +229,17 @@ pub(super) fn light(ui: &mut Ui, session: &mut Session) {
     section(ui, "Sky");
     ui.checkbox(&mut session.atmospheric_sky, "Atmospheric sky")
         .on_hover_text(
-            "Nishita single-scatter sky (Rayleigh and Mie). Off: a flat horizon gradient.",
+            "Nishita single-scatter sky (Rayleigh and Mie), lit by the sun's colour and direction. Off: a flat horizon gradient.",
         );
+    slider_f32(
+        ui,
+        session,
+        "Intensity",
+        SliderTarget::SkyIntensity,
+        0.0..=4.0,
+        2,
+    );
     ui.add_enabled_ui(!session.atmospheric_sky, |ui| {
-        slider_f32(
-            ui,
-            session,
-            "Intensity",
-            SliderTarget::SkyIntensity,
-            0.0..=4.0,
-            2,
-        );
         slider_f32(
             ui,
             session,

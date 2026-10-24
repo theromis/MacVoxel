@@ -214,13 +214,16 @@ fn atmosphere_transmittance(point: vec3<f32>, omega: vec3<f32>) -> vec3<f32> {
     return exp(-od_r - vec3<f32>(od_m));
 }
 
-fn nishita_sky(view_in: vec3<f32>, sun_in: vec3<f32>, sun_radiance: vec3<f32>, sun_cos_half: f32) -> vec3<f32> {
+const SKY_SUN_IRRADIANCE: f32 = 10.0;
+const GROUND: vec3<f32> = vec3<f32>(0.28, 0.26, 0.24);
+const HORIZON_WHITE: vec3<f32> = vec3<f32>(0.75, 0.78, 0.82);
+
+fn nishita_sky(view_in: vec3<f32>, sun_in: vec3<f32>, sun_irr: vec3<f32>) -> vec3<f32> {
     let view = safe_norm(view_in);
     let sun = safe_norm(sun_in);
     let origin = vec3<f32>(0.0, 0.0, EARTH_RADIUS);
     let t_top = ray_outer_sphere(origin, view, ATMOSPHERE_TOP);
     if (t_top <= 0.0) { return vec3<f32>(0.0); }
-    let sun_irr = sun_radiance * (6.2831853 * (1.0 - sun_cos_half));
     let cos_theta = dot(view, sun);
     let cos2 = cos_theta * cos_theta;
     let phase_r = (3.0 / 16.0) * 0.31830988618 * (1.0 + cos2);
@@ -243,6 +246,18 @@ fn nishita_sky(view_in: vec3<f32>, sun_in: vec3<f32>, sun_radiance: vec3<f32>, s
         view_t = view_t * exp(-ext * dt);
     }
     return luminance;
+}
+
+// Same as shade.rs `atmospheric_sky`.
+fn atmospheric_sky(dir: vec3<f32>) -> vec3<f32> {
+    let irradiance = u.sun_color.xyz * (SKY_SUN_IRRADIANCE * max(u.cam.z, 0.0));
+    if (dir.z >= 0.0) { return nishita_sky(dir, u.sun_dir.xyz, irradiance); }
+    var flat = vec3<f32>(dir.x, dir.y, 0.0);
+    if (dot(flat, flat) > 1.0e-8) { flat = normalize(flat); } else { flat = vec3<f32>(1.0, 0.0, 0.0); }
+    let horizon = nishita_sky(flat, u.sun_dir.xyz, irradiance);
+    let level = (horizon.x + horizon.y + horizon.z)
+        / (HORIZON_WHITE.x + HORIZON_WHITE.y + HORIZON_WHITE.z);
+    return mix(GROUND * level, horizon, exp(dir.z * 8.0));
 }
 
 fn ggx_sample_vndf(n: vec3<f32>, view: vec3<f32>, roughness: f32, rng: ptr<function, u32>) -> vec3<f32> {
@@ -270,17 +285,17 @@ fn ggx_sample_vndf(n: vec3<f32>, view: vec3<f32>, roughness: f32, rng: ptr<funct
 
 fn sky(dir_in: vec3<f32>, include_sun: bool) -> vec3<f32> {
     let dir = safe_norm(dir_in);
+    var color: vec3<f32>;
     if ((u.misc1.x & 8u) != 0u) {
-        return nishita_sky(dir, u.sun_dir.xyz, u.sun_color.xyz * u.sun_color.w, u.tone.x);
+        color = atmospheric_sky(dir);
+    } else {
+        let up = clamp(dir.z, -1.0, 1.0);
+        let horizon = exp(-abs(up) * u.cam.w);
+        let zenith = vec3<f32>(0.55, 0.62, 0.72);
+        var base = mix(GROUND, HORIZON_WHITE, horizon);
+        if (up >= 0.0) { base = mix(zenith, HORIZON_WHITE, horizon); }
+        color = base * u.cam.z;
     }
-    let up = clamp(dir.z, -1.0, 1.0);
-    let horizon = exp(-abs(up) * u.cam.w);
-    let zenith = vec3<f32>(0.55, 0.62, 0.72);
-    let ground = vec3<f32>(0.28, 0.26, 0.24);
-    let white = vec3<f32>(0.75, 0.78, 0.82);
-    var base = mix(ground, white, horizon);
-    if (up >= 0.0) { base = mix(zenith, white, horizon); }
-    var color = base * u.cam.z;
     if (include_sun && dot(dir, u.sun_dir.xyz) >= u.tone.x) {
         color = color + u.sun_color.xyz * u.sun_color.w;
     }

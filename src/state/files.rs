@@ -372,31 +372,41 @@ impl Session {
 
     /// Queue a PNG of the Render-mode frame. The file is written once the
     /// preview has reached `max_samples`. A finished CPU frame is written now.
+    /// Leaving Render mode, or an edit that starts the frame over, cancels it.
     pub fn save_render(&mut self) {
+        if self.render_mode != RenderMode::Render {
+            self.status = "Switch to Render and wait for a sample.".into();
+            return;
+        }
         let Some(path) = self.pick_render_path() else {
             return;
         };
         let cap = self.render_sample_cap();
-        if self.trace_on_gpu {
-            self.render_save_path = Some(path);
-            self.status = format!("Saving when the frame reaches {cap} samples.");
+        let ready = !self.trace_on_gpu
+            && self
+                .render_preview
+                .as_ref()
+                .is_some_and(|image| image.samples >= cap);
+        if ready {
+            let image = self.render_preview.clone().expect("preview");
+            self.write_saved_render(&path, &image);
             return;
         }
-        let ready = self
-            .render_preview
-            .as_ref()
-            .is_some_and(|image| image.samples >= cap);
-        if !ready {
-            if self.render_mode != RenderMode::Render {
-                self.status = "Switch to Render and wait for a sample.".into();
-                return;
-            }
-            self.render_save_path = Some(path);
-            self.status = format!("Saving when the frame reaches {cap} samples.");
-            return;
+        let replaced = self.render_save_path.replace(path).is_some();
+        self.render_save_seen = None;
+        self.status = if replaced {
+            format!("Replaced the pending save. Saving when the frame reaches {cap} samples.")
+        } else {
+            format!("Saving when the frame reaches {cap} samples.")
+        };
+    }
+
+    /// Drop a queued Save Render, saying why in the status line.
+    pub(crate) fn cancel_pending_render(&mut self, why: &str) {
+        if self.render_save_path.take().is_some() {
+            self.render_save_seen = None;
+            self.status = format!("Save Render cancelled: {why}.");
         }
-        let image = self.render_preview.clone().expect("preview");
-        self.write_saved_render(&path, &image);
     }
 
     pub(crate) fn render_sample_cap(&self) -> u32 {
@@ -404,12 +414,20 @@ impl Session {
     }
 
     /// Hand back the pending PNG path once `samples` has reached the cap.
+    /// A sample count lower than the last one seen means the frame started
+    /// over, so the save is cancelled rather than written from a new picture.
     pub(crate) fn take_finished_render(&mut self, samples: u32) -> Option<PathBuf> {
-        if samples < self.render_sample_cap() {
-            None
-        } else {
-            self.render_save_path.take()
+        self.render_save_path.as_ref()?;
+        if self.render_save_seen.is_some_and(|seen| samples < seen) {
+            self.cancel_pending_render("the picture changed before it finished");
+            return None;
         }
+        self.render_save_seen = Some(samples);
+        if samples < self.render_sample_cap() {
+            return None;
+        }
+        self.render_save_seen = None;
+        self.render_save_path.take()
     }
 
     pub(crate) fn write_saved_render(&mut self, path: &Path, image: &crate::trace::Image) {

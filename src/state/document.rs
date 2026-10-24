@@ -96,6 +96,7 @@ impl Session {
             render_key: 0,
             trace_on_gpu: false,
             render_save_path: None,
+            render_save_seen: None,
             yaw: -0.8,
             pitch: 0.55,
             distance: 28.0,

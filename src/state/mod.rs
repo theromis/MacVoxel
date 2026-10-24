@@ -623,6 +623,8 @@ pub struct Session {
     /// reads that texture instead of the CPU frame.
     pub(crate) trace_on_gpu: bool,
     pub(crate) render_save_path: Option<PathBuf>,
+    /// Sample count of the frame when the pending save last looked at it.
+    pub(crate) render_save_seen: Option<u32>,
 
     pub yaw: f32,
     pub pitch: f32,

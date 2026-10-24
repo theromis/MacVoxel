@@ -334,14 +334,18 @@ fn atmosphere_transmittance(point: Vec3, omega: Vec3) -> [f32; 3] {
     ]
 }
 
-/// Nishita single-scatter sky. `sun` is the user's per-direction radiance,
-/// treated as top-of-atmosphere (not un-attenuated).
-pub(super) fn nishita_sky(
-    view: Vec3,
-    sun: Vec3,
-    sun_radiance: [f32; 3],
-    sun_cos_half: f32,
-) -> [f32; 3] {
+/// Sun irradiance that lights the atmospheric sky, times `sun_color` and
+/// `sky_intensity`. It does not follow the Sun slider or the disc size, so the
+/// sky stays lit with the sun off. At the default 30° sun the horizon is about
+/// as bright as the flat sky's.
+const SKY_SUN_IRRADIANCE: f32 = 10.0;
+const GROUND: [f32; 3] = [0.28, 0.26, 0.24];
+const HORIZON_WHITE: [f32; 3] = [0.75, 0.78, 0.82];
+
+/// Nishita single-scatter sky. `sun_irradiance` is top-of-atmosphere.
+/// Below the horizon every path ends in the planet, so it is black; see
+/// `atmospheric_sky` for the ground.
+pub(super) fn nishita_sky(view: Vec3, sun: Vec3, sun_irradiance: [f32; 3]) -> [f32; 3] {
     let view = view.normalize_or_zero();
     let sun = sun.normalize_or_zero();
     let origin = Vec3::new(0.0, 0.0, EARTH_RADIUS);
@@ -349,7 +353,7 @@ pub(super) fn nishita_sky(
     if t_top <= 0.0 {
         return [0.0; 3];
     }
-    let sun_irr = scale(sun_radiance, std::f32::consts::TAU * (1.0 - sun_cos_half));
+    let sun_irr = sun_irradiance;
     let cos_theta = view.dot(sun);
     let cos2 = cos_theta * cos_theta;
     const INV_PI: f32 = 0.318_309_886_18;
@@ -384,6 +388,29 @@ pub(super) fn nishita_sky(
         ];
     }
     luminance
+}
+
+/// The Nishita sky above the horizon. Below it, the horizon colour fades into
+/// the flat sky's ground colour, lit as brightly as that horizon.
+pub(super) fn atmospheric_sky(session: &Shade, dir: Vec3) -> [f32; 3] {
+    let sun = session.sun_dir();
+    let irradiance = scale(
+        session.sun_color,
+        SKY_SUN_IRRADIANCE * session.sky_intensity.max(0.0),
+    );
+    if dir.z >= 0.0 {
+        return nishita_sky(dir, sun, irradiance);
+    }
+    let flat = Vec3::new(dir.x, dir.y, 0.0);
+    let flat = if flat.length_squared() > 1.0e-8 {
+        flat.normalize()
+    } else {
+        Vec3::X
+    };
+    let horizon = nishita_sky(flat, sun, irradiance);
+    let level = (horizon[0] + horizon[1] + horizon[2])
+        / (HORIZON_WHITE[0] + HORIZON_WHITE[1] + HORIZON_WHITE[2]);
+    lerp(scale(GROUND, level), horizon, (dir.z * 8.0).exp())
 }
 
 /// Visible GGX normal (Heitz 2018). `view` points back along the ray (`-dir`).
@@ -425,20 +452,19 @@ pub(super) fn ggx_sample_vndf(normal: Vec3, view: Vec3, roughness: f32, rng: &mu
 
 pub(super) fn sky(session: &Shade, dir: Vec3, include_sun: bool) -> [f32; 3] {
     let dir = dir.normalize_or_zero();
-    if session.atmospheric_sky {
-        let cos_half = (session.sun_disc.max(0.1).to_radians() * 0.5).cos();
-        return nishita_sky(dir, session.sun_dir(), sun_radiance(session), cos_half);
-    }
-    let up = dir.z.clamp(-1.0, 1.0);
-    let horizon = (-up.abs() * session.horizon_softness.max(0.0)).exp();
-    let zenith = [0.55, 0.62, 0.72];
-    let ground = [0.28, 0.26, 0.24];
-    let base = if up >= 0.0 {
-        lerp(zenith, [0.75, 0.78, 0.82], horizon)
+    let mut color = if session.atmospheric_sky {
+        atmospheric_sky(session, dir)
     } else {
-        lerp(ground, [0.75, 0.78, 0.82], horizon)
+        let up = dir.z.clamp(-1.0, 1.0);
+        let horizon = (-up.abs() * session.horizon_softness.max(0.0)).exp();
+        let zenith = [0.55, 0.62, 0.72];
+        let base = if up >= 0.0 {
+            lerp(zenith, HORIZON_WHITE, horizon)
+        } else {
+            lerp(GROUND, HORIZON_WHITE, horizon)
+        };
+        scale(base, session.sky_intensity.max(0.0))
     };
-    let mut color = scale(base, session.sky_intensity.max(0.0));
     if include_sun {
         let cos = dir
             .normalize_or_zero()

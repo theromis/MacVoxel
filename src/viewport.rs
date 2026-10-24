@@ -122,6 +122,9 @@ pub fn show(
         cache.anchor = None;
     }
 
+    if session.render_mode != RenderMode::Render {
+        session.cancel_pending_render("left Render mode");
+    }
     let painter = ui.painter().with_clip_rect(rect);
     if session.render_mode == RenderMode::Render
         && paint_gpu(ctx, render_state, session, cache, rect, &painter)
