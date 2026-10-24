@@ -28,70 +28,17 @@ impl Session {
         }
         let object_mode = self.editor_mode == EditorMode::Object;
         let mut cmd: Option<Cmd> = None;
-        // On macOS the application menu owns these accelerators. Consuming
+        // On macOS the application menu owns the menu shortcuts. Consuming
         // them here as well would undo or save twice when AppKit also delivers
         // the key to the window.
-        let native_owns_shortcuts =
-            cfg!(target_os = "macos") && std::env::var_os("MACVOXEL_NO_NATIVE_MENU").is_none();
+        let menu_shortcuts = !crate::menu::native();
         ctx.input_mut(|i| {
-            let redo = egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::Z,
-            );
-            let undo = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z);
-            let save_as = egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::S,
-            );
-            let save = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
-            let open = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
-            let new = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N);
-            let cut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::X);
-            let copy = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::C);
-            let paste = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::V);
-            let deselect = egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::D,
-            );
-            let new_object = egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::N,
-            );
-            let duplicate = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::D);
-            let export_mesh = egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::E,
-            );
-            let close = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::W);
             let command = i.modifiers.command;
-            if !native_owns_shortcuts && i.consume_shortcut(&redo) {
-                cmd = Some(Cmd::Redo);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&undo) {
-                cmd = Some(Cmd::Undo);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&save_as) {
-                cmd = Some(Cmd::SaveAs);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&save) {
-                cmd = Some(Cmd::Save);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&open) {
-                cmd = Some(Cmd::Open);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&new_object) {
-                cmd = Some(Cmd::NewObject);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&new) {
-                cmd = Some(Cmd::New);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&export_mesh) {
-                cmd = Some(Cmd::ExportMesh);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&close) {
-                cmd = Some(Cmd::Close);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&cut) {
-                cmd = Some(Cmd::Cut);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&copy) {
-                cmd = Some(Cmd::Copy);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&paste) {
-                cmd = Some(Cmd::Paste);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&deselect) {
-                cmd = Some(Cmd::Deselect);
-            } else if !native_owns_shortcuts && i.consume_shortcut(&duplicate) {
-                cmd = Some(Cmd::DuplicateObject);
+            if let Some(action) = menu_shortcuts
+                .then(|| crate::menu::consume_shortcut(i))
+                .flatten()
+            {
+                cmd = Some(Cmd::Menu(action));
             } else if i.key_pressed(egui::Key::Tab) {
                 cmd = Some(Cmd::Tab);
             } else if i.key_pressed(egui::Key::V) && !command {
@@ -139,12 +86,7 @@ impl Session {
             }
         });
         match cmd {
-            Some(Cmd::Undo) => self.undo(),
-            Some(Cmd::Redo) => self.redo(),
-            Some(Cmd::Open) => self.open_dialog(),
-            Some(Cmd::New) => self.new_document(),
-            Some(Cmd::Save) => self.save(),
-            Some(Cmd::SaveAs) => self.save_as(),
+            Some(Cmd::Menu(action)) => action.run(self, ctx),
             Some(Cmd::Tab) => {
                 self.editor_mode = if self.editor_mode == EditorMode::Model {
                     EditorMode::Object
@@ -155,16 +97,8 @@ impl Session {
             Some(Cmd::Tool(tool)) => self.tool = tool,
             Some(Cmd::Mode(mode)) => self.tool_mode = mode,
             Some(Cmd::DeletePicked) => self.delete_picked(),
-            Some(Cmd::Cut) => self.cut_picked(),
-            Some(Cmd::Copy) => self.copy_picked(),
-            Some(Cmd::Paste) => self.paste_clipboard(),
-            Some(Cmd::Deselect) => self.deselect(),
-            Some(Cmd::NewObject) => self.new_object(),
-            Some(Cmd::DuplicateObject) => self.duplicate_object(),
             Some(Cmd::RotateObject(axis)) => self.rotate_object(axis, false),
             Some(Cmd::FlipObject(axis)) => self.flip_object(axis),
-            Some(Cmd::ExportMesh) => self.export_mesh_dialog(),
-            Some(Cmd::Close) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             None => {}
         }
     }

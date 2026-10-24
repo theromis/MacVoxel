@@ -24,6 +24,7 @@ mod denoise;
 mod export;
 mod gpu;
 mod mcp;
+mod menu;
 mod menu_bar;
 mod mesh;
 #[cfg(target_os = "macos")]
@@ -80,6 +81,10 @@ fn main() -> eframe::Result {
         },
         None => None,
     };
+    #[cfg(target_os = "macos")]
+    if menu::native() {
+        native_menu::suppress_system_edit_items();
+    }
     let mut session = Session::new();
     if let Some(path) = file {
         session.load_path(path.as_path());
@@ -153,7 +158,7 @@ impl eframe::App for Shell {
             .note_ui("window", "Window", screen, UiAction::None);
         #[cfg(target_os = "macos")]
         {
-            if self.native_menu.is_none() && std::env::var_os("MACVOXEL_NO_NATIVE_MENU").is_none() {
+            if self.native_menu.is_none() && menu::native() {
                 self.native_menu = Some(native_menu::NativeMenu::install());
             }
             if let Some(menu) = &mut self.native_menu {

@@ -14,7 +14,8 @@ cargo run -- path/to/model.vox
 ```
 
 The binary is `macvoxel-egui`. On macOS the File and Edit commands live on
-the application menu bar. Elsewhere those commands are not in the window yet.
+the application menu bar. Elsewhere, or with `MACVOXEL_NO_NATIVE_MENU` set,
+they are in a menu strip at the top of the window.
 
 ## What it does
 

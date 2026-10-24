@@ -7,24 +7,11 @@ use super::vox::*;
 use super::*;
 
 pub(super) enum Cmd {
-    Undo,
-    Redo,
-    Open,
-    New,
-    Save,
-    SaveAs,
+    Menu(crate::menu::Action),
     Tab,
     Tool(Tool),
     Mode(ToolMode),
     DeletePicked,
-    Cut,
-    Copy,
-    Paste,
-    Deselect,
-    NewObject,
-    DuplicateObject,
-    ExportMesh,
-    Close,
     RotateObject(Axis),
     FlipObject(Axis),
 }

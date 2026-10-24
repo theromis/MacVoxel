@@ -1,22 +1,50 @@
-//! macOS application menu bar. The window itself has no menu strip; items
-//! dispatch through the same session methods as the keyboard shortcuts.
+//! macOS application menu bar, built from [`menu::MENUS`]. The window then
+//! shows no menu strip; items dispatch through [`Action::run`].
 //!
 //! Set `MACVOXEL_NO_NATIVE_MENU` to leave the process menu untouched (the
-//! egui shortcuts then handle New, Open, Save, Undo, and Redo).
+//! in-window strip and egui shortcuts then carry these commands).
 
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use muda::accelerator::Accelerator;
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use objc2::runtime::AnyObject;
+use objc2_foundation::{NSDictionary, NSNumber, NSString, NSUserDefaults};
 
+use crate::menu::{self, Action, Entry};
 use crate::state::Session;
+
+/// AppKit appends Writing Tools, AutoFill, Start Dictation, and Emoji &
+/// Symbols to a menu titled Edit. None of them apply to voxels. Registered
+/// defaults are not stored, and a `defaults write` still overrides them.
+/// Call before the application starts.
+pub fn suppress_system_edit_items() {
+    let keys = [
+        // Writing Tools and AutoFill (macOS 15 and later).
+        ("NSAutoFillSystemInsertMenuEnabled", false),
+        ("NSMenuDoesNotAutomaticallyInsertWritingToolsItems", true),
+        ("NSDisabledDictationMenuItem", true),
+        ("NSDisabledCharacterPaletteMenuItem", true),
+    ];
+    let names: Vec<_> = keys
+        .iter()
+        .map(|(key, _)| NSString::from_str(key))
+        .collect();
+    let values: Vec<_> = keys
+        .iter()
+        .map(|(_, value)| NSNumber::new_bool(*value))
+        .collect();
+    let names: Vec<&NSString> = names.iter().map(|name| &**name).collect();
+    let values: Vec<&AnyObject> = values.iter().map(|value| value.as_ref()).collect();
+    let defaults = NSDictionary::<NSString, AnyObject>::from_slices(&names, &values);
+    // SAFETY: every value is an NSNumber, a property-list type.
+    unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+}
 
 pub struct NativeMenu {
     _menu: Menu,
-    _app: Submenu,
-    _file: Submenu,
-    _edit: Submenu,
+    _submenus: Vec<Submenu>,
     recent: Submenu,
     _predefined: Vec<PredefinedMenuItem>,
     _items: Vec<MenuItem>,
@@ -24,12 +52,32 @@ pub struct NativeMenu {
     recent_paths: Vec<PathBuf>,
 }
 
-fn accel(sc: &str) -> Option<Accelerator> {
-    Accelerator::from_str(&sc.replace("Cmd", "CMD").replace("Shift", "SHIFT")).ok()
+fn accel(action: Action) -> Option<Accelerator> {
+    let shortcut = action.shortcut();
+    let mut text = String::new();
+    if shortcut.modifiers.command {
+        text.push_str("CMD+");
+    }
+    if shortcut.modifiers.shift {
+        text.push_str("SHIFT+");
+    }
+    text.push_str(shortcut.logical_key.name());
+    Accelerator::from_str(&text).ok()
 }
 
-fn item(id: &str, label: &str, shortcut: &str) -> MenuItem {
-    MenuItem::with_id(id, label, true, accel(shortcut))
+fn item(action: Action) -> MenuItem {
+    MenuItem::with_id(
+        format!("mv-{}", action.id()),
+        action.label(),
+        true,
+        accel(action),
+    )
+}
+
+fn recent_empty() -> MenuItem {
+    let empty = MenuItem::with_id("mv-recent-empty", "No Recent Files", true, None);
+    empty.set_enabled(false);
+    empty
 }
 
 impl NativeMenu {
@@ -47,123 +95,67 @@ impl NativeMenu {
         }
         // The predefined Quit terminates the app without a close request,
         // which would skip the unsaved-changes prompt.
-        let quit = item("mv-quit", "Quit MacVoxel", "Cmd+Q");
+        let quit = item(Action::Quit);
         let _ = app.append(&quit);
         let _ = menu.append(&app);
 
-        let file = Submenu::new("File", true);
-        let new = item("mv-new", "New", "Cmd+N");
-        let open = item("mv-open", "Open…", "Cmd+O");
+        let mut items = vec![quit];
+        let mut submenus = vec![app];
         let recent = Submenu::new("Open Recent", true);
-        let recent_empty = item("mv-recent-empty", "No Recent Files", "");
-        recent_empty.set_enabled(false);
-        let _ = recent.append(&recent_empty);
-        let save = item("mv-save", "Save", "Cmd+S");
-        let save_as = item("mv-save-as", "Save As…", "Cmd+Shift+S");
-        let export_mesh = item("mv-export", "Export Mesh…", "Cmd+Shift+E");
-        let close = item("mv-close", "Close", "Cmd+W");
-        let file_sep = PredefinedMenuItem::separator();
-        let file_sep_2 = PredefinedMenuItem::separator();
-        let file_sep_3 = PredefinedMenuItem::separator();
-        let _ = file.append(&new);
-        let _ = file.append(&open);
-        let _ = file.append(&recent);
-        let _ = file.append(&file_sep);
-        let _ = file.append(&save);
-        let _ = file.append(&save_as);
-        let _ = file.append(&file_sep_2);
-        let _ = file.append(&export_mesh);
-        let _ = file.append(&file_sep_3);
-        let _ = file.append(&close);
-        predefined.extend([file_sep, file_sep_2, file_sep_3]);
-        let _ = menu.append(&file);
-
-        let edit = Submenu::new("Edit", true);
-        let undo = item("mv-undo", "Undo", "Cmd+Z");
-        let redo = item("mv-redo", "Redo", "Cmd+Shift+Z");
-        let edit_sep = PredefinedMenuItem::separator();
-        let cut = item("mv-cut", "Cut", "Cmd+X");
-        let copy = item("mv-copy", "Copy", "Cmd+C");
-        let paste = item("mv-paste", "Paste", "Cmd+V");
-        let delete = item("mv-delete", "Delete", "Cmd+Backspace");
-        let new_object = item("mv-new-object", "New Object", "Cmd+Shift+N");
-        let duplicate = item("mv-duplicate", "Duplicate", "Cmd+D");
-        let deselect = item("mv-deselect", "Deselect", "Cmd+Shift+D");
-        let _ = edit.append(&undo);
-        let _ = edit.append(&redo);
-        let _ = edit.append(&edit_sep);
-        let _ = edit.append(&cut);
-        let _ = edit.append(&copy);
-        let _ = edit.append(&paste);
-        let _ = edit.append(&delete);
-        let _ = edit.append(&new_object);
-        let _ = edit.append(&duplicate);
-        let _ = edit.append(&deselect);
-        predefined.push(edit_sep);
-        let _ = menu.append(&edit);
+        let empty = recent_empty();
+        let _ = recent.append(&empty);
+        for spec in menu::MENUS {
+            let submenu = Submenu::new(spec.title, true);
+            for entry in spec.entries {
+                match entry {
+                    Entry::Item(action) => {
+                        let entry = item(*action);
+                        let _ = submenu.append(&entry);
+                        items.push(entry);
+                    }
+                    Entry::OpenRecent => {
+                        let _ = submenu.append(&recent);
+                    }
+                    Entry::Separator => {
+                        let separator = PredefinedMenuItem::separator();
+                        let _ = submenu.append(&separator);
+                        predefined.push(separator);
+                    }
+                }
+            }
+            let _ = menu.append(&submenu);
+            submenus.push(submenu);
+        }
 
         menu.init_for_nsapp();
         Self {
             _menu: menu,
-            _app: app,
-            _file: file,
-            _edit: edit,
+            _submenus: submenus,
             recent,
             _predefined: predefined,
-            _items: vec![
-                quit,
-                new,
-                open,
-                save,
-                save_as,
-                export_mesh,
-                close,
-                undo,
-                redo,
-                cut,
-                copy,
-                paste,
-                delete,
-                new_object,
-                duplicate,
-                deselect,
-            ],
-            recent_items: vec![recent_empty],
+            _items: items,
+            recent_items: vec![empty],
             recent_paths: Vec::new(),
         }
     }
 
     pub fn poll(&mut self, session: &mut Session, ctx: &egui::Context) {
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
-            let id = ev.id.as_ref();
-            if let Some(rest) = id.strip_prefix("mv-recent-") {
+            let Some(id) = ev.id.as_ref().strip_prefix("mv-") else {
+                continue;
+            };
+            if let Some(rest) = id.strip_prefix("recent-") {
                 if let Ok(index) = rest.parse::<usize>() {
                     if let Some(path) = session.recent_paths().get(index).cloned() {
                         session.load_path(&path);
                     }
                     ctx.request_repaint();
-                    continue;
                 }
+                continue;
             }
-            match id {
-                "mv-new" => session.new_document(),
-                "mv-open" => session.open_dialog(),
-                "mv-save" => session.save(),
-                "mv-save-as" => session.save_as(),
-                "mv-export" => session.export_mesh_dialog(),
-                "mv-close" | "mv-quit" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                "mv-undo" => session.undo(),
-                "mv-redo" => session.redo(),
-                "mv-cut" => session.cut_picked(),
-                "mv-copy" => session.copy_picked(),
-                "mv-paste" => session.paste_clipboard(),
-                "mv-delete" => session.delete_picked(),
-                "mv-new-object" => session.new_object(),
-                "mv-duplicate" => session.duplicate_object(),
-                "mv-deselect" => session.deselect(),
-                _ => continue,
+            if let Some(action) = Action::from_id(id) {
+                action.run(session, ctx);
             }
-            ctx.request_repaint();
         }
         self.sync_recent(session);
     }
@@ -176,8 +168,7 @@ impl NativeMenu {
         while self.recent.remove_at(0).is_some() {}
         self.recent_items.clear();
         if paths.is_empty() {
-            let empty = item("mv-recent-empty", "No Recent Files", "");
-            empty.set_enabled(false);
+            let empty = recent_empty();
             let _ = self.recent.append(&empty);
             self.recent_items.push(empty);
         } else {
