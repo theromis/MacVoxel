@@ -193,8 +193,9 @@ impl Session {
         }
         let right = right.normalize_or_zero();
         let up = right.cross(forward).normalize_or_zero();
+        // The scene follows the pointer, so the target moves against it.
         let scale = self.distance * 0.0022;
-        self.target += right * dx * scale + up * -dy * scale;
+        self.target += right * -dx * scale + up * dy * scale;
     }
 
     pub(super) fn apply_stroke(&mut self, ray: Option<(Vec3, Vec3)>, drag: &ToolDrag) {
