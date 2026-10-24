@@ -370,24 +370,50 @@ impl Session {
         }
     }
 
-    /// Write the current Render-mode frame. The picture is the one on screen.
+    /// Queue a PNG of the Render-mode frame. The file is written once the
+    /// preview has reached `max_samples`. A finished CPU frame is written now.
     pub fn save_render(&mut self) {
         let Some(path) = self.pick_render_path() else {
             return;
         };
+        let cap = self.render_sample_cap();
         if self.trace_on_gpu {
             self.render_save_path = Some(path);
+            self.status = format!("Saving when the frame reaches {cap} samples.");
             return;
         }
-        let Some(image) = self.render_preview.clone() else {
-            self.status = "Switch to Render and wait for a sample.".into();
-            return;
-        };
-        if image.samples == 0 && image.row_progress() == 0 {
-            self.status = "Switch to Render and wait for a sample.".into();
+        let ready = self
+            .render_preview
+            .as_ref()
+            .is_some_and(|image| image.samples >= cap);
+        if !ready {
+            if self.render_mode != RenderMode::Render {
+                self.status = "Switch to Render and wait for a sample.".into();
+                return;
+            }
+            self.render_save_path = Some(path);
+            self.status = format!("Saving when the frame reaches {cap} samples.");
             return;
         }
-        match crate::trace::write_png(&path, &image, self) {
+        let image = self.render_preview.clone().expect("preview");
+        self.write_saved_render(&path, &image);
+    }
+
+    pub(crate) fn render_sample_cap(&self) -> u32 {
+        self.max_samples.clamp(1, 8192) as u32
+    }
+
+    /// Hand back the pending PNG path once `samples` has reached the cap.
+    pub(crate) fn take_finished_render(&mut self, samples: u32) -> Option<PathBuf> {
+        if samples < self.render_sample_cap() {
+            None
+        } else {
+            self.render_save_path.take()
+        }
+    }
+
+    pub(crate) fn write_saved_render(&mut self, path: &Path, image: &crate::trace::Image) {
+        match crate::trace::write_png(path, image, self) {
             Ok(()) => {
                 let file = path
                     .file_name()

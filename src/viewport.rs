@@ -388,7 +388,7 @@ fn paint_gpu(
     if frame.repaint {
         ctx.request_repaint();
     }
-    if let Some(path) = session.render_save_path.take() {
+    if let Some(path) = session.take_finished_render(frame.samples) {
         match cache
             .trace
             .as_ref()
@@ -426,13 +426,18 @@ fn advance_trace(ctx: &egui::Context, session: &mut Session, rect: egui::Rect) {
         session.render_preview = Some(crate::trace::Image::new(size[0], size[1]));
         session.render_key = key;
     }
-    let cap = session.max_samples.clamp(1, 8192) as u32;
+    let cap = session.render_sample_cap();
     let mut image = session.render_preview.take().expect("preview");
     if image.samples < cap {
         crate::trace::trace_rows(&mut image, session, 6);
         ctx.request_repaint();
     }
+    let samples = image.samples;
     session.render_preview = Some(image);
+    if let Some(path) = session.take_finished_render(samples) {
+        let image = session.render_preview.clone().expect("preview");
+        session.write_saved_render(&path, &image);
+    }
 }
 
 fn projection(aspect: f32) -> Mat4 {

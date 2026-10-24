@@ -80,7 +80,7 @@ pub(super) fn render(ui: &mut Ui, session: &mut Session) {
     section(ui, "Camera");
     ui.checkbox(&mut session.aces, "ACES tonemap");
     ui.checkbox(&mut session.denoise, "Denoise").on_hover_text(
-        "Edge-aware filter on the finished frame. Open Image Denoise stays in the Metal app.",
+        "Edge-aware filter on the finished frame. Open Image Denoise is not linked.",
     );
     slider_f32(
         ui,
@@ -227,7 +227,10 @@ pub(super) fn light(ui: &mut Ui, session: &mut Session) {
     );
 
     section(ui, "Sky");
-    ui.checkbox(&mut session.atmospheric_sky, "Atmospheric sky");
+    ui.checkbox(&mut session.atmospheric_sky, "Atmospheric sky")
+        .on_hover_text(
+            "Nishita single-scatter sky (Rayleigh and Mie). Off: a flat horizon gradient.",
+        );
     ui.add_enabled_ui(!session.atmospheric_sky, |ui| {
         slider_f32(
             ui,
@@ -237,15 +240,15 @@ pub(super) fn light(ui: &mut Ui, session: &mut Session) {
             0.0..=4.0,
             2,
         );
+        slider_f32(
+            ui,
+            session,
+            "Horizon",
+            SliderTarget::HorizonSoftness,
+            0.0..=15.0,
+            1,
+        );
     });
-    slider_f32(
-        ui,
-        session,
-        "Horizon",
-        SliderTarget::HorizonSoftness,
-        0.0..=15.0,
-        1,
-    );
 
     section(ui, "Sun");
     slider_f32(

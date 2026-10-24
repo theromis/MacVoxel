@@ -31,18 +31,23 @@ pub(super) fn radiance(
             }
         }
         MaterialType::Metal => {
-            let reflect = reflect(-dir, hit.normal);
             let rough = material.roughness.clamp(0.0, 1.0);
-            let wi = if rough > 0.02 {
-                lerp_dir(reflect, cosine_hemisphere(hit.normal, rng), rough).normalize_or_zero()
-            } else {
-                reflect
-            };
-            if wi.dot(hit.normal) <= 0.0 || bounce == bounces {
+            let metal = material.metallic.clamp(0.0, 1.0);
+            if metal <= 0.0 || rng.next_f32() >= metal {
+                diffuse(world, session, &hit, albedo, dir, bounce, rng)
+            } else if bounce == bounces {
                 [0.0; 3]
             } else {
-                let next = radiance(world, session, hit.point + wi * 0.001, wi, bounce + 1, rng);
-                mul(albedo, next)
+                let view = -dir;
+                let facet = ggx_sample_vndf(hit.normal, view, rough, rng);
+                let wi = reflect(dir, facet);
+                if wi.dot(hit.normal) <= 0.0 {
+                    [0.0; 3]
+                } else {
+                    let next =
+                        radiance(world, session, hit.point + wi * 0.001, wi, bounce + 1, rng);
+                    mul(albedo, next)
+                }
             }
         }
         MaterialType::Glass => glass(world, session, &hit, albedo, &material, dir, bounce, rng),
@@ -112,15 +117,19 @@ pub(super) fn glass(
         return mul(tint, next);
     }
     let ior = material.ior.clamp(1.0, 3.0);
+    let rough = material.roughness.clamp(0.0, 1.0);
     let entering = dir.dot(hit.normal) < 0.0;
-    let (n, eta) = if entering {
+    let (mut n, eta) = if entering {
         (hit.normal, 1.0 / ior)
     } else {
         (-hit.normal, ior)
     };
+    if rough > 0.02 {
+        n = ggx_sample_vndf(n, -dir, rough, rng);
+    }
     let cos_i = (-dir).dot(n).clamp(0.0, 1.0);
     let fresnel = schlick(cos_i, ior);
-    let reflect_dir = reflect(-dir, n);
+    let reflect_dir = reflect(dir, n);
     if rng.next_f32() < fresnel {
         return radiance(
             world,
@@ -270,14 +279,159 @@ pub(super) fn sun_radiance(session: &Shade) -> [f32; 3] {
     scale(session.sun_color, session.sun_intensity.max(0.0))
 }
 
+const EARTH_RADIUS: f32 = 6_371_000.0;
+const ATMOSPHERE_TOP: f32 = 6_471_000.0;
+const RAYLEIGH_SIGMA: [f32; 3] = [5.802e-6, 13.558e-6, 33.1e-6];
+const MIE_SCATTER: f32 = 3.996e-6;
+const MIE_ABSORB: f32 = 4.4e-6;
+const RAYLEIGH_SCALE: f32 = 8_000.0;
+const MIE_SCALE: f32 = 1_200.0;
+const MIE_G: f32 = 0.76;
+const SKY_VIEW_SAMPLES: i32 = 32;
+const SKY_SUN_SAMPLES: i32 = 8;
+
+fn ray_outer_sphere(point: Vec3, dir: Vec3, radius: f32) -> f32 {
+    let b = point.dot(dir);
+    let c = point.length_squared() - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        -1.0
+    } else {
+        -b + disc.sqrt()
+    }
+}
+
+fn atmosphere_altitude(point: Vec3) -> f32 {
+    let r2 = point.length_squared();
+    (r2 - EARTH_RADIUS * EARTH_RADIUS) / (r2.sqrt() + EARTH_RADIUS)
+}
+
+fn atmosphere_transmittance(point: Vec3, omega: Vec3) -> [f32; 3] {
+    let t_top = ray_outer_sphere(point, omega, ATMOSPHERE_TOP);
+    if t_top <= 0.0 {
+        return [0.0; 3];
+    }
+    let t_ground = ray_outer_sphere(point, omega, EARTH_RADIUS);
+    if t_ground > 1.0 && t_ground < t_top {
+        return [0.0; 3];
+    }
+    let dt = t_top / SKY_SUN_SAMPLES as f32;
+    let mut od_r = [0.0; 3];
+    let mut od_m = 0.0;
+    for i in 0..SKY_SUN_SAMPLES {
+        let t = (i as f32 + 0.5) * dt;
+        let height = atmosphere_altitude(point + omega * t).max(0.0);
+        od_r = add(
+            od_r,
+            scale(RAYLEIGH_SIGMA, (-height / RAYLEIGH_SCALE).exp() * dt),
+        );
+        od_m += (MIE_SCATTER + MIE_ABSORB) * (-height / MIE_SCALE).exp() * dt;
+    }
+    [
+        (-(od_r[0] + od_m)).exp(),
+        (-(od_r[1] + od_m)).exp(),
+        (-(od_r[2] + od_m)).exp(),
+    ]
+}
+
+/// Nishita single-scatter sky. `sun` is the user's per-direction radiance,
+/// treated as top-of-atmosphere (not un-attenuated).
+pub(super) fn nishita_sky(
+    view: Vec3,
+    sun: Vec3,
+    sun_radiance: [f32; 3],
+    sun_cos_half: f32,
+) -> [f32; 3] {
+    let view = view.normalize_or_zero();
+    let sun = sun.normalize_or_zero();
+    let origin = Vec3::new(0.0, 0.0, EARTH_RADIUS);
+    let t_top = ray_outer_sphere(origin, view, ATMOSPHERE_TOP);
+    if t_top <= 0.0 {
+        return [0.0; 3];
+    }
+    let sun_irr = scale(sun_radiance, std::f32::consts::TAU * (1.0 - sun_cos_half));
+    let cos_theta = view.dot(sun);
+    let cos2 = cos_theta * cos_theta;
+    const INV_PI: f32 = 0.318_309_886_18;
+    let phase_r = (3.0 / 16.0) * INV_PI * (1.0 + cos2);
+    let g2 = MIE_G * MIE_G;
+    let phase_m = (3.0 * 0.125 * INV_PI) * (1.0 - g2) * (1.0 + cos2)
+        / ((2.0 + g2) * (1.0 + g2 - 2.0 * MIE_G * cos_theta).powf(1.5));
+    let dt = t_top / SKY_VIEW_SAMPLES as f32;
+    let mut luminance = [0.0; 3];
+    let mut view_t = [1.0, 1.0, 1.0];
+    for i in 0..SKY_VIEW_SAMPLES {
+        let t = (i as f32 + 0.5) * dt;
+        let sample = origin + view * t;
+        let height = atmosphere_altitude(sample).max(0.0);
+        let density_r = (-height / RAYLEIGH_SCALE).exp();
+        let density_m = (-height / MIE_SCALE).exp();
+        let to_sun = atmosphere_transmittance(sample, sun);
+        let scatter = add(
+            scale(RAYLEIGH_SIGMA, density_r * phase_r),
+            [MIE_SCATTER * density_m * phase_m; 3],
+        );
+        let incoming = mul(mul(view_t, scatter), mul(to_sun, sun_irr));
+        luminance = add(luminance, scale(incoming, dt));
+        let ext = add(
+            scale(RAYLEIGH_SIGMA, density_r),
+            [(MIE_SCATTER + MIE_ABSORB) * density_m; 3],
+        );
+        view_t = [
+            view_t[0] * (-ext[0] * dt).exp(),
+            view_t[1] * (-ext[1] * dt).exp(),
+            view_t[2] * (-ext[2] * dt).exp(),
+        ];
+    }
+    luminance
+}
+
+/// Visible GGX normal (Heitz 2018). `view` points back along the ray (`-dir`).
+/// Roughness 0 returns `normal`.
+pub(super) fn ggx_sample_vndf(normal: Vec3, view: Vec3, roughness: f32, rng: &mut Rng) -> Vec3 {
+    let alpha = roughness * roughness;
+    let helper = if normal.x.abs() > 0.5 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let tangent = normal.cross(helper).normalize_or_zero();
+    let bitangent = normal.cross(tangent);
+    let view_t = Vec3::new(view.dot(tangent), view.dot(bitangent), view.dot(normal));
+    let stretched = Vec3::new(alpha * view_t.x, alpha * view_t.y, view_t.z).normalize_or_zero();
+    let lensq = stretched.x * stretched.x + stretched.y * stretched.y;
+    let t1 = if lensq > 0.0 {
+        Vec3::new(-stretched.y, stretched.x, 0.0) / lensq.sqrt()
+    } else {
+        Vec3::X
+    };
+    let t2 = stretched.cross(t1);
+    let radius = rng.next_f32().sqrt();
+    let phi = std::f32::consts::TAU * rng.next_f32();
+    let p1 = radius * phi.cos();
+    let mut p2 = radius * phi.sin();
+    let cap = 0.5 * (1.0 + stretched.z);
+    p2 = (1.0 - cap) * (1.0 - p1 * p1).max(0.0).sqrt() + cap * p2;
+    let hemisphere = t1 * p1 + t2 * p2 + stretched * (1.0 - p1 * p1 - p2 * p2).max(0.0).sqrt();
+    let unstretched = Vec3::new(
+        alpha * hemisphere.x,
+        alpha * hemisphere.y,
+        hemisphere.z.max(0.0),
+    )
+    .normalize_or_zero();
+    (tangent * unstretched.x + bitangent * unstretched.y + normal * unstretched.z)
+        .normalize_or_zero()
+}
+
 pub(super) fn sky(session: &Shade, dir: Vec3, include_sun: bool) -> [f32; 3] {
+    let dir = dir.normalize_or_zero();
+    if session.atmospheric_sky {
+        let cos_half = (session.sun_disc.max(0.1).to_radians() * 0.5).cos();
+        return nishita_sky(dir, session.sun_dir(), sun_radiance(session), cos_half);
+    }
     let up = dir.z.clamp(-1.0, 1.0);
     let horizon = (-up.abs() * session.horizon_softness.max(0.0)).exp();
-    let zenith = if session.atmospheric_sky {
-        [0.25, 0.45, 0.85]
-    } else {
-        [0.55, 0.62, 0.72]
-    };
+    let zenith = [0.55, 0.62, 0.72];
     let ground = [0.28, 0.26, 0.24];
     let base = if up >= 0.0 {
         lerp(zenith, [0.75, 0.78, 0.82], horizon)
@@ -366,10 +520,6 @@ pub(super) fn refract(dir: Vec3, normal: Vec3, eta: f32) -> Option<Vec3> {
 pub(super) fn schlick(cos: f32, ior: f32) -> f32 {
     let r0 = ((1.0 - ior) / (1.0 + ior)).powi(2);
     r0 + (1.0 - r0) * (1.0 - cos).powi(5)
-}
-
-pub(super) fn lerp_dir(a: Vec3, b: Vec3, t: f32) -> Vec3 {
-    a * (1.0 - t) + b * t
 }
 
 pub(super) fn clamp_indirect(color: [f32; 3], limit: f32) -> [f32; 3] {

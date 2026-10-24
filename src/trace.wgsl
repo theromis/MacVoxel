@@ -173,12 +173,109 @@ fn occluded(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32) -> bool {
     return dot(hit.point - origin, dir) < max_dist;
 }
 
+const EARTH_RADIUS: f32 = 6371000.0;
+const ATMOSPHERE_TOP: f32 = 6471000.0;
+const RAYLEIGH_SIGMA: vec3<f32> = vec3<f32>(5.802e-6, 13.558e-6, 33.1e-6);
+const MIE_SCATTER: f32 = 3.996e-6;
+const MIE_ABSORB: f32 = 4.4e-6;
+const RAYLEIGH_SCALE: f32 = 8000.0;
+const MIE_SCALE: f32 = 1200.0;
+const MIE_G: f32 = 0.76;
+const SKY_VIEW_SAMPLES: i32 = 32;
+const SKY_SUN_SAMPLES: i32 = 8;
+
+fn ray_outer_sphere(point: vec3<f32>, dir: vec3<f32>, radius: f32) -> f32 {
+    let b = dot(point, dir);
+    let c = dot(point, point) - radius * radius;
+    let disc = b * b - c;
+    if (disc < 0.0) { return -1.0; }
+    return -b + sqrt(disc);
+}
+
+fn atmosphere_altitude(point: vec3<f32>) -> f32 {
+    let r2 = dot(point, point);
+    return (r2 - EARTH_RADIUS * EARTH_RADIUS) / (sqrt(r2) + EARTH_RADIUS);
+}
+
+fn atmosphere_transmittance(point: vec3<f32>, omega: vec3<f32>) -> vec3<f32> {
+    let t_top = ray_outer_sphere(point, omega, ATMOSPHERE_TOP);
+    if (t_top <= 0.0) { return vec3<f32>(0.0); }
+    let t_ground = ray_outer_sphere(point, omega, EARTH_RADIUS);
+    if (t_ground > 1.0 && t_ground < t_top) { return vec3<f32>(0.0); }
+    let dt = t_top / f32(SKY_SUN_SAMPLES);
+    var od_r = vec3<f32>(0.0);
+    var od_m = 0.0;
+    for (var i = 0; i < SKY_SUN_SAMPLES; i++) {
+        let t = (f32(i) + 0.5) * dt;
+        let height = max(atmosphere_altitude(point + omega * t), 0.0);
+        od_r = od_r + RAYLEIGH_SIGMA * exp(-height / RAYLEIGH_SCALE) * dt;
+        od_m = od_m + (MIE_SCATTER + MIE_ABSORB) * exp(-height / MIE_SCALE) * dt;
+    }
+    return exp(-od_r - vec3<f32>(od_m));
+}
+
+fn nishita_sky(view_in: vec3<f32>, sun_in: vec3<f32>, sun_radiance: vec3<f32>, sun_cos_half: f32) -> vec3<f32> {
+    let view = safe_norm(view_in);
+    let sun = safe_norm(sun_in);
+    let origin = vec3<f32>(0.0, 0.0, EARTH_RADIUS);
+    let t_top = ray_outer_sphere(origin, view, ATMOSPHERE_TOP);
+    if (t_top <= 0.0) { return vec3<f32>(0.0); }
+    let sun_irr = sun_radiance * (6.2831853 * (1.0 - sun_cos_half));
+    let cos_theta = dot(view, sun);
+    let cos2 = cos_theta * cos_theta;
+    let phase_r = (3.0 / 16.0) * 0.31830988618 * (1.0 + cos2);
+    let g2 = MIE_G * MIE_G;
+    let phase_m = (3.0 * 0.125 * 0.31830988618) * (1.0 - g2) * (1.0 + cos2)
+        / ((2.0 + g2) * pow(1.0 + g2 - 2.0 * MIE_G * cos_theta, 1.5));
+    let dt = t_top / f32(SKY_VIEW_SAMPLES);
+    var luminance = vec3<f32>(0.0);
+    var view_t = vec3<f32>(1.0);
+    for (var i = 0; i < SKY_VIEW_SAMPLES; i++) {
+        let t = (f32(i) + 0.5) * dt;
+        let sample = origin + view * t;
+        let height = max(atmosphere_altitude(sample), 0.0);
+        let density_r = exp(-height / RAYLEIGH_SCALE);
+        let density_m = exp(-height / MIE_SCALE);
+        let to_sun = atmosphere_transmittance(sample, sun);
+        let scatter = RAYLEIGH_SIGMA * density_r * phase_r + vec3<f32>(MIE_SCATTER * density_m * phase_m);
+        luminance = luminance + view_t * scatter * to_sun * sun_irr * dt;
+        let ext = RAYLEIGH_SIGMA * density_r + vec3<f32>((MIE_SCATTER + MIE_ABSORB) * density_m);
+        view_t = view_t * exp(-ext * dt);
+    }
+    return luminance;
+}
+
+fn ggx_sample_vndf(n: vec3<f32>, view: vec3<f32>, roughness: f32, rng: ptr<function, u32>) -> vec3<f32> {
+    let a = roughness * roughness;
+    var helper = vec3<f32>(1.0, 0.0, 0.0);
+    if (abs(n.x) > 0.5) { helper = vec3<f32>(0.0, 1.0, 0.0); }
+    let t1 = safe_norm(cross(n, helper));
+    let t2 = cross(n, t1);
+    let ve = vec3<f32>(dot(view, t1), dot(view, t2), dot(view, n));
+    let vh = safe_norm(vec3<f32>(a * ve.x, a * ve.y, ve.z));
+    let lensq = vh.x * vh.x + vh.y * vh.y;
+    var basis = vec3<f32>(1.0, 0.0, 0.0);
+    if (lensq > 0.0) { basis = vec3<f32>(-vh.y, vh.x, 0.0) / sqrt(lensq); }
+    let side = cross(vh, basis);
+    let radius = sqrt(rnd(rng));
+    let phi = 6.2831853 * rnd(rng);
+    let p1 = radius * cos(phi);
+    var p2 = radius * sin(phi);
+    let cap = 0.5 * (1.0 + vh.z);
+    p2 = (1.0 - cap) * sqrt(max(0.0, 1.0 - p1 * p1)) + cap * p2;
+    let nh = basis * p1 + side * p2 + vh * sqrt(max(0.0, 1.0 - p1 * p1 - p2 * p2));
+    let ne = safe_norm(vec3<f32>(a * nh.x, a * nh.y, max(0.0, nh.z)));
+    return safe_norm(t1 * ne.x + t2 * ne.y + n * ne.z);
+}
+
 fn sky(dir_in: vec3<f32>, include_sun: bool) -> vec3<f32> {
     let dir = safe_norm(dir_in);
+    if ((u.misc1.x & 8u) != 0u) {
+        return nishita_sky(dir, u.sun_dir.xyz, u.sun_color.xyz * u.sun_color.w, u.tone.x);
+    }
     let up = clamp(dir.z, -1.0, 1.0);
     let horizon = exp(-abs(up) * u.cam.w);
-    var zenith = vec3<f32>(0.55, 0.62, 0.72);
-    if ((u.misc1.x & 8u) != 0u) { zenith = vec3<f32>(0.25, 0.45, 0.85); }
+    let zenith = vec3<f32>(0.55, 0.62, 0.72);
     let ground = vec3<f32>(0.28, 0.26, 0.24);
     let white = vec3<f32>(0.75, 0.78, 0.82);
     var base = mix(ground, white, horizon);
@@ -326,12 +423,10 @@ fn trace_sample(px: vec2<u32>, sample_i: u32) -> Sample {
             color = color + throughput * emitted;
             break;
         }
-        if (mat.ty == 1u) {
+        if (mat.ty == 1u && mat.metallic > 0.0 && rnd(&rng) < clamp(mat.metallic, 0.0, 1.0)) {
             if (bounce == bounces) { break; }
-            var wi = reflect_dir(-dir, hit.normal);
-            if (mat.roughness > 0.02) {
-                wi = safe_norm(mix(wi, cosine(hit.normal, &rng), clamp(mat.roughness, 0.0, 1.0)));
-            }
+            let facet = ggx_sample_vndf(hit.normal, -dir, clamp(mat.roughness, 0.0, 1.0), &rng);
+            let wi = reflect_dir(dir, facet);
             if (dot(wi, hit.normal) <= 0.0) { break; }
             throughput = throughput * alb;
             origin = hit.point + wi * 0.001;
@@ -355,10 +450,13 @@ fn trace_sample(px: vec2<u32>, sample_i: u32) -> Sample {
             } else {
                 n = -hit.normal;
             }
+            if (mat.roughness > 0.02) {
+                n = ggx_sample_vndf(n, -dir, clamp(mat.roughness, 0.0, 1.0), &rng);
+            }
             let cos_i = clamp(dot(-dir, n), 0.0, 1.0);
             let r0 = pow((1.0 - ior) / (1.0 + ior), 2.0);
             let fresnel = r0 + (1.0 - r0) * pow(1.0 - cos_i, 5.0);
-            let reflected = reflect_dir(-dir, n);
+            let reflected = reflect_dir(dir, n);
             if (rnd(&rng) < fresnel) {
                 origin = hit.point + reflected * 0.001;
                 dir = reflected;

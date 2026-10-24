@@ -38,11 +38,15 @@ linear. MCP `export_mesh` leaves merge off unless the caller sets it.
 
 ## Render
 
-Render mode dispatches the compute shader in `trace.wgsl`. It is not
-`legacy/src/PathTrace.metal`. The CPU tracer is the fallback and the tested
-algorithm. Save Render writes the accumulated frame, not an offline sample
-count. The Denoise checkbox is a small edge-aware filter. OIDN stays in the
-legacy app.
+Render mode dispatches `trace.wgsl`. The CPU tracer in `src/trace` is the
+fallback and the tested algorithm; the shader uses the same sky and BSDF.
+Atmospheric sky is Nishita single-scatter (Rayleigh and Mie). Off, the sky is
+the flat horizon gradient. Metal samples a GGX visible normal with probability
+`metallic` and otherwise uses the diffuse estimator. Glass roughness samples
+that normal, then Fresnel and Snell; roughness 0 is a single delta ray.
+Absorption glass stays a tinted straight ray. Save Render writes the PNG once
+the frame reaches Samples. Denoise is the edge-aware filter. Open Image
+Denoise is not linked.
 
 ## Tests
 

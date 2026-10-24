@@ -2,7 +2,8 @@
 //!
 //! The window prefers the wgpu compute tracer. This CPU path is the fallback
 //! when a scene does not fit in one grid, and it is what the tests run.
-//! The Metal shader stays in the Mac app. Open Image Denoise is not linked.
+//! Atmospheric sky, metal, and glass match `trace.wgsl`. Open Image Denoise
+//! is not linked.
 
 use std::collections::HashMap;
 
@@ -41,10 +42,6 @@ impl Image {
 
     pub fn matches(&self, width: u32, height: u32) -> bool {
         self.width == width && self.height == height
-    }
-
-    pub fn row_progress(&self) -> u32 {
-        self.row
     }
 }
 
