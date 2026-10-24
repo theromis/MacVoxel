@@ -180,7 +180,7 @@ jobs:
         if: matrix.cross
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-${{ matrix.cross }}
+          sudo apt-get install -y --no-install-recommends gcc-${{ matrix.cross }} libc6-dev-${{ matrix.deb }}-cross
           echo "CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')_LINKER=${{ matrix.cross }}-gcc" >>"$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
