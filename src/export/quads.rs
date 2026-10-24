@@ -1,5 +1,7 @@
 //! Greedy face merge and T-junction splits.
 
+use std::collections::HashMap;
+
 use super::*;
 
 pub(super) const NORMALS: [[f32; 3]; 6] = [
@@ -111,6 +113,9 @@ pub(super) fn build_with(session: &Session, options: &MeshExport) -> Built {
     if options.merge {
         quads = split_per_bone(quads);
     }
+    // Every attribute follows from the corner, the face, the slot, and the
+    // bone, so neighbouring quads that agree on all four share the vertex.
+    let mut shared: HashMap<([i32; 3], usize, u8, u16), u32> = HashMap::new();
     for quad in quads {
         let rgba = session.palette[quad.slot as usize];
         if rgba[3] != 255 {
@@ -123,9 +128,18 @@ pub(super) fn build_with(session: &Session, options: &MeshExport) -> Built {
             rgba[3] as f32 / 255.0,
         ];
         let uv = [(quad.slot as f32 + 0.5) / 256.0, 0.5];
-        let base = (built.positions.len() / 3) as u32;
         let normal = y_up(NORMALS[quad.face]);
-        for corner in quad_corners(quad.face, quad.cell, quad.w, quad.h) {
+        let mut index = [0u32; 4];
+        for (n, corner) in quad_corners(quad.face, quad.cell, quad.w, quad.h)
+            .into_iter()
+            .enumerate()
+        {
+            let next = (built.positions.len() / 3) as u32;
+            let key = (corner, quad.face, quad.slot, quad.bone);
+            index[n] = *shared.entry(key).or_insert(next);
+            if index[n] != next {
+                continue;
+            }
             let point = y_up([corner[0] as f32, corner[1] as f32, corner[2] as f32]);
             for axis in 0..3 {
                 built.min[axis] = built.min[axis].min(point[axis]);
@@ -149,7 +163,7 @@ pub(super) fn build_with(session: &Session, options: &MeshExport) -> Built {
         }
         built
             .indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            .extend_from_slice(&[index[0], index[1], index[2], index[0], index[2], index[3]]);
     }
     if built.positions.is_empty() {
         built.min = [0.0; 3];

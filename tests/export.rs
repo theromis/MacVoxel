@@ -284,3 +284,24 @@ fn different_motion_stays_on_separate_quads() {
     );
     assert_eq!(built.indices.len() / 6, 10);
 }
+
+#[test]
+fn neighbouring_quads_share_corners_of_one_slot_and_face() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    session.objects[0].cells.insert((0, 0, 0), 1);
+    session.objects[0].cells.insert((1, 0, 0), 1);
+    let options = MeshExport {
+        vertex_colors: true,
+        merge: false,
+    };
+    let built = build_with(&session, &options);
+    // Ten faces; the four long sides each share two corners between the two
+    // voxels: 40 - 4 * 2.
+    assert_eq!(built.indices.len() / 6, 10);
+    assert_eq!(built.positions.len() / 3, 32);
+    assert!(built.indices.iter().all(|&i| (i as usize) < 32));
+    session.objects[0].cells.insert((1, 0, 0), 2);
+    let built = build_with(&session, &options);
+    assert_eq!(built.positions.len() / 3, 40);
+}
