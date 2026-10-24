@@ -15,37 +15,134 @@ pub fn left(ui: &mut Ui, session: &mut Session) {
     palette::palette(ui, session);
 }
 
-/// Inspector on top, scene tree docked at the bottom.
+/// Inspector dock on top, scene tree dock at the bottom, on the dark window
+/// background like Godot's docks.
 pub fn right(ui: &mut Ui, session: &mut Session) {
-    let tree = outliner::tree_panel(ui, session);
-    egui::ScrollArea::vertical()
-        .id_salt("inspector")
-        .show(ui, |ui| {
-            outliner::object(ui, session);
-            ui.separator();
-            outliner::bone(ui, session);
-            ui.separator();
-            outliner::pose(ui, session);
-            ui.separator();
-            outliner::clips(ui, session);
-            ui.separator();
-            script::script(ui, session);
-            ui.separator();
-            render::document(ui, session);
-            ui.separator();
-            render::export(ui, session);
-            ui.separator();
-            render::render(ui, session);
-            ui.separator();
-            render::light(ui, session);
-            ui.separator();
-            render::selection(ui, session);
-        });
-    outliner::tree_edge(ui, tree);
+    outliner::tree_panel(ui, session);
+    dock(
+        ui,
+        &["Inspector"],
+        0,
+        true,
+        |_| {},
+        |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("inspector")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    outliner::object(ui, session);
+                    ui.separator();
+                    outliner::bone(ui, session);
+                    ui.separator();
+                    outliner::pose(ui, session);
+                    ui.separator();
+                    outliner::clips(ui, session);
+                    ui.separator();
+                    script::script(ui, session);
+                    ui.separator();
+                    render::document(ui, session);
+                    ui.separator();
+                    render::export(ui, session);
+                    ui.separator();
+                    render::render(ui, session);
+                    ui.separator();
+                    render::light(ui, session);
+                    ui.separator();
+                    render::selection(ui, session);
+                });
+        },
+    );
     // A drag on a panel field ends with the button; its edits are one undo step.
     if !ui.input(|input| input.pointer.any_down()) {
         session.end_gesture();
     }
+}
+
+/// Space between docks, where the window background shows through.
+pub const DOCK_GAP: i8 = 6;
+const DOCK_RADIUS: u8 = 4;
+
+/// A Godot-style dock: a strip of tabs on a darker band, the selected tab
+/// joined to the body below it. `trailing` fills the right end of the strip.
+/// Without `open` only the strip shows. Returns the tab that was clicked.
+pub(super) fn dock(
+    ui: &mut Ui,
+    tabs: &[&str],
+    selected: usize,
+    open: bool,
+    trailing: impl FnOnce(&mut Ui),
+    body: impl FnOnce(&mut Ui),
+) -> Option<usize> {
+    let visuals = ui.visuals().clone();
+    let spacing = ui.spacing().item_spacing;
+    let mut picked = None;
+    egui::Frame::new()
+        .fill(visuals.window_fill)
+        .corner_radius(DOCK_RADIUS)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (index, name) in tabs.iter().enumerate() {
+                    if dock_tab(ui, name, index == selected).clicked() {
+                        picked = Some(index);
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(6.0);
+                    trailing(ui);
+                });
+            });
+            if !open {
+                return;
+            }
+            let corners = egui::CornerRadius {
+                nw: if selected == 0 { 0 } else { DOCK_RADIUS },
+                ne: DOCK_RADIUS,
+                sw: DOCK_RADIUS,
+                se: DOCK_RADIUS,
+            };
+            egui::Frame::new()
+                .fill(visuals.panel_fill)
+                .corner_radius(corners)
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = spacing;
+                    ui.set_min_size(ui.available_size());
+                    body(ui);
+                });
+        });
+    picked
+}
+
+fn dock_tab(ui: &mut Ui, name: &str, selected: bool) -> egui::Response {
+    let visuals = ui.visuals().clone();
+    let color = if selected {
+        visuals.strong_text_color()
+    } else {
+        DIM
+    };
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let galley = ui.painter().layout_no_wrap(name.to_owned(), font, color);
+    let size = galley.size() + egui::vec2(24.0, 12.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let fill = if selected {
+        visuals.panel_fill
+    } else if response.hovered() {
+        visuals.faint_bg_color
+    } else {
+        Color32::TRANSPARENT
+    };
+    let corners = egui::CornerRadius {
+        nw: DOCK_RADIUS,
+        ne: DOCK_RADIUS,
+        sw: 0,
+        se: 0,
+    };
+    ui.painter().rect_filled(rect, corners, fill);
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, color);
+    response
 }
 
 pub(super) fn section(ui: &mut Ui, title: &str) {

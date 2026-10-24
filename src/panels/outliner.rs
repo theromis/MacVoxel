@@ -74,14 +74,10 @@ impl Default for TreeState {
     }
 }
 
-/// Top edge of the docked tree. Brighter and thicker than widget borders so
-/// the tree reads as its own panel; it is also the resize handle.
-const TREE_EDGE: egui::Color32 = egui::Color32::from_rgb(150, 166, 192);
-const TREE_EDGE_WIDTH: f32 = 2.0;
-
 /// The scene tree docked under the inspector: objects or bones, one at a
-/// time. Collapsed, it keeps only its header row.
-pub(super) fn tree_panel(ui: &mut Ui, session: &mut Session) -> egui::Rect {
+/// time. Collapsed, it keeps only its tab strip. The gap above it is the
+/// resize handle.
+pub(super) fn tree_panel(ui: &mut Ui, session: &mut Session) {
     let id = egui::Id::new("tree-state");
     let mut state: TreeState = ui.data(|data| data.get_temp(id)).unwrap_or_default();
     let panel = if state.open {
@@ -92,44 +88,53 @@ pub(super) fn tree_panel(ui: &mut Ui, session: &mut Session) -> egui::Rect {
     } else {
         egui::TopBottomPanel::bottom("tree-closed").resizable(false)
     };
-    let frame = egui::Frame::side_top_panel(ui.style()).fill(ui.visuals().window_fill);
-    let shown = panel.frame(frame).show_inside(ui, |ui| {
-        ui.add_space(TREE_EDGE_WIDTH);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.selectable_value(&mut state.tab, TreeTab::Objects, "Objects");
-            ui.selectable_value(&mut state.tab, TreeTab::Bones, "Bones");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (icon, hint) = if state.open {
+    let frame = egui::Frame::NONE.inner_margin(egui::Margin {
+        top: DOCK_GAP,
+        ..egui::Margin::ZERO
+    });
+    let tab = state.tab;
+    let open = state.open;
+    let mut toggle = false;
+    panel
+        .frame(frame)
+        .show_separator_line(false)
+        .show_inside(ui, |ui| {
+            let selected = match tab {
+                TreeTab::Objects => 0,
+                TreeTab::Bones => 1,
+            };
+            let trailing = |ui: &mut Ui| {
+                let (icon, hint) = if open {
                     ("⏷", "Hide the tree")
                 } else {
                     ("⏶", "Show the tree")
                 };
-                if ui.small_button(icon).on_hover_text(hint).clicked() {
-                    state.open = !state.open;
-                }
-            });
-        });
-        if state.open {
-            ui.separator();
-            match state.tab {
-                TreeTab::Objects => object_list(ui, session),
-                TreeTab::Bones => bone_list(ui, session),
+                toggle = ui.small_button(icon).on_hover_text(hint).clicked();
+            };
+            let picked = dock(
+                ui,
+                &["Objects", "Bones"],
+                selected,
+                open,
+                trailing,
+                |ui| match tab {
+                    TreeTab::Objects => object_list(ui, session),
+                    TreeTab::Bones => bone_list(ui, session),
+                },
+            );
+            match picked {
+                Some(0) => state.tab = TreeTab::Objects,
+                Some(_) => state.tab = TreeTab::Bones,
+                None => {}
             }
-        }
-    });
+            if picked.is_some() && !open {
+                state.open = true;
+            }
+        });
+    if toggle {
+        state.open = !state.open;
+    }
     ui.data_mut(|data| data.insert_temp(id, state));
-    shown.response.rect
-}
-
-/// Paint the tree's top edge. Call it after the inspector: a scroll area
-/// draws a few points past its bottom, which would cover the line.
-pub(super) fn tree_edge(ui: &Ui, tree: egui::Rect) {
-    ui.ctx().layer_painter(ui.layer_id()).hline(
-        tree.x_range(),
-        tree.top() + TREE_EDGE_WIDTH / 2.0,
-        egui::Stroke::new(TREE_EDGE_WIDTH, TREE_EDGE),
-    );
 }
 
 fn object_list(ui: &mut Ui, session: &mut Session) {

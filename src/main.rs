@@ -191,10 +191,14 @@ impl eframe::App for Shell {
                 });
             });
 
+        let docks = egui::Frame::side_top_panel(&ctx.style())
+            .fill(ctx.style().visuals.extreme_bg_color)
+            .inner_margin(egui::Margin::same(panels::DOCK_GAP));
         egui::SidePanel::right("inspector")
             .resizable(true)
-            .default_width(280.0)
-            .width_range(260.0..=380.0)
+            .default_width(300.0)
+            .width_range(280.0..=400.0)
+            .frame(docks)
             .show(ctx, |ui| panels::right(ui, &mut self.session));
 
         egui::CentralPanel::default().show(ctx, |ui| {
