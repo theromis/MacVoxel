@@ -8,8 +8,8 @@ autotests = false
 description = "MacVoxel voxel editor. The Swift/Metal app lives in legacy/."
 
 [dependencies]
-eframe = { version = "0.31", features = ["wgpu"] }
-egui = "0.31"
+eframe = { version = "0.37", features = ["wgpu"] }
+egui = "0.37"
 glam = "0.29"
 rfd = "0.15"
 bytemuck = { version = "1.7", features = ["derive"] }

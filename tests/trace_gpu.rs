@@ -23,12 +23,12 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
 
 #[test]
 fn the_trace_shader_builds_on_a_gpu() {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-    let Some(adapter) = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let Ok(adapter) = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
     else {
         return;
     };
     let (device, _queue) =
-        block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).expect("device");
+        block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("device");
     let _tracer = Tracer::new(&device);
 }

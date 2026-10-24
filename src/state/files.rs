@@ -878,7 +878,7 @@ impl Session {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .map(|f| f.path().to_path_buf())
                 .collect()
         });
         if let Some(path) = dropped.into_iter().next() {

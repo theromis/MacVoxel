@@ -19,16 +19,16 @@ pub fn side_frame(style: &egui::Style) -> egui::Frame {
 /// Tools dock on top, palette dock at the bottom. The gap between them is
 /// the palette's resize handle.
 pub fn left(ui: &mut Ui, session: &mut Session) {
-    egui::TopBottomPanel::bottom("palette-dock")
+    egui::Panel::bottom("palette-dock")
         .resizable(true)
-        .default_height(360.0)
-        .height_range(140.0..=900.0)
+        .default_size(360.0)
+        .size_range(140.0..=900.0)
         .show_separator_line(false)
         .frame(egui::Frame::NONE.inner_margin(egui::Margin {
             top: DOCK_GAP,
             ..egui::Margin::ZERO
         }))
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             dock(
                 ui,
                 &["Palette"],

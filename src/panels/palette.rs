@@ -115,19 +115,19 @@ pub(super) fn palette(ui: &mut Ui, session: &mut Session) {
     resp.context_menu(|ui| {
         if ui.button("Copy color").clicked() {
             session.copy_palette_color(anchor);
-            ui.close_menu();
+            ui.close();
         }
         if ui
             .add_enabled(can_paste_color, egui::Button::new("Paste color"))
             .clicked()
         {
             session.paste_palette_color(anchor);
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui.button("Select voxels by color").clicked() {
             session.select_voxels_by_color(anchor);
-            ui.close_menu();
+            ui.close();
         }
         if ui
             .add_enabled(
@@ -137,7 +137,7 @@ pub(super) fn palette(ui: &mut Ui, session: &mut Session) {
             .clicked()
         {
             session.paint_picked_with_color(anchor);
-            ui.close_menu();
+            ui.close();
         }
         if ui
             .add_enabled(
@@ -147,7 +147,7 @@ pub(super) fn palette(ui: &mut Ui, session: &mut Session) {
             .clicked()
         {
             session.paint_picked_with_random_colors(anchor);
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui
@@ -155,7 +155,7 @@ pub(super) fn palette(ui: &mut Ui, session: &mut Session) {
             .clicked()
         {
             session.make_palette_gradient(anchor);
-            ui.close_menu();
+            ui.close();
         }
     });
     if ui.input(|i| i.pointer.primary_pressed()) && resp.hovered() {

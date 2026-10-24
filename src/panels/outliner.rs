@@ -78,15 +78,15 @@ impl Default for TreeState {
 /// time. Collapsed, it keeps only its tab strip. The gap above it is the
 /// resize handle.
 pub(super) fn tree_panel(ui: &mut Ui, session: &mut Session) {
-    let id = egui::Id::new("tree-state");
+    let id = egui::Id::unique("tree-state");
     let mut state: TreeState = ui.data(|data| data.get_temp(id)).unwrap_or_default();
     let panel = if state.open {
-        egui::TopBottomPanel::bottom("tree-open")
+        egui::Panel::bottom("tree-open")
             .resizable(true)
-            .default_height(300.0)
-            .height_range(120.0..=900.0)
+            .default_size(300.0)
+            .size_range(120.0..=900.0)
     } else {
-        egui::TopBottomPanel::bottom("tree-closed").resizable(false)
+        egui::Panel::bottom("tree-closed").resizable(false)
     };
     let frame = egui::Frame::NONE.inner_margin(egui::Margin {
         top: DOCK_GAP,
@@ -98,7 +98,7 @@ pub(super) fn tree_panel(ui: &mut Ui, session: &mut Session) {
     panel
         .frame(frame)
         .show_separator_line(false)
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             let selected = match tab {
                 TreeTab::Objects => 0,
                 TreeTab::Bones => 1,
@@ -195,7 +195,7 @@ fn object_list(ui: &mut Ui, session: &mut Session) {
                 resp.context_menu(|ui| {
                     if ui.button("Make active").clicked() {
                         select = Some(i);
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
             }

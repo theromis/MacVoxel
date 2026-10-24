@@ -23,7 +23,7 @@ impl Session {
     }
 
     pub fn take_keys(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() {
             return;
         }
         let object_mode = self.editor_mode == EditorMode::Object;

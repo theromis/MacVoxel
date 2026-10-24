@@ -105,8 +105,8 @@ impl Tracer {
             layout: Some(
                 &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("path-trace"),
-                    bind_group_layouts: &[&layout],
-                    push_constant_ranges: &[],
+                    bind_group_layouts: &[Some(&layout)],
+                    immediate_size: 0,
                 }),
             ),
             module: &shader,
@@ -119,8 +119,8 @@ impl Tracer {
             layout: Some(
                 &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("path-trace-display"),
-                    bind_group_layouts: &[&layout],
-                    push_constant_ranges: &[],
+                    bind_group_layouts: &[Some(&layout)],
+                    immediate_size: 0,
                 }),
             ),
             module: &shader,
@@ -146,8 +146,8 @@ impl Tracer {
             layout: Some(
                 &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("path-trace-blit"),
-                    bind_group_layouts: &[&blit_layout],
-                    push_constant_ranges: &[],
+                    bind_group_layouts: &[Some(&blit_layout)],
+                    immediate_size: 0,
                 }),
             ),
             vertex: wgpu::VertexState {
@@ -172,7 +172,7 @@ impl Tracer {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
@@ -236,8 +236,8 @@ impl Tracer {
         }
     }
 
-    pub fn color_view(&self) -> &wgpu::TextureView {
-        &self.color_view
+    pub fn color_texture(&self) -> &wgpu::Texture {
+        &self.color
     }
 
     /// Trace the next batch. `Frame.gpu` is false when the scene does not fit
@@ -334,11 +334,15 @@ impl Tracer {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|err| format!("Could not read the render: {err}"))?;
         rx.recv()
             .map_err(|_| "Render readback was dropped.".to_string())?
             .map_err(|err| format!("Could not read the render: {err}"))?;
-        let mapped = slice.get_mapped_range();
+        let mapped = slice
+            .get_mapped_range()
+            .map_err(|err| format!("Could not read the render: {err}"))?;
         let mut rgba = Vec::with_capacity((width * height * 4) as usize);
         for row in 0..height as usize {
             let start = row * padded as usize;
@@ -448,11 +452,15 @@ impl Tracer {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|err| format!("Could not read the render: {err}"))?;
         rx.recv()
             .map_err(|_| "Render readback was dropped.".to_string())?
             .map_err(|err| format!("Could not read the render: {err}"))?;
-        let mapped = slice.get_mapped_range();
+        let mapped = slice
+            .get_mapped_range()
+            .map_err(|err| format!("Could not read the render: {err}"))?;
         let pixels = bytemuck::cast_slice(&mapped[..bytes as usize]).to_vec();
         drop(mapped);
         buffer.unmap();
@@ -599,6 +607,7 @@ impl Tracer {
                 label: Some("path-trace-blit"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.color_view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -608,6 +617,7 @@ impl Tracer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.blit_pipeline);
             pass.set_bind_group(0, &self.blit_bind, &[]);
@@ -733,14 +743,11 @@ pub struct GpuFrame {
 
 /// Path-trace `session` on a headless wgpu device. `session.max_samples` is the cap.
 pub fn render_headless(session: &Session, size: [u32; 2], seed: u32) -> Result<GpuFrame, String> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-    let Some(adapter) = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-    else {
-        return Err("no GPU adapter".into());
-    };
-    let (device, queue) =
-        block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
-            .map_err(|err| format!("could not open a GPU device: {err}"))?;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        .map_err(|err| format!("no GPU adapter: {err}"))?;
+    let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+        .map_err(|err| format!("could not open a GPU device: {err}"))?;
     let mut tracer = Tracer::new(&device);
     tracer.set_seed(seed);
     let cap = session.render_sample_cap();
@@ -828,7 +835,7 @@ fn color_target(
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
+        view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
     });
     let view = texture.create_view(&Default::default());
     (texture, view)

@@ -91,8 +91,8 @@ impl SceneGpu {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("voxels"),
-            bind_group_layouts: &[&bind_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
         });
         let pipeline = make_pipeline(device, &pipeline_layout, &shader, 0, 0.0);
         let highlight_pipeline = make_pipeline(device, &pipeline_layout, &shader, -2, -1.0);
@@ -327,6 +327,7 @@ impl SceneGpu {
             label: Some("voxels"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &self.color_view,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(CLEAR),
@@ -343,6 +344,7 @@ impl SceneGpu {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
@@ -553,7 +555,7 @@ fn targets(
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
+        view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
     });
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
     let depth = device.create_texture(&wgpu::TextureDescriptor {
@@ -574,6 +576,16 @@ fn targets(
     (color, color_view, depth, depth_view)
 }
 
+/// egui samples user textures as gamma-encoded `Rgba8Unorm`. The sRGB render
+/// targets list that format as a view format, so egui reads the encoded bytes
+/// instead of decoding them to linear.
+pub fn egui_view(texture: &wgpu::Texture) -> wgpu::TextureView {
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        format: Some(wgpu::TextureFormat::Rgba8Unorm),
+        ..Default::default()
+    })
+}
+
 fn make_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -588,7 +600,7 @@ fn make_pipeline(
             module: shader,
             entry_point: Some("vs_main"),
             compilation_options: Default::default(),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<mesh::Vert>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
@@ -613,7 +625,7 @@ fn make_pipeline(
                         shader_location: 3,
                     },
                 ],
-            }],
+            })],
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
@@ -623,8 +635,8 @@ fn make_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: Default::default(),
             bias: wgpu::DepthBiasState {
                 constant: depth_bias,
@@ -643,7 +655,7 @@ fn make_pipeline(
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     })
 }

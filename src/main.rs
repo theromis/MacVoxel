@@ -41,6 +41,7 @@ mod viewport;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 use egui::{Color32, RichText, Visuals};
 use serde_json::Value;
@@ -102,7 +103,6 @@ fn main() -> eframe::Result {
                 control,
                 shots: VecDeque::new(),
                 inflight: None,
-                next_shot: 0,
                 viewport_rect: egui::Rect::NOTHING,
                 #[cfg(target_os = "macos")]
                 native_menu: None,
@@ -117,7 +117,6 @@ struct Shell {
     control: Option<ControlServer>,
     shots: VecDeque<PendingShot>,
     inflight: Option<InflightShot>,
-    next_shot: u64,
     viewport_rect: egui::Rect,
     #[cfg(target_os = "macos")]
     native_menu: Option<native_menu::NativeMenu>,
@@ -130,7 +129,8 @@ struct PendingShot {
 }
 
 struct InflightShot {
-    id: u64,
+    /// Filled by the screenshot callback once the frame has been read back.
+    image: Arc<Mutex<Option<Arc<egui::ColorImage>>>>,
     region: ShotRegion,
     path: Option<String>,
     reply: Sender<Result<Value, String>>,
@@ -139,14 +139,15 @@ struct InflightShot {
 }
 
 impl eframe::App for Shell {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
         if let Some(control) = &self.control {
             control.bind_context(ctx);
         }
-        self.take_screenshot(ctx);
+        self.take_screenshot();
         self.take_control();
         self.session.clear_ui();
-        let screen = ctx.input(|input| input.screen_rect());
+        let screen = ctx.input(|input| input.content_rect());
         self.session
             .note_ui("window", "Window", screen, UiAction::None);
         #[cfg(target_os = "macos")]
@@ -167,7 +168,7 @@ impl eframe::App for Shell {
         self.session.take_drops(ctx);
         self.session.take_keys(ctx);
 
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+        egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(&self.session.status)
@@ -181,21 +182,21 @@ impl eframe::App for Shell {
             });
         });
 
-        egui::SidePanel::left("tools")
+        egui::Panel::left("tools")
             .resizable(true)
-            .default_width(220.0)
-            .width_range(200.0..=300.0)
-            .frame(panels::side_frame(&ctx.style()))
-            .show(ctx, |ui| panels::left(ui, &mut self.session));
+            .default_size(220.0)
+            .size_range(200.0..=300.0)
+            .frame(panels::side_frame(&ctx.global_style()))
+            .show(ui, |ui| panels::left(ui, &mut self.session));
 
-        egui::SidePanel::right("inspector")
+        egui::Panel::right("inspector")
             .resizable(true)
-            .default_width(300.0)
-            .width_range(280.0..=400.0)
-            .frame(panels::side_frame(&ctx.style()))
-            .show(ctx, |ui| panels::right(ui, &mut self.session));
+            .default_size(300.0)
+            .size_range(280.0..=400.0)
+            .frame(panels::side_frame(&ctx.global_style()))
+            .show(ui, |ui| panels::right(ui, &mut self.session));
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.viewport_rect = viewport::show(
                 ctx,
                 ui,
@@ -261,27 +262,15 @@ impl Shell {
         Ok(serde_json::json!({"id": region.id, "label": region.label}))
     }
 
-    fn take_screenshot(&mut self, ctx: &egui::Context) {
-        let events: Vec<_> = ctx.input(|input| input.events.clone());
-        for event in events {
-            let egui::Event::Screenshot {
-                image, user_data, ..
-            } = event
-            else {
-                continue;
-            };
-            let Some(id) = user_data
-                .data
-                .as_ref()
-                .and_then(|data| data.downcast_ref::<u64>().copied())
-            else {
-                continue;
-            };
-            if self.inflight.as_ref().is_some_and(|shot| shot.id == id) {
-                let shot = self.inflight.take().expect("shot");
-                let _ = shot.reply.send(finish_shot(&shot, &image));
-            }
-        }
+    fn take_screenshot(&mut self) {
+        let Some(shot) = &self.inflight else {
+            return;
+        };
+        let Some(image) = shot.image.lock().ok().and_then(|mut slot| slot.take()) else {
+            return;
+        };
+        let shot = self.inflight.take().expect("shot");
+        let _ = shot.reply.send(finish_shot(&shot, &image));
     }
 
     fn issue_screenshot(&mut self, ctx: &egui::Context) {
@@ -292,11 +281,17 @@ impl Shell {
         let Some(shot) = self.shots.pop_front() else {
             return;
         };
-        self.next_shot = self.next_shot.wrapping_add(1);
-        let id = self.next_shot;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(id)));
+        let image = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&image);
+        let repaint = ctx.clone();
+        ctx.request_screenshot(move |frame| {
+            if let Ok(mut slot) = slot.lock() {
+                *slot = Some(frame);
+            }
+            repaint.request_repaint();
+        });
         self.inflight = Some(InflightShot {
-            id,
+            image,
             region: shot.region,
             path: shot.path,
             reply: shot.reply,
@@ -509,7 +504,7 @@ fn apply_theme(ctx: &egui::Context) {
     visuals.selection.stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
     ctx.set_visuals(visuals);
 
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 5.0);
     style.spacing.button_padding = egui::vec2(8.0, 3.0);
     // Godot's editor default is 14. Without a UI face, go larger so the
@@ -530,5 +525,5 @@ fn apply_theme(ctx: &egui::Context) {
             font.size = size;
         }
     }
-    ctx.set_style(style);
+    ctx.set_style_of(egui::Theme::Dark, style);
 }

@@ -38,7 +38,7 @@ impl ViewCache {
             return;
         }
         let scene = SceneGpu::new(&rs.device);
-        let view = scene.color_texture().create_view(&Default::default());
+        let view = gpu::egui_view(scene.color_texture());
         let id = rs.renderer.write().register_native_texture(
             &rs.device,
             &view,
@@ -172,7 +172,7 @@ pub fn show(
             if scene.resize(&rs.device, width, height) {
                 let texture_handle = scene.color_texture().clone();
                 drop(scene);
-                let view = texture_handle.create_view(&Default::default());
+                let view = gpu::egui_view(&texture_handle);
                 rs.renderer.write().update_egui_texture_from_wgpu_texture(
                     &rs.device,
                     &view,
@@ -226,12 +226,12 @@ pub fn show(
     if session.motion_preview {
         ctx.request_repaint();
     }
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(motion_chip), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(motion_chip), |ui| {
         hud_frame(ui, |ui| {
             ui.checkbox(&mut session.motion_preview, "Motion");
         });
     });
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(left), |ui| {
         hud_frame(ui, |ui| {
             let model = ui.selectable_value(&mut session.editor_mode, EditorMode::Model, "Model");
             let model_rect = model.rect;
@@ -252,7 +252,7 @@ pub fn show(
             );
         });
     });
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(right), |ui| {
         hud_frame(ui, |ui| {
             let edit = ui.selectable_value(&mut session.render_mode, RenderMode::Edit, "Edit");
             let edit_rect = edit.rect;
@@ -347,7 +347,7 @@ fn paint_gpu(
     if cache.trace_epoch != frame.epoch || cache.trace_texture.is_none() {
         let existing = cache.trace_texture;
         let id = {
-            let view = cache.trace.as_ref().expect("tracer").color_view();
+            let view = &gpu::egui_view(cache.trace.as_ref().expect("tracer").color_texture());
             if let Some(id) = existing {
                 rs.renderer.write().update_egui_texture_from_wgpu_texture(
                     &rs.device,
