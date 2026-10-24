@@ -690,7 +690,11 @@ impl Session {
     }
 
     /// Replace one bone's preview transform. Identity drops it from the pose.
-    pub fn set_bone_pose(&mut self, index: usize, extra: crate::rig::BonePose) -> Result<(), String> {
+    pub fn set_bone_pose(
+        &mut self,
+        index: usize,
+        extra: crate::rig::BonePose,
+    ) -> Result<(), String> {
         let name = self
             .skeleton
             .bones

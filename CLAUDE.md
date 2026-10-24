@@ -76,4 +76,9 @@ cargo test --offline --bin macvoxel -- --skip ping_round_trips
 Do not filter on the substring `ping`: `save_round_trips` matches it too.
 The package is a binary, so `--lib` does not apply.
 
+## Formatting
+
+Style is `rustfmt.toml`. Run `cargo fmt` before every commit and keep
+`cargo fmt --check` clean; do not hand-format against it.
+
 Comments, docs, and UI strings are English.

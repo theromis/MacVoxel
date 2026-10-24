@@ -11,7 +11,8 @@ mod shapes;
 
 pub use generate::{foliage, generate, Gen, MAX_GENERATOR_CELLS};
 pub use shapes::{
-    bresenham, circle, cube, extrude, flood_empty, flood_face, rounded_inside, rounded_radius, square,
+    bresenham, circle, cube, extrude, flood_empty, flood_face, rounded_inside, rounded_radius,
+    square,
 };
 
 pub(crate) fn plane_axes(axis: i32) -> (usize, usize) {

@@ -42,7 +42,12 @@ pub(super) fn format_count(n: usize) -> String {
 pub(super) fn export(ui: &mut Ui, session: &mut Session) {
     section(ui, "Export");
     let options = [
-        ("export.merge", "Merge faces", session.export.merge, ExportFlag::Merge),
+        (
+            "export.merge",
+            "Merge faces",
+            session.export.merge,
+            ExportFlag::Merge,
+        ),
         (
             "export.vertex-colors",
             "Vertex colors",
