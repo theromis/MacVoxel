@@ -74,9 +74,14 @@ impl Default for TreeState {
     }
 }
 
+/// Top edge of the docked tree. Brighter and thicker than widget borders so
+/// the tree reads as its own panel; it is also the resize handle.
+const TREE_EDGE: egui::Color32 = egui::Color32::from_rgb(150, 166, 192);
+const TREE_EDGE_WIDTH: f32 = 2.0;
+
 /// The scene tree docked under the inspector: objects or bones, one at a
 /// time. Collapsed, it keeps only its header row.
-pub(super) fn tree_panel(ui: &mut Ui, session: &mut Session) {
+pub(super) fn tree_panel(ui: &mut Ui, session: &mut Session) -> egui::Rect {
     let id = egui::Id::new("tree-state");
     let mut state: TreeState = ui.data(|data| data.get_temp(id)).unwrap_or_default();
     let panel = if state.open {
@@ -88,7 +93,8 @@ pub(super) fn tree_panel(ui: &mut Ui, session: &mut Session) {
         egui::TopBottomPanel::bottom("tree-closed").resizable(false)
     };
     let frame = egui::Frame::side_top_panel(ui.style()).fill(ui.visuals().window_fill);
-    panel.frame(frame).show_inside(ui, |ui| {
+    let shown = panel.frame(frame).show_inside(ui, |ui| {
+        ui.add_space(TREE_EDGE_WIDTH);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             ui.selectable_value(&mut state.tab, TreeTab::Objects, "Objects");
@@ -113,6 +119,17 @@ pub(super) fn tree_panel(ui: &mut Ui, session: &mut Session) {
         }
     });
     ui.data_mut(|data| data.insert_temp(id, state));
+    shown.response.rect
+}
+
+/// Paint the tree's top edge. Call it after the inspector: a scroll area
+/// draws a few points past its bottom, which would cover the line.
+pub(super) fn tree_edge(ui: &Ui, tree: egui::Rect) {
+    ui.ctx().layer_painter(ui.layer_id()).hline(
+        tree.x_range(),
+        tree.top() + TREE_EDGE_WIDTH / 2.0,
+        egui::Stroke::new(TREE_EDGE_WIDTH, TREE_EDGE),
+    );
 }
 
 fn object_list(ui: &mut Ui, session: &mut Session) {
