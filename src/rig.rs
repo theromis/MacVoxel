@@ -297,6 +297,15 @@ fn check_name(name: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
+/// Moves every pivot by `by` voxels, as when a file's scene is recentred on load.
+pub fn shift_pivots(skeleton: &mut Skeleton, by: [i32; 3]) {
+    for bone in &mut skeleton.bones {
+        for (pivot, by) in bone.pivot.iter_mut().zip(by) {
+            *pivot += by as f32;
+        }
+    }
+}
+
 fn check_pivot(pivot: [f32; 3]) -> Result<[f32; 3], String> {
     if pivot.iter().any(|axis| !axis.is_finite()) {
         return Err("pivot is not finite".into());

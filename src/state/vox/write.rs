@@ -225,7 +225,10 @@ pub(crate) fn save_graph(
     }
     push_rgba(&mut children, palette);
     push_matl(&mut children, materials);
-    push_rig(&mut children, &rig_saved, skeleton)?;
+    // The objects went back to file space above; the pivots go with them.
+    let mut skeleton = skeleton.clone();
+    crate::rig::shift_pivots(&mut skeleton, graph.shift.map(|axis| -axis));
+    push_rig(&mut children, &rig_saved, &skeleton)?;
     push_anims(&mut children, clips)?;
     if let Some(body) = crate::script::encode_chunk(objects) {
         push_chunk(&mut children, b"MVSC", &body);

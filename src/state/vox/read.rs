@@ -130,7 +130,9 @@ pub(crate) fn load_vox(bytes: &[u8]) -> Result<Loaded, String> {
         return Err("file has no models".into());
     }
     let (mut objects, shift) = place_models(&models, &nodes);
-    let skeleton = if let Some((skeleton, binds)) = rig {
+    let skeleton = if let Some((mut skeleton, binds)) = rig {
+        // Pivots are world positions: they move with the objects.
+        crate::rig::shift_pivots(&mut skeleton, shift);
         let view: Vec<(i32, &str)> = objects
             .iter()
             .map(|object| {
@@ -416,10 +418,15 @@ pub(crate) fn place_models(
             [0, 0, 0],
         );
     }
-    let shift0 = world
+    // The first object is centred across, so a saved scene reopens in place;
+    // the lowest voxel of the whole scene goes on the floor.
+    let mut shift0 = world
         .iter()
-        .find_map(|(_, cells, ..)| display_shift(cells))
+        .find_map(|(_, cells, ..)| display_shift(cells.keys()))
         .unwrap_or((0, 0, 0));
+    if let Some(all) = display_shift(world.iter().flat_map(|(_, cells, ..)| cells.keys())) {
+        shift0.2 = all.2;
+    }
     let objects = world
         .into_iter()
         .map(
@@ -556,12 +563,12 @@ pub(crate) fn corner_box(dims: [i32; 3], rot: [[i32; 3]; 3]) -> (Cell, (i32, i32
     )
 }
 
-pub(crate) fn display_shift(cells: &HashMap<Cell, u8>) -> Option<Cell> {
-    let mut keys = cells.keys();
-    let first = *keys.next()?;
+pub(crate) fn display_shift<'a>(cells: impl IntoIterator<Item = &'a Cell>) -> Option<Cell> {
+    let mut cells = cells.into_iter().peekable();
+    let first = **cells.peek()?;
     let mut min = first;
     let mut max = first;
-    for cell in cells.keys() {
+    for cell in cells {
         min.0 = min.0.min(cell.0);
         min.1 = min.1.min(cell.1);
         min.2 = min.2.min(cell.2);

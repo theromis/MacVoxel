@@ -1554,6 +1554,58 @@ fn bones_scripts_motion_and_hidden_survive_a_save() {
 }
 
 #[test]
+fn bone_pivots_follow_the_objects_when_a_file_is_recentred() {
+    // The only object is off the ground, so loading moves the scene down by 5.
+    let mut session = Session::new();
+    session.active_mut().cells.clear();
+    session.active_mut().cells.insert((0, 0, 5), 1);
+    session
+        .add_bone("joint", None, [0.5, 0.5, 5.5], None)
+        .expect("bone");
+    session.bind_object(0, Some("joint")).expect("bind");
+    let bytes = session.export_bytes().expect("save");
+    let mut loaded = Session::new();
+    loaded.import_bytes(&bytes).expect("load");
+    let object = &loaded.objects[0];
+    let cell = *object.cells.keys().next().expect("cell");
+    let centre = [
+        (cell.0 + object.translation.0) as f32 + 0.5,
+        (cell.1 + object.translation.1) as f32 + 0.5,
+        (cell.2 + object.translation.2) as f32 + 0.5,
+    ];
+    assert_eq!(loaded.skeleton.bones[0].pivot, centre);
+    let again = loaded.export_bytes().expect("save again");
+    let mut third = Session::new();
+    third.import_bytes(&again).expect("reload");
+    assert_eq!(third.skeleton.bones[0].pivot, centre);
+}
+
+#[test]
+fn a_reopened_scene_stands_on_its_lowest_voxel() {
+    // The first object floats above a second one on the ground; nothing moves on reopen.
+    let mut session = Session::new();
+    session.active_mut().cells.clear();
+    session.active_mut().cells.insert((0, 0, 20), 1);
+    session
+        .add_object(Some("foot"), [0, 0, 0], None, true)
+        .expect("object");
+    session.active_mut().cells.insert((0, 0, 0), 2);
+    let bytes = session.export_bytes().expect("save");
+    let mut loaded = Session::new();
+    loaded.import_bytes(&bytes).expect("load");
+    let world = |object: &Volume| {
+        let cell = *object.cells.keys().next().expect("cell");
+        (
+            cell.0 + object.translation.0,
+            cell.1 + object.translation.1,
+            cell.2 + object.translation.2,
+        )
+    };
+    assert_eq!(world(&loaded.objects[0]), (0, 0, 20));
+    assert_eq!(world(&loaded.objects[1]), (0, 0, 0));
+}
+
+#[test]
 #[ignore = "prints edit timings for a 256³ object; not a pass/fail check"]
 fn edit_speed_of_a_256_object() {
     use std::time::Instant;
