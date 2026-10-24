@@ -24,6 +24,7 @@ mod denoise;
 mod export;
 mod gpu;
 mod mcp;
+mod menu_bar;
 mod mesh;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -167,6 +168,8 @@ impl eframe::App for Shell {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         self.session.take_drops(ctx);
         self.session.take_keys(ctx);
+
+        menu_bar::show(ui, &mut self.session);
 
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
