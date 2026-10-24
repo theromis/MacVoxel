@@ -1469,3 +1469,153 @@ fn color_and_material_edits_are_one_undo_step() {
     assert_eq!(session.palette[36], before);
     assert!(session.picked.contains(&(0, 0, 0)));
 }
+
+#[test]
+fn rotation_bytes_round_trip() {
+    assert!(rotation_codec_errors().is_empty());
+}
+
+#[test]
+fn every_fixture_survives_voxrt() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut files = 0;
+    for entry in std::fs::read_dir(&dir).expect("fixtures") {
+        let path = entry.expect("entry").path();
+        if path.extension().is_some_and(|ext| ext == "vox") {
+            files += 1;
+            crate::cli::check_round_trip(&path).unwrap_or_else(|err| panic!("{err}"));
+        }
+    }
+    assert!(files > 0, "tests/fixtures has no .vox files");
+}
+
+#[test]
+fn bones_scripts_motion_and_hidden_survive_a_save() {
+    let mut session = Session::new();
+    session.active_mut().name = "Leaf".into();
+    session.active_mut().cells.clear();
+    session.active_mut().cells.insert((1, 2, 3), 4);
+    session.active_mut().hidden = true;
+    session.active_mut().script.source = "voxel(1, 2, 3, 4);\n".into();
+    session.active_mut().script.auto = true;
+    session
+        .active_mut()
+        .script
+        .params
+        .push(crate::script::ScriptParam {
+            name: "n".into(),
+            value: crate::script::ParamValue::Int {
+                value: 2,
+                min: 0,
+                max: 4,
+            },
+        });
+    session.materials[4].motion = Motion::Sway;
+    session.materials[4].motion_amount = 1.5;
+    session
+        .add_bone("root", None, [0.0, 0.0, 0.0], None)
+        .expect("bone");
+    session.bind_object(0, Some("root")).expect("bind");
+    let bytes = session.export_bytes().expect("save");
+    let mut loaded = Session::new();
+    loaded.import_bytes(&bytes).expect("load");
+    assert_eq!(loaded.objects[0].name, "Leaf");
+    assert!(loaded.objects[0].hidden);
+    assert_eq!(
+        loaded.objects[0]
+            .cells
+            .values()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![4]
+    );
+    assert_eq!(loaded.objects[0].bone.as_deref(), Some("root"));
+    assert_eq!(loaded.objects[0].script.source, "voxel(1, 2, 3, 4);\n");
+    assert!(loaded.objects[0].script.auto);
+    assert_eq!(loaded.objects[0].script.params.len(), 1);
+    assert_eq!(loaded.materials[4].motion, Motion::Sway);
+    assert_eq!(loaded.materials[4].motion_amount, 1.5);
+    assert_eq!(loaded.skeleton.bones.len(), 1);
+    let again = loaded.export_bytes().expect("save again");
+    assert_eq!(again, bytes);
+    let mut third = Session::new();
+    third.import_bytes(&again).expect("reload");
+    let diff = loaded.round_trip_differences(&third);
+    assert!(diff.is_empty(), "{diff:?}");
+}
+
+#[test]
+#[ignore = "prints edit timings for a 256³ object; not a pass/fail check"]
+fn edit_speed_of_a_256_object() {
+    use std::time::Instant;
+
+    fn rebuild(session: &Session) -> (u128, usize) {
+        let object = session.active();
+        let mut buckets: HashMap<(i32, i32, i32), Vec<(Cell, [u8; 3])>> = HashMap::new();
+        for (&cell, &slot) in &object.cells {
+            buckets
+                .entry(crate::mesh::chunk_key(cell))
+                .or_default()
+                .push((cell, session.color(slot)));
+        }
+        let next: HashMap<(i32, i32, i32), u64> = buckets
+            .iter()
+            .map(|(key, listed)| (*key, crate::mesh::occupancy_hash(listed)))
+            .collect();
+        let dirty = crate::mesh::dirty_chunks(&HashMap::new(), &next);
+        let started = Instant::now();
+        let mut quads = 0usize;
+        for key in &dirty {
+            let built = crate::mesh::mesh_chunk(
+                &object.cells,
+                *key,
+                |slot| session.color(slot),
+                |slot| session.motion_uv(slot),
+            );
+            quads += built.indices.len() / 6;
+        }
+        (started.elapsed().as_millis(), quads)
+    }
+
+    let mut session = Session::new();
+    session.active_mut().cells.clear();
+    session.active_mut().dims = (256, 256, 256);
+    session.brush_size = 17;
+    session.brush_shape = BrushShape::Square;
+    session.brush_3d = true;
+    session.tool_mode = ToolMode::Add;
+    session.active_slot = 1;
+
+    let started = Instant::now();
+    for step in 0..200 {
+        session.stamp(Hit {
+            cell: (step, 128, 128),
+            normal: (0, 0, 1),
+        });
+    }
+    let brush_ms = started.elapsed().as_millis();
+    let (brush_mesh_ms, brush_quads) = rebuild(&session);
+
+    let started = Instant::now();
+    for cell in crate::tools::cube((0, 0, 0), (127, 127, 127), true) {
+        session.write_cell(cell, 1);
+    }
+    let box_ms = started.elapsed().as_millis();
+    let (box_mesh_ms, box_quads) = rebuild(&session);
+
+    let seeds: Vec<Cell> = (0..128)
+        .flat_map(|y| (0..128).map(move |x| (x, y, 127)))
+        .collect();
+    let started = Instant::now();
+    for cell in crate::tools::extrude(&seeds, 2, 1, 1, true) {
+        session.write_cell(cell, 1);
+    }
+    let extrude_ms = started.elapsed().as_millis();
+    let (extrude_mesh_ms, extrude_quads) = rebuild(&session);
+
+    println!(
+        "edit 256³: brush 200×r8 {brush_ms} ms, mesh {brush_mesh_ms} ms ({brush_quads} quads); \
+         box 128³ {box_ms} ms, mesh {box_mesh_ms} ms ({box_quads} quads); \
+         extrude 128×128 {extrude_ms} ms, mesh {extrude_mesh_ms} ms ({extrude_quads} quads)"
+    );
+}

@@ -152,6 +152,29 @@ pub(super) fn rot_to_byte(matrix: [[i32; 3]; 3]) -> u8 {
     (c0 as u8) | ((c1 as u8) << 2) | sign(s0, 4) | sign(s1, 5) | sign(s2, 6)
 }
 
+/// Every canonical `_r` byte whose decode is a signed permutation must encode back to itself.
+pub(crate) fn rotation_codec_errors() -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut checked = 0u32;
+    for byte in 0..128u8 {
+        let c0 = (byte & 3) as i32;
+        let c1 = ((byte >> 2) & 3) as i32;
+        let c2 = 3 - c0 - c1;
+        if c0 == c1 || c0 > 2 || c1 > 2 || !(0..=2).contains(&c2) {
+            continue;
+        }
+        let encoded = rot_to_byte(rot_from_byte(byte));
+        if encoded != byte {
+            errors.push(format!("rotation codec: byte {byte} encodes to {encoded}"));
+        }
+        checked += 1;
+    }
+    if checked == 0 {
+        errors.push("rotation codec: no valid bytes".into());
+    }
+    errors
+}
+
 pub(super) fn axis_matrix(axis: Axis, clockwise: bool) -> [[i32; 3]; 3] {
     match (axis, clockwise) {
         (Axis::Z, false) => [[0, -1, 0], [1, 0, 0], [0, 0, 1]],

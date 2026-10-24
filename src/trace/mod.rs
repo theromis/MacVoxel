@@ -2,8 +2,8 @@
 //!
 //! The window prefers the wgpu compute tracer. This CPU path is the fallback
 //! when a scene does not fit in one grid, and it is what the tests run.
-//! Atmospheric sky, metal, and glass match `trace.wgsl`. Open Image Denoise
-//! is not linked.
+//! Atmospheric sky, metal, and glass match `trace.wgsl`. With the `oidn`
+//! feature, a finished frame is denoised by Open Image Denoise.
 
 use std::collections::HashMap;
 
@@ -24,6 +24,8 @@ pub struct Image {
     sum: Vec<[f32; 3]>,
     shown: Vec<[f32; 3]>,
     albedo: Vec<[f32; 3]>,
+    /// First-hit geometric normal. Zero when the primary ray misses.
+    normal: Vec<[f32; 3]>,
 }
 
 impl Image {
@@ -37,7 +39,25 @@ impl Image {
             sum: vec![[0.0; 3]; n],
             shown: vec![[0.0; 3]; n],
             albedo: vec![[0.0; 3]; n],
+            normal: vec![[0.0; 3]; n],
         }
+    }
+
+    /// Mean of the accumulated samples. A finished frame has `samples` greater than zero.
+    pub fn mean(&self) -> Vec<[f32; 3]> {
+        let n = (self.samples.max(1)) as f32;
+        self.sum
+            .iter()
+            .map(|color| scale(*color, 1.0 / n))
+            .collect()
+    }
+
+    pub fn albedo(&self) -> &[[f32; 3]] {
+        &self.albedo
+    }
+
+    pub fn normal(&self) -> &[[f32; 3]] {
+        &self.normal
     }
 
     pub fn matches(&self, width: u32, height: u32) -> bool {
@@ -260,9 +280,9 @@ pub fn trace_rows(image: &mut Image, session: &Session, rows: u32) -> bool {
         let y = image.row;
         let sample = image.samples;
         for x in 0..image.width {
-            let (color, albedo) =
+            let (color, albedo, normal) =
                 shade_pixel(&world, &shade, image.width, image.height, x, y, sample, 0);
-            store_pixel(image, &shade, x, y, sample, color, albedo);
+            store_pixel(image, &shade, x, y, sample, color, albedo, normal);
         }
         image.row += 1;
         if image.row >= image.height {
@@ -286,9 +306,9 @@ pub fn render_still(session: &Session, width: u32, height: u32, samples: u32, se
     for sample in 0..samples {
         for y in 0..height {
             for x in 0..width {
-                let (color, albedo) =
+                let (color, albedo, normal) =
                     shade_pixel(&world, &shade, width, height, x, y, sample, seed);
-                store_pixel(&mut image, &shade, x, y, sample, color, albedo);
+                store_pixel(&mut image, &shade, x, y, sample, color, albedo, normal);
             }
         }
         image.row = 0;
@@ -306,17 +326,17 @@ fn shade_pixel(
     y: u32,
     sample: u32,
     seed: u32,
-) -> ([f32; 3], [f32; 3]) {
+) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let mut rng = Rng(hash(x, y, sample).wrapping_add(seed));
     let center = primary_dir(width, height, x, y, shade.eye, shade.target, &mut rng);
     let (origin, dir) = lens_ray(shade, shade.eye, shade.target, center, &mut rng);
     let color = radiance(world, shade, origin, dir, 0, &mut rng);
-    let albedo = if sample == 0 {
-        first_albedo(world, shade, origin, dir)
+    let (albedo, normal) = if sample == 0 {
+        first_guides(world, shade, origin, dir)
     } else {
-        [0.0; 3]
+        ([0.0; 3], [0.0; 3])
     };
-    (color, albedo)
+    (color, albedo, normal)
 }
 
 fn store_pixel(
@@ -327,10 +347,12 @@ fn store_pixel(
     sample: u32,
     color: [f32; 3],
     albedo: [f32; 3],
+    normal: [f32; 3],
 ) {
     let i = (y as usize) * (image.width as usize) + x as usize;
     if sample == 0 {
         image.albedo[i] = albedo;
+        image.normal[i] = normal;
     }
     image.sum[i] = add(image.sum[i], color);
     image.shown[i] = display_color(shade, image.sum[i], image.shown[i], color, sample);
@@ -387,16 +409,58 @@ fn preview_capped(session: &Session, viewport: [u32; 2], cap: u32) -> [u32; 2] {
     [w, h]
 }
 
-/// Tonemapped RGBA8, top row first, optional edge-aware filter.
-pub fn pixels(image: &Image, session: &Session) -> Vec<u8> {
-    let linear = if session.denoise {
-        denoise(image)
+/// Linear color after the active denoiser, or the accumulated picture.
+/// Open Image Denoise runs once the sample cap is reached. Before that the
+/// raw accumulation is shown, so a live preview is not denoised every frame.
+pub fn filtered(image: &Image, session: &Session) -> Result<Vec<[f32; 3]>, String> {
+    if session.denoise && crate::denoise::available() {
+        if image.samples >= session.render_sample_cap() && image.row == 0 {
+            crate::denoise::denoise_image(image)
+        } else {
+            Ok(image.shown.clone())
+        }
+    } else if session.denoise {
+        Ok(denoise(image))
     } else {
-        image.shown.clone()
-    };
+        Ok(image.shown.clone())
+    }
+}
+
+/// Tonemapped RGBA8, top row first. A denoiser error leaves the raw frame;
+/// [`encode_png`] reports that error.
+pub fn pixels(image: &Image, session: &Session) -> Vec<u8> {
+    let linear = filtered(image, session).unwrap_or_else(|_| image.shown.clone());
+    tonemap_rgba(&linear, session.aces)
+}
+
+pub fn encode_png(image: &Image, session: &Session) -> Result<Vec<u8>, String> {
+    if image.samples == 0 && image.row == 0 {
+        return Err("Render has no samples yet.".into());
+    }
+    let linear = filtered(image, session)?;
+    let rgba = tonemap_rgba(&linear, session.aces);
+    encode_rgba(image.width, image.height, &rgba)
+}
+
+pub fn write_png(path: &std::path::Path, image: &Image, session: &Session) -> Result<(), String> {
+    let bytes = encode_png(image, session)?;
+    std::fs::write(path, bytes).map_err(|err| format!("Could not write {}: {err}", path.display()))
+}
+
+pub fn write_rgba_png(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<(), String> {
+    let bytes = encode_rgba(width, height, rgba)?;
+    std::fs::write(path, bytes).map_err(|err| format!("Could not write {}: {err}", path.display()))
+}
+
+pub(crate) fn tonemap_rgba(linear: &[[f32; 3]], aces_on: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(linear.len() * 4);
     for color in linear {
-        let mapped = if session.aces {
+        let mapped = if aces_on {
             [aces(color[0]), aces(color[1]), aces(color[2])]
         } else {
             [
@@ -413,25 +477,47 @@ pub fn pixels(image: &Image, session: &Session) -> Vec<u8> {
     out
 }
 
-pub fn write_png(path: &std::path::Path, image: &Image, session: &Session) -> Result<(), String> {
-    if image.samples == 0 && image.row == 0 {
-        return Err("Render has no samples yet.".into());
+pub fn albedo_rgba(colors: &[[f32; 3]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(colors.len() * 4);
+    for color in colors {
+        out.push(to_srgb(color[0]));
+        out.push(to_srgb(color[1]));
+        out.push(to_srgb(color[2]));
+        out.push(255);
     }
-    let rgba = pixels(image, session);
+    out
+}
+
+pub fn normal_rgba(normals: &[[f32; 3]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(normals.len() * 4);
+    for normal in normals {
+        if *normal == [0.0, 0.0, 0.0] {
+            out.extend_from_slice(&[0, 0, 0, 255]);
+            continue;
+        }
+        out.push(to_srgb(normal[0] * 0.5 + 0.5));
+        out.push(to_srgb(normal[1] * 0.5 + 0.5));
+        out.push(to_srgb(normal[2] * 0.5 + 0.5));
+        out.push(255);
+    }
+    out
+}
+
+fn encode_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    let mut encoder = png::Encoder::new(&mut bytes, image.width, image.height);
+    let mut encoder = png::Encoder::new(&mut bytes, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder
         .write_header()
         .map_err(|err| format!("Could not write PNG: {err}"))?;
     writer
-        .write_image_data(&rgba)
+        .write_image_data(rgba)
         .map_err(|err| format!("Could not write PNG: {err}"))?;
     writer
         .finish()
         .map_err(|err| format!("Could not write PNG: {err}"))?;
-    std::fs::write(path, bytes).map_err(|err| format!("Could not write {}: {err}", path.display()))
+    Ok(bytes)
 }
 
 pub(super) fn emission_gain(material: &Material) -> f32 {
@@ -487,7 +573,7 @@ pub(crate) fn linear_rgb(rgba: [u8; 4]) -> [f32; 3] {
 mod shade;
 mod world;
 
-use shade::{aces, denoise, first_albedo, lens_ray, primary_dir, radiance, to_srgb};
+use shade::{aces, denoise, first_guides, lens_ray, primary_dir, radiance, to_srgb};
 use world::build_world;
 pub use world::{gpu_scene, GpuLight, GpuScene};
 

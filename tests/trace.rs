@@ -194,8 +194,14 @@ fn the_atmospheric_sky_is_lit_with_the_sun_off_and_ignores_the_disc() {
     let shade = Shade::from_session(&session);
     let zenith = sky(&shade, Vec3::Z, false);
     let horizon = sky(&shade, Vec3::new(-1.0, 0.0, 0.01), false);
-    assert!(zenith[2] > 0.08 && zenith[2] > zenith[0], "zenith {zenith:?}");
-    assert!(mean(horizon) > 0.3 && mean(horizon) < 2.0, "horizon {horizon:?}");
+    assert!(
+        zenith[2] > 0.08 && zenith[2] > zenith[0],
+        "zenith {zenith:?}"
+    );
+    assert!(
+        mean(horizon) > 0.3 && mean(horizon) < 2.0,
+        "horizon {horizon:?}"
+    );
     let mut small = atmospheric_session();
     small.sun_disc = 1.0;
     let small = sky(&Shade::from_session(&small), Vec3::Z, false);
@@ -256,4 +262,115 @@ fn save_render_outside_render_mode_queues_nothing() {
     session.trace_on_gpu = true;
     session.save_render();
     assert!(session.render_save_path.is_none());
+}
+
+fn md5(message: &[u8]) -> String {
+    fn f(x: u32, y: u32, z: u32) -> u32 {
+        (x & y) | (!x & z)
+    }
+    fn g(x: u32, y: u32, z: u32) -> u32 {
+        (x & z) | (y & !z)
+    }
+    fn h(x: u32, y: u32, z: u32) -> u32 {
+        x ^ y ^ z
+    }
+    fn i(x: u32, y: u32, z: u32) -> u32 {
+        y ^ (x | !z)
+    }
+    const SHIFT: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    let mut table = [0u32; 64];
+    for index in 0..64 {
+        table[index] = (((index as f64 + 1.0).sin().abs()) * 4294967296.0) as u32;
+    }
+    let bit_len = (message.len() as u64).wrapping_mul(8);
+    let mut padded = message.to_vec();
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_le_bytes());
+    let mut a0 = 0x67452301u32;
+    let mut b0 = 0xefcdab89u32;
+    let mut c0 = 0x98badcfeu32;
+    let mut d0 = 0x10325476u32;
+    for chunk in padded.chunks_exact(64) {
+        let mut words = [0u32; 16];
+        for (index, word) in words.iter_mut().enumerate() {
+            *word = u32::from_le_bytes(chunk[index * 4..index * 4 + 4].try_into().unwrap());
+        }
+        let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
+        for step in 0..64 {
+            let (value, word) = match step {
+                0..=15 => (f(b, c, d), step),
+                16..=31 => (g(b, c, d), (5 * step + 1) % 16),
+                32..=47 => (h(b, c, d), (3 * step + 5) % 16),
+                _ => (i(b, c, d), (7 * step) % 16),
+            };
+            let next = b.wrapping_add(
+                a.wrapping_add(value)
+                    .wrapping_add(table[step])
+                    .wrapping_add(words[word])
+                    .rotate_left(SHIFT[step]),
+            );
+            a = d;
+            d = c;
+            c = b;
+            b = next;
+        }
+        a0 = a0.wrapping_add(a);
+        b0 = b0.wrapping_add(b);
+        c0 = c0.wrapping_add(c);
+        d0 = d0.wrapping_add(d);
+    }
+    let mut out = String::new();
+    for word in [a0, b0, c0, d0] {
+        for byte in word.to_le_bytes() {
+            out.push_str(&format!("{byte:02x}"));
+        }
+    }
+    out
+}
+
+#[test]
+fn md5_matches_the_empty_string_and_a() {
+    assert_eq!(md5(b""), "d41d8cd98f00b204e9800998ecf8427e");
+    assert_eq!(md5(b"a"), "0cc175b9c0f1b6a831c399e269772661");
+}
+
+/// A fixed CPU still. The hash is the PNG, so a tracer change has to update it.
+#[test]
+fn a_fixed_cpu_still_has_a_stable_png() {
+    let mut session = Session::new();
+    session.objects[0].cells.clear();
+    voxel(&mut session, (0, 0, 0), 36);
+    voxel(&mut session, (1, 0, 0), 40);
+    voxel(&mut session, (0, 0, 1), 50);
+    let image = crate::still::render_cpu(
+        &mut session,
+        &crate::still::Still {
+            width: 8,
+            height: 8,
+            samples: 2,
+            bounces: 5,
+            seed: 1,
+            aces: true,
+            denoise: false,
+            atmospheric: None,
+            sky_intensity: None,
+            sun_intensity: None,
+            aperture: None,
+            focus: None,
+            glass: None,
+            stochastic_gi: None,
+            yaw: 30.0,
+            pitch: 25.0,
+            distance: 1.0,
+        },
+    );
+    let png = encode_png(&image, &session).expect("png");
+    assert_eq!(md5(&png), "514a25acad366a621a41c108d747d528");
 }

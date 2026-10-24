@@ -79,8 +79,12 @@ pub(super) fn render(ui: &mut Ui, session: &mut Session) {
     slider_i32(ui, session, "Samples", SliderTarget::MaxSamples, 16..=8192);
     section(ui, "Camera");
     ui.checkbox(&mut session.aces, "ACES tonemap");
-    ui.checkbox(&mut session.denoise, "Denoise").on_hover_text(
-        "Edge-aware filter on the finished frame. Open Image Denoise is not linked.",
+    ui.checkbox(&mut session.denoise, "Denoise")
+        .on_hover_text(crate::denoise::hover());
+    ui.label(
+        egui::RichText::new(crate::denoise::name())
+            .small()
+            .color(DIM),
     );
     slider_f32(
         ui,

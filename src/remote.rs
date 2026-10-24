@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use crate::state::Session;
+use crate::state::{GlassMode, Session};
 
 pub const NO_WINDOW: &str = "No window. Start the editor with `macvoxel-egui --control PORT`, then `macvoxel-egui mcp --connect 127.0.0.1:PORT`. Add `--launch` to open the window.";
 
@@ -21,6 +21,19 @@ fn render_scene(session: &mut Session, params: &Value) -> Result<Value, String> 
     let bounces = opt_i32_range(params, "bounces", 4, 0, 8)?;
     let seed = opt_i32_range(params, "seed", 1, 0, i32::MAX)?;
     let denoise = opt_bool(params, "denoise")?.unwrap_or(true);
+    let atmospheric = opt_bool(params, "atmospheric")?;
+    let sky_intensity = opt_f64(params, "sky-intensity")?;
+    let sun_intensity = opt_f64(params, "sun-intensity")?;
+    let aperture = opt_f64(params, "aperture")?;
+    let focus = opt_f64(params, "focus")?;
+    let glass = match opt_str(params, "glass-mode")? {
+        None => None,
+        Some(text) if text == "probabilistic" => Some(GlassMode::Probabilistic),
+        Some(text) if text == "absorption" => Some(GlassMode::Absorption),
+        Some(_) => {
+            return Err("glass-mode must be 'probabilistic' or 'absorption'".into());
+        }
+    };
     let yaw = opt_f64(params, "yaw")?;
     let pitch = opt_f64(params, "pitch")?;
     let distance = opt_f64(params, "distance")?;
@@ -45,22 +58,28 @@ fn render_scene(session: &mut Session, params: &Value) -> Result<Value, String> 
         return Err("document has no voxels".into());
     }
 
-    let saved_yaw = session.yaw;
-    let saved_pitch = session.pitch;
-    let saved_distance = session.distance;
-    let saved_target = session.target;
-    let saved_bounces = session.max_bounces;
-    let saved_aces = session.aces;
-    let saved_denoise = session.denoise;
-    session.frame_camera();
-    session.yaw = (yaw.unwrap_or(30.0) as f32).to_radians();
-    session.pitch = (pitch.unwrap_or(25.0) as f32).to_radians();
-    if let Some(scale) = distance {
-        session.distance *= scale as f32;
-    }
-    session.max_bounces = bounces;
-    session.aces = true;
-    session.denoise = denoise;
+    let saved = crate::still::prepare(
+        session,
+        &crate::still::Still {
+            width: width as u32,
+            height: height as u32,
+            samples: samples as u32,
+            bounces,
+            seed: seed as u32,
+            aces: true,
+            denoise,
+            atmospheric,
+            sky_intensity: sky_intensity.map(|value| value as f32),
+            sun_intensity: sun_intensity.map(|value| value as f32),
+            aperture: aperture.map(|value| value as f32),
+            focus: focus.map(|value| value as f32),
+            glass,
+            stochastic_gi: None,
+            yaw: yaw.unwrap_or(30.0) as f32,
+            pitch: pitch.unwrap_or(25.0) as f32,
+            distance: distance.unwrap_or(1.0) as f32,
+        },
+    );
     let image = crate::trace::render_still(
         session,
         width as u32,
@@ -69,13 +88,7 @@ fn render_scene(session: &mut Session, params: &Value) -> Result<Value, String> 
         seed as u32,
     );
     let written = crate::trace::write_png(Path::new(&path), &image, session);
-    session.yaw = saved_yaw;
-    session.pitch = saved_pitch;
-    session.distance = saved_distance;
-    session.target = saved_target;
-    session.max_bounces = saved_bounces;
-    session.aces = saved_aces;
-    session.denoise = saved_denoise;
+    crate::still::finish(session, saved);
     written?;
     Ok(json!({
         "path": path,

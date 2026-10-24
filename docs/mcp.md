@@ -219,9 +219,14 @@ window. `width` and `height` are 1..1024 and default to 256. `samples` is
 defaults to 1. The camera frames the scene, then orbits: `yaw` defaults to
 30 degrees, `pitch` to 25 degrees (−90..90), and `distance` multiplies that
 framing distance (greater than 0, at most 100). The file is ACES tonemapped.
-`denoise` defaults to true and runs the editor's edge-aware filter. Open
-Image Denoise is not linked. An empty scene is an error. The call does not
-move the editor camera. The reply is `path`, `width`, `height`, and `samples`.
+`denoise` defaults to true. The default build runs the edge-aware filter;
+a build with `--features oidn` runs Open Image Denoise on the finished
+frame, using the first-hit albedo and normal. `atmospheric`,
+`sky-intensity`, `sun-intensity`, `glass-mode` (`probabilistic` or
+`absorption`), `aperture`, and `focus` use the same names as
+`macvoxel render` and change the still only when present. An empty scene
+is an error. The call does not move the editor camera. The reply is
+`path`, `width`, `height`, and `samples`.
 
 `export_mesh` writes every solid voxel of every visible object, exposed faces
 only. Hidden objects are left out. `merge` defaults to false, one quad per

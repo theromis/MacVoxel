@@ -15,6 +15,7 @@ use crate::state::{GlassMode, MaterialType, Session};
 use crate::trace::{self, GpuLight};
 
 const SAMPLES_PER_FRAME: u32 = 4;
+const PIXEL_STRIDE: u64 = 64;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -75,6 +76,9 @@ pub struct Tracer {
     frame_key: u64,
     packed: bool,
     epoch: u64,
+    /// Mixed into the sampler. The viewport leaves this at zero.
+    seed: u32,
+    oidn_done: bool,
 }
 
 pub struct Frame {
@@ -185,7 +189,7 @@ impl Tracer {
         let palette = zeros(device, "path-trace-palette", 256 * 16);
         let voxels = zeros(device, "path-trace-voxels", 4);
         let lights = zeros(device, "path-trace-lights", std::mem::size_of::<GpuLight>());
-        let pixels = zeros(device, "path-trace-pixels", 48);
+        let pixels = pixel_buffer(device, PIXEL_STRIDE as usize);
         let (linear, linear_view) = linear_target(device, 1, 1);
         let (color, color_view) = color_target(device, 1, 1);
         let bind = bind_group(
@@ -227,6 +231,8 @@ impl Tracer {
             frame_key: 0,
             packed: false,
             epoch: 1,
+            seed: 0,
+            oidn_done: false,
         }
     }
 
@@ -265,6 +271,7 @@ impl Tracer {
         }
         if size_changed || self.frame_key != key {
             self.samples = 0;
+            self.oidn_done = false;
             self.frame_key = key;
         }
         let cap = session.max_samples.clamp(1, 8192) as u32;
@@ -284,9 +291,14 @@ impl Tracer {
         queue: &wgpu::Queue,
         path: &std::path::Path,
     ) -> Result<(), String> {
+        let rgba = self.read_color(device, queue)?;
+        crate::trace::write_rgba_png(path, self.size[0], self.size[1], &rgba)
+    }
+
+    fn read_color(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Vec<u8>, String> {
         let width = self.size[0];
         let height = self.size[1];
-        let padded = width.saturating_mul(4).div_ceil(256) * 256;
+        let padded = padded_row(width);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("path-trace-readback"),
             size: (padded as u64) * (height as u64),
@@ -330,21 +342,117 @@ impl Tracer {
         }
         drop(mapped);
         buffer.unmap();
-        let mut bytes = Vec::new();
-        let mut encoder = png::Encoder::new(&mut bytes, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder
-            .write_header()
-            .map_err(|err| format!("Could not write PNG: {err}"))?;
-        writer
-            .write_image_data(&rgba)
-            .map_err(|err| format!("Could not write PNG: {err}"))?;
-        writer
-            .finish()
-            .map_err(|err| format!("Could not write PNG: {err}"))?;
-        std::fs::write(path, bytes)
-            .map_err(|err| format!("Could not write {}: {err}", path.display()))
+        Ok(rgba)
+    }
+
+    pub fn set_seed(&mut self, seed: u32) {
+        self.seed = seed;
+    }
+
+    /// Denoise the finished accumulation into the display texture.
+    /// Without the `oidn` feature this leaves the shader's edge filter in place.
+    pub fn finish_oidn(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        session: &Session,
+    ) -> Result<(), String> {
+        if !crate::denoise::available() || !session.denoise || self.oidn_done || self.samples == 0 {
+            return Ok(());
+        }
+        let cap = session.render_sample_cap();
+        if self.samples < cap {
+            return Ok(());
+        }
+        let guides = self.read_pixels(device, queue)?;
+        let count = (self.size[0] * self.size[1]) as usize;
+        let n = self.samples as f32;
+        let mut color = Vec::with_capacity(count);
+        let mut albedo = Vec::with_capacity(count);
+        let mut normal = Vec::with_capacity(count);
+        for pixel in guides.iter().take(count) {
+            color.push([pixel.sum[0] / n, pixel.sum[1] / n, pixel.sum[2] / n]);
+            albedo.push([pixel.albedo[0], pixel.albedo[1], pixel.albedo[2]]);
+            normal.push([pixel.normal[0], pixel.normal[1], pixel.normal[2]]);
+        }
+        crate::denoise::denoise_buffers(&mut color, &albedo, &normal, self.size[0], self.size[1])?;
+        let rgba = crate::trace::tonemap_rgba(&color, session.aces);
+        let width = self.size[0];
+        let height = self.size[1];
+        let row = padded_row(width);
+        let mut packed = vec![0u8; (row * height) as usize];
+        for y in 0..height as usize {
+            let src = y * (width as usize) * 4;
+            let dst = y * row as usize;
+            packed[dst..dst + (width as usize) * 4]
+                .copy_from_slice(&rgba[src..src + (width as usize) * 4]);
+        }
+        queue.write_texture(
+            self.color.as_image_copy(),
+            &packed,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.oidn_done = true;
+        Ok(())
+    }
+
+    pub fn read_guides(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>), String> {
+        let pixels = self.read_pixels(device, queue)?;
+        let count = (self.size[0] * self.size[1]) as usize;
+        let mut albedo = Vec::with_capacity(count);
+        let mut normal = Vec::with_capacity(count);
+        for pixel in pixels.iter().take(count) {
+            albedo.push([pixel.albedo[0], pixel.albedo[1], pixel.albedo[2]]);
+            normal.push([pixel.normal[0], pixel.normal[1], pixel.normal[2]]);
+        }
+        Ok((albedo, normal))
+    }
+
+    fn read_pixels(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Vec<GpuPixel>, String> {
+        let count = (self.size[0] as u64) * (self.size[1] as u64);
+        let bytes = count * PIXEL_STRIDE;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("path-trace-pixel-readback"),
+            size: bytes.max(4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("path-trace-pixel-readback"),
+        });
+        encoder.copy_buffer_to_buffer(&self.pixels, 0, &buffer, 0, bytes);
+        queue.submit(Some(encoder.finish()));
+        let slice = buffer.slice(..);
+        let (tx, rx) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .map_err(|_| "Render readback was dropped.".to_string())?
+            .map_err(|err| format!("Could not read the render: {err}"))?;
+        let mapped = slice.get_mapped_range();
+        let pixels = bytemuck::cast_slice(&mapped[..bytes as usize]).to_vec();
+        drop(mapped);
+        buffer.unmap();
+        Ok(pixels)
     }
 
     fn frame(&self, gpu: bool) -> Frame {
@@ -424,8 +532,8 @@ impl Tracer {
     }
 
     fn resize(&mut self, device: &wgpu::Device, size: [u32; 2]) {
-        let pixels = (size[0] as u64) * (size[1] as u64) * 48;
-        self.pixels = zeros(device, "path-trace-pixels", pixels.max(48) as usize);
+        let pixels = (size[0] as u64) * (size[1] as u64) * PIXEL_STRIDE;
+        self.pixels = pixel_buffer(device, pixels.max(PIXEL_STRIDE) as usize);
         let (linear, linear_view) = linear_target(device, size[0], size[1]);
         let (color, color_view) = color_target(device, size[0], size[1]);
         self.linear = linear;
@@ -514,7 +622,7 @@ fn uniforms_for(session: &Session, tracer: &Tracer, batch: u32) -> Uniforms {
     if session.aces {
         flags |= 2;
     }
-    if session.denoise {
+    if session.denoise && !crate::denoise::available() {
         flags |= 4;
     }
     if session.atmospheric_sky {
@@ -561,7 +669,7 @@ fn uniforms_for(session: &Session, tracer: &Tracer, batch: u32) -> Uniforms {
             (session.sun_disc.max(0.1).to_radians() * 0.5).cos(),
             session.indirect_clamp,
             session.ema_floor.clamp(0.0, 1.0),
-            0.0,
+            f32::from_bits(tracer.seed),
         ],
     }
 }
@@ -585,6 +693,93 @@ fn zeros(device: &wgpu::Device, label: &str, size: usize) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+fn pixel_buffer(device: &wgpu::Device, size: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("path-trace-pixels"),
+        size: size.max(4) as u64,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    })
+}
+
+fn padded_row(width: u32) -> u32 {
+    width.saturating_mul(4).div_ceil(256) * 256
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuPixel {
+    sum: [f32; 4],
+    shown: [f32; 4],
+    albedo: [f32; 4],
+    normal: [f32; 4],
+}
+
+pub struct GpuFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub albedo: Vec<[f32; 3]>,
+    pub normal: Vec<[f32; 3]>,
+}
+
+/// Path-trace `session` on a headless wgpu device. `session.max_samples` is the cap.
+pub fn render_headless(session: &Session, size: [u32; 2], seed: u32) -> Result<GpuFrame, String> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let Some(adapter) = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    else {
+        return Err("no GPU adapter".into());
+    };
+    let (device, queue) =
+        block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+            .map_err(|err| format!("could not open a GPU device: {err}"))?;
+    let mut tracer = Tracer::new(&device);
+    tracer.set_seed(seed);
+    let cap = session.render_sample_cap();
+    loop {
+        let frame = tracer.advance(&device, &queue, session, size);
+        if !frame.gpu {
+            return Err("this scene does not fit one grid; omit --gpu".into());
+        }
+        if frame.samples >= cap {
+            break;
+        }
+    }
+    tracer.finish_oidn(&device, &queue, session)?;
+    let rgba = tracer.read_color(&device, &queue)?;
+    let (albedo, normal) = tracer.read_guides(&device, &queue)?;
+    Ok(GpuFrame {
+        width: size[0],
+        height: size[1],
+        rgba,
+        albedo,
+        normal,
+    })
+}
+
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    fn raw() -> RawWaker {
+        fn clone(_: *const ()) -> RawWaker {
+            raw()
+        }
+        fn noop(_: *const ()) {}
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        RawWaker::new(std::ptr::null(), &VTABLE)
+    }
+    let waker = unsafe { Waker::from_raw(raw()) };
+    let mut future = std::pin::pin!(future);
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(1)),
+        }
+    }
 }
 
 fn linear_target(

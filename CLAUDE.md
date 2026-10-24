@@ -48,8 +48,18 @@ sun disc is added in both skies. Off, the sky is the flat horizon gradient. Meta
 that normal, then Fresnel and Snell; roughness 0 is a single delta ray.
 Absorption glass stays a tinted straight ray. Save Render writes the PNG once
 the frame reaches Samples; leaving Render mode or an edit that restarts the
-frame cancels it. Denoise is the edge-aware filter. Open Image
-Denoise is not linked.
+frame cancels it. Denoise is the edge-aware filter unless the crate is built
+with `--features oidn`, which links Open Image Denoise and applies it to the
+finished frame from the albedo and normal guides. That feature needs the
+Open Image Denoise library on the build machine (`pkg-config`); the default
+build does not. The Render panel names the denoiser that is linked. `macvoxel render` is the same still with no window:
+CPU by default, `--gpu` for the wgpu tracer. `macvoxel voxrt` checks a `.vox`
+round trip, the save fixpoint, and the rotation codec.
+
+**V** **L** **B** **F** **U** **M** select brush, line, box, face, mutator, and
+marquee. **T** **R** **G** select Add, Remove, and Paint, in Model mode only.
+**Tab** switches Model and Object mode. In Object mode **X** **Y** **Z** rotate
+and Shift flips.
 
 ## Tests
 

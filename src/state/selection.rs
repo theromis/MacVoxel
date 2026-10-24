@@ -15,6 +15,7 @@ pub(super) enum Cmd {
     SaveAs,
     Tab,
     Tool(Tool),
+    Mode(ToolMode),
     DeletePicked,
     Cut,
     Copy,

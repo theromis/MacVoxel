@@ -670,6 +670,7 @@ pub use geom::palette_slot_at;
 #[allow(unused_imports)] // keeps `crate::state::raycast` after the move into geom
 pub use geom::raycast;
 pub(crate) use geom::resolved_box;
+pub(crate) use vox::rotation_codec_errors;
 
 #[cfg(test)]
 #[path = "../../tests/state.rs"]

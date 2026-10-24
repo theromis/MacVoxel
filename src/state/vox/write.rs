@@ -589,6 +589,7 @@ pub(crate) fn save_scene(
         rot: [[i32; 3]; 3],
         trn: i32,
         bone: Option<String>,
+        hidden: bool,
     }
     let mut packed = Vec::new();
     for object in objects {
@@ -615,6 +616,7 @@ pub(crate) fn save_scene(
                 rot: object.rot,
                 trn: (2 + packed.len() * 2) as i32,
                 bone: object.bone.clone(),
+                hidden: object.hidden,
             });
             continue;
         }
@@ -646,6 +648,7 @@ pub(crate) fn save_scene(
             rot: ROT_IDENTITY,
             trn: (2 + packed.len() * 2) as i32,
             bone: object.bone.clone(),
+            hidden: object.hidden,
         });
     }
     if packed.is_empty() {
@@ -674,7 +677,7 @@ pub(crate) fn save_scene(
     push_chunk(
         &mut children,
         b"nTRN",
-        &trn_body(0, 1, [0, 0, 0], ROT_IDENTITY, ""),
+        &trn_body(0, 1, [0, 0, 0], ROT_IDENTITY, "", false),
     );
     push_chunk(&mut children, b"nGRP", &grp_body(1, &kids));
     for (index, model) in packed.iter().enumerate() {
@@ -683,7 +686,7 @@ pub(crate) fn save_scene(
         push_chunk(
             &mut children,
             b"nTRN",
-            &trn_body(trn, shp, model.leaf_t, model.rot, &model.name),
+            &trn_body(trn, shp, model.leaf_t, model.rot, &model.name, model.hidden),
         );
         push_chunk(&mut children, b"nSHP", &shp_body(shp, index as i32));
     }
@@ -748,14 +751,18 @@ pub(crate) fn trn_body(
     t: [i32; 3],
     rot: [[i32; 3]; 3],
     name: &str,
+    hidden: bool,
 ) -> Vec<u8> {
     let mut body = Vec::new();
     push_i32(&mut body, id);
-    if name.is_empty() {
-        push_dict(&mut body, &[]);
-    } else {
-        push_dict(&mut body, &[("_name", name)]);
+    let mut attrs: Vec<(&str, &str)> = Vec::new();
+    if !name.is_empty() {
+        attrs.push(("_name", name));
     }
+    if hidden {
+        attrs.push(("_hidden", "1"));
+    }
+    push_dict(&mut body, &attrs);
     push_i32(&mut body, child);
     push_i32(&mut body, -1);
     push_i32(&mut body, -1);

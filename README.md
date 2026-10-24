@@ -35,10 +35,37 @@ the application menu bar. Elsewhere those commands are not in the window yet.
 - **Right-drag** orbits. **Scroll** zooms. **Space-drag** or middle-drag pans.
 - **Left-drag** uses the active tool.
 - **V** brush, **L** line, **B** box, **F** face, **U** mutator, **M** marquee.
+- **T** add, **R** remove, **G** paint. These three apply in Model mode.
+- **Tab** switches Model and Object mode.
 - In Object mode, **X / Y / Z** rotates the active object. **Shift** flips it.
 - **⌘Z / ⇧⌘Z** undo and redo. **⌘C / ⌘X / ⌘V** copy, cut, and paste.
 - **⌘N / ⌘O / ⌘S / ⇧⌘S** new, open, save, and save as.
 - **⇧⌘E** exports a glTF `.glb` with a palette texture and merged faces.
+
+## Command line
+
+`macvoxel render` path-traces a `.vox` file to a PNG and exits. It opens no
+window and starts no MCP server. The CPU tracer is the default, so one seed
+always writes the same PNG. `--gpu` uses the wgpu tracer and exits with
+`no GPU adapter` when the machine has none.
+
+```sh
+macvoxel render --input model.vox --output frame.png \
+  --width 512 --height 512 --samples 64 --bounces 5 --seed 1
+```
+
+`--help` lists the defaults and the two legacy flags this tracer does not
+have: `--reference` and `--clamp-L`. `--denoise` uses Open Image Denoise
+when the binary is built with `--features oidn`, and the edge-aware filter
+otherwise. The feature needs the Open Image Denoise library on the machine
+that builds it.
+
+`macvoxel voxrt --input model.vox` loads the file, saves it, loads that save,
+and compares objects, cells, palette, materials, the scene graph, names,
+translations, rotations, hidden flags, layers, frames, bones, scripts, and
+motion. It also checks that a second save is byte-identical and that every
+`_r` value round-trips. `--dump` prints the chunk tree and skips the checks.
+Exit code 0 is a match. Exit code 1 lists the differences.
 
 ## MCP
 

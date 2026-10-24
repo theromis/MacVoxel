@@ -391,6 +391,16 @@ fn paint_gpu(
     if frame.repaint {
         ctx.request_repaint();
     }
+    if crate::denoise::available() {
+        if let Err(err) = cache
+            .trace
+            .as_mut()
+            .expect("tracer")
+            .finish_oidn(&rs.device, &rs.queue, session)
+        {
+            session.status = err;
+        }
+    }
     if let Some(path) = session.take_finished_render(frame.samples) {
         match cache
             .trace

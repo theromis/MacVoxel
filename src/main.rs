@@ -12,12 +12,15 @@
 //! the session is in-process and has no window. `--connect` drives an editor
 //! that was started with `--control`, which is where screenshots come from.
 //! `--launch` opens that editor. Render mode path-traces on the GPU
-//! through wgpu. MCP `render` path-traces a PNG on the CPU.
+//! through wgpu. MCP `render` and `macvoxel render` path-trace a PNG with
+//! no window. `macvoxel voxrt` checks a `.vox` round trip.
 //!
 //! The Swift/Metal editor lives in `legacy/`. On macOS the File and Edit
 //! commands live on the application menu bar.
 
+mod cli;
 mod control;
+mod denoise;
 mod export;
 mod gpu;
 mod mcp;
@@ -29,6 +32,7 @@ mod remote;
 mod rig;
 mod script;
 mod state;
+mod still;
 mod tools;
 mod trace;
 mod trace_gpu;
@@ -50,6 +54,12 @@ fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "mcp") {
         std::process::exit(mcp::run(&args[1..]));
+    }
+    if args.first().is_some_and(|arg| arg == "render") {
+        std::process::exit(cli::render(&args[1..]));
+    }
+    if args.first().is_some_and(|arg| arg == "voxrt") {
+        std::process::exit(cli::voxrt(&args[1..]));
     }
     let (port, file) = match parse_gui(&args) {
         Ok(parsed) => parsed,
@@ -364,8 +374,10 @@ fn parse_gui(args: &[String]) -> Result<(Option<u16>, Option<PathBuf>), String> 
             "-h" | "--help" => {
                 eprintln!(
                     "\
-usage: macvoxel-egui [--control PORT] [file.vox]
-       macvoxel-egui mcp [--connect HOST:PORT] [--launch]"
+usage: macvoxel [--control PORT] [file.vox]
+       macvoxel mcp [--connect HOST:PORT] [--launch]
+       macvoxel render --input <file.vox> --output <file.png>
+       macvoxel voxrt --input <file.vox> [--dump]"
                 );
                 std::process::exit(0);
             }

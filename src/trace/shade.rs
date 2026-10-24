@@ -478,10 +478,19 @@ pub(super) fn sky(session: &Shade, dir: Vec3, include_sun: bool) -> [f32; 3] {
     color
 }
 
-pub(super) fn first_albedo(world: &World, session: &Shade, origin: Vec3, dir: Vec3) -> [f32; 3] {
-    march(world, origin, dir)
-        .map(|hit| linear_rgb(session.palette[hit.slot as usize]))
-        .unwrap_or([0.0; 3])
+pub(super) fn first_guides(
+    world: &World,
+    session: &Shade,
+    origin: Vec3,
+    dir: Vec3,
+) -> ([f32; 3], [f32; 3]) {
+    match march(world, origin, dir) {
+        Some(hit) => (
+            linear_rgb(session.palette[hit.slot as usize]),
+            [hit.normal.x, hit.normal.y, hit.normal.z],
+        ),
+        None => ([0.0; 3], [0.0; 3]),
+    }
 }
 
 pub(super) fn denoise(image: &Image) -> Vec<[f32; 3]> {

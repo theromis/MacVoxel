@@ -106,6 +106,12 @@ impl Session {
                 cmd = Some(Cmd::Tool(Tool::Mutator));
             } else if i.key_pressed(egui::Key::M) && !command {
                 cmd = Some(Cmd::Tool(Tool::Marquee));
+            } else if !object_mode && !command && i.key_pressed(egui::Key::T) {
+                cmd = Some(Cmd::Mode(ToolMode::Add));
+            } else if !object_mode && !command && i.key_pressed(egui::Key::R) {
+                cmd = Some(Cmd::Mode(ToolMode::Remove));
+            } else if !object_mode && !command && i.key_pressed(egui::Key::G) {
+                cmd = Some(Cmd::Mode(ToolMode::Paint));
             } else if object_mode
                 && !command
                 && !i.modifiers.alt
@@ -147,6 +153,7 @@ impl Session {
                 };
             }
             Some(Cmd::Tool(tool)) => self.tool = tool,
+            Some(Cmd::Mode(mode)) => self.tool_mode = mode,
             Some(Cmd::DeletePicked) => self.delete_picked(),
             Some(Cmd::Cut) => self.cut_picked(),
             Some(Cmd::Copy) => self.copy_picked(),

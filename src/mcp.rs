@@ -494,18 +494,31 @@ fn tools() -> Vec<Value> {
         tool("list_bones", "Bones with parent, pivot, rotation, and the object indices bound to each.", json!({}), &[]),
         tool("undo", "Undo the last edit.", json!({}), &[]),
         tool("redo", "Redo the last undone edit.", json!({}), &[]),
-        tool("render", "Path-trace the whole scene to a PNG. Blocks until the file is written. The camera frames the scene; yaw, pitch, and distance orbit that frame.", json!({
+        tool("render", "Path-trace the whole scene to a PNG. Blocks until the file is written. The camera frames the scene; yaw, pitch, and distance orbit that frame.", {
+            let denoise = if crate::denoise::available() {
+                "Open Image Denoise on the finished frame, using the first-hit albedo and normal. Default true."
+            } else {
+                "Edge-aware filter before writing. Default true. Build with --features oidn for Open Image Denoise."
+            };
+            json!({
             "path": str_prop("PNG file to write"),
             "width": int_prop("Pixels, 1..1024. Default 256."),
             "height": int_prop("Pixels, 1..1024. Default 256."),
             "samples": int_prop("Path-trace samples, 1..128. Default 16."),
             "bounces": int_prop("Max bounces, 0..8. Default 4."),
             "seed": int_prop("Sampling seed. Default 1."),
-            "denoise": {"type": "boolean", "description": "Edge-aware filter before writing. Default true. Open Image Denoise is not linked."},
+            "denoise": {"type": "boolean", "description": denoise},
+            "atmospheric": {"type": "boolean", "description": "Nishita sky. Omit to keep the document setting."},
+            "sky-intensity": num_prop("Sky intensity. Omit to keep the document setting."),
+            "sun-intensity": num_prop("Sun intensity. Omit to keep the document setting."),
+            "glass-mode": str_prop("probabilistic or absorption. Omit to keep the document setting."),
+            "aperture": num_prop("Lens aperture. Omit to keep the document setting."),
+            "focus": num_prop("Focus distance. Omit to keep the document setting."),
             "yaw": num_prop("Orbit yaw in degrees. Omit to keep the framing angle (30)."),
             "pitch": num_prop("Orbit pitch in degrees, -90..90. 90 looks straight down. Omit to keep the framing angle (25)."),
             "distance": num_prop("Multiple of the framing distance, greater than 0 and at most 100. Default 1.")
-        }), &["path"]),
+            })
+        }, &["path"]),
         tool("screenshot", "PNG of the whole editor window. Only when connected to a window.", json!({"path": str_prop("Optional file to write")}), &[]),
         tool("screenshot_viewport", "PNG of the 3D viewport. Only when connected to a window.", json!({"path": str_prop("Optional file to write")}), &[]),
         tool("screenshot_region", "PNG of a rectangle in window points, origin at the top-left of the client area. Only when connected to a window.", json!({

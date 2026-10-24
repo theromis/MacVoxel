@@ -30,6 +30,7 @@ struct Pixel {
     sum: vec4<f32>,
     shown: vec4<f32>,
     albedo: vec4<f32>,
+    normal: vec4<f32>,
 }
 struct Hit {
     found: bool,
@@ -40,6 +41,7 @@ struct Hit {
 struct Sample {
     color: vec3<f32>,
     albedo: vec3<f32>,
+    normal: vec3<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -53,7 +55,7 @@ struct Sample {
 const MAX_STEPS: i32 = 384;
 
 fn hash(x: u32, y: u32, sample: u32) -> u32 {
-    var n = x * 374761393u + y * 668265263u + sample * 1440678137u;
+    var n = x * 374761393u + y * 668265263u + sample * 1440678137u + bitcast<u32>(u.tone.w);
     n = (n ^ (n >> 13u)) * 1274126177u;
     return n ^ (n >> 16u);
 }
@@ -417,6 +419,7 @@ fn trace_sample(px: vec2<u32>, sample_i: u32) -> Sample {
     var throughput = vec3<f32>(1.0);
     var color = vec3<f32>(0.0);
     var albedo = vec3<f32>(0.0);
+    var normal = vec3<f32>(0.0);
     let bounces = u.misc0.w;
     let gi = (u.misc1.x & 1u) != 0u;
     for (var bounce = 0u; bounce <= bounces; bounce++) {
@@ -428,7 +431,10 @@ fn trace_sample(px: vec2<u32>, sample_i: u32) -> Sample {
             break;
         }
         let slot = min(hit.slot, 255u);
-        if (bounce == 0u) { albedo = palette[slot].xyz; }
+        if (bounce == 0u) {
+            albedo = palette[slot].xyz;
+            normal = hit.normal;
+        }
         let mat = materials[slot];
         let alb = palette[slot].xyz;
         if (mat.ty == 2u) {
@@ -512,6 +518,7 @@ fn trace_sample(px: vec2<u32>, sample_i: u32) -> Sample {
     var out: Sample;
     out.color = color;
     out.albedo = albedo;
+    out.normal = normal;
     return out;
 }
 
@@ -531,6 +538,7 @@ fn trace_main(@builtin(global_invocation_id) id: vec3<u32>) {
     var sum = pixels[i].sum.xyz;
     var shown = pixels[i].shown.xyz;
     var albedo = pixels[i].albedo.xyz;
+    var normal = pixels[i].normal.xyz;
     let batch = u.misc1.w;
     for (var s = 0u; s < batch; s++) {
         let sample_i = u.misc0.z + s;
@@ -539,6 +547,7 @@ fn trace_main(@builtin(global_invocation_id) id: vec3<u32>) {
             sum = sample.color;
             shown = sample.color;
             albedo = sample.albedo;
+            normal = sample.normal;
         } else {
             sum = sum + sample.color;
             shown = display_of(sum, shown, sample.color, sample_i);
@@ -547,6 +556,7 @@ fn trace_main(@builtin(global_invocation_id) id: vec3<u32>) {
     pixels[i].sum = vec4<f32>(sum, 0.0);
     pixels[i].shown = vec4<f32>(shown, 0.0);
     pixels[i].albedo = vec4<f32>(albedo, 0.0);
+    pixels[i].normal = vec4<f32>(normal, 0.0);
 }
 
 fn aces(x: f32) -> f32 {

@@ -76,12 +76,39 @@ impl Session {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Model".into());
+        self.install(loaded, &stem);
+        self.path = Some(path.to_path_buf());
+        self.undo.clear();
+        self.redo.clear();
+        self.pending = None;
+        self.frame_camera();
+        let file = path.file_name().unwrap_or_default().to_string_lossy();
+        self.script_error.clear();
+        self.script_due = None;
+        self.status = if models > 1 {
+            format!("Loaded {n} voxels in {models} objects from {file}.")
+        } else {
+            format!("Loaded {n} voxels from {file}.")
+        };
+        if self
+            .objects
+            .iter()
+            .any(|object| !object.script.source.is_empty())
+        {
+            self.status.push_str(" This file carries a script.");
+        }
+        self.remember_path(path);
+        Ok(())
+    }
+
+    fn install(&mut self, loaded: Loaded, stem: &str) {
+        let models = loaded.objects.len();
         self.objects.clear();
         for (index, object) in loaded.objects.into_iter().enumerate() {
             let name = if !object.name.is_empty() {
                 object.name
             } else if models == 1 {
-                stem.clone()
+                stem.to_string()
             } else {
                 format!("Object {}", index + 1)
             };
@@ -106,7 +133,7 @@ impl Session {
         }
         if self.objects.is_empty() {
             self.objects.push(Volume {
-                name: stem,
+                name: stem.to_string(),
                 cells: HashMap::new(),
                 translation: (0, 0, 0),
                 box_min: (0, 0, 0),
@@ -128,30 +155,85 @@ impl Session {
         self.graph = loaded.graph;
         self.skeleton = loaded.skeleton;
         self.selected_bone = None;
-        self.path = Some(path.to_path_buf());
+        self.clear_picked();
+        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
+    }
+
+    pub(crate) fn export_bytes(&self) -> Result<Vec<u8>, String> {
+        save_document(
+            &self.objects,
+            &self.palette,
+            &self.materials,
+            self.graph.as_ref(),
+            &self.skeleton,
+        )
+    }
+
+    pub(crate) fn import_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let loaded = load_vox(bytes)?;
+        self.install(loaded, "Object");
         self.undo.clear();
         self.redo.clear();
         self.pending = None;
-        self.clear_picked();
-        self.mesh_epoch = self.mesh_epoch.wrapping_add(1);
-        self.frame_camera();
-        let file = path.file_name().unwrap_or_default().to_string_lossy();
-        self.script_error.clear();
-        self.script_due = None;
-        self.status = if models > 1 {
-            format!("Loaded {n} voxels in {models} objects from {file}.")
-        } else {
-            format!("Loaded {n} voxels from {file}.")
-        };
-        if self
-            .objects
-            .iter()
-            .any(|object| !object.script.source.is_empty())
-        {
-            self.status.push_str(" This file carries a script.");
-        }
-        self.remember_path(path);
         Ok(())
+    }
+
+    /// Differences a second load of a save should not have.
+    pub(crate) fn round_trip_differences(&self, other: &Self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.objects.len() != other.objects.len() {
+            out.push(format!(
+                "object count: {} -> {}",
+                self.objects.len(),
+                other.objects.len()
+            ));
+        }
+        for (index, (left, right)) in self.objects.iter().zip(&other.objects).enumerate() {
+            if left.name != right.name {
+                out.push(format!(
+                    "object {index} name: '{}' -> '{}'",
+                    left.name, right.name
+                ));
+            }
+            if left.hidden != right.hidden {
+                out.push(format!("object {index} _hidden changed"));
+            }
+            if left.translation != right.translation {
+                out.push(format!(
+                    "object {index} translation: {:?} -> {:?}",
+                    left.translation, right.translation
+                ));
+            }
+            if left.rot != right.rot {
+                out.push(format!("object {index} rotation changed"));
+            }
+            if left.cells != right.cells {
+                out.push(format!("object {index} cells differ"));
+            }
+            if left.bone != right.bone {
+                out.push(format!(
+                    "object {index} bone: {:?} -> {:?}",
+                    left.bone, right.bone
+                ));
+            }
+            if left.script.source != right.script.source
+                || left.script.params != right.script.params
+                || left.script.auto != right.script.auto
+            {
+                out.push(format!("object {index} script differs"));
+            }
+        }
+        if self.palette != other.palette {
+            out.push("palette differs".into());
+        }
+        if self.materials != other.materials {
+            out.push("materials or motion differ".into());
+        }
+        if self.skeleton != other.skeleton {
+            out.push("bones differ".into());
+        }
+        out.extend(graph_differences(self.graph.as_ref(), other.graph.as_ref()));
+        out
     }
 
     /// Empty one-object document. The window's File → New still builds the demo tree.
@@ -677,4 +759,58 @@ impl Session {
             self.load_path(&path);
         }
     }
+}
+
+fn graph_differences(left: Option<&VoxGraph>, right: Option<&VoxGraph>) -> Vec<String> {
+    let (Some(left), Some(right)) = (left, right) else {
+        return if left.is_none() && right.is_none() {
+            Vec::new()
+        } else {
+            vec!["scene graph presence differs".into()]
+        };
+    };
+    let mut out = Vec::new();
+    if left.layers != right.layers {
+        out.push(format!(
+            "layer count or attributes: {} -> {}",
+            left.layers.len(),
+            right.layers.len()
+        ));
+    }
+    if left.nodes.len() != right.nodes.len() {
+        out.push(format!(
+            "scene node count: {} -> {}",
+            left.nodes.len(),
+            right.nodes.len()
+        ));
+        return out;
+    }
+    for (index, (a, b)) in left.nodes.iter().zip(&right.nodes).enumerate() {
+        if a.frames != b.frames {
+            out.push(format!("node {index} frames differ"));
+        }
+        if a.name != b.name || a.attrs != b.attrs {
+            out.push(format!("node {index} name or attributes differ"));
+        }
+        if a.t != b.t || a.rot != b.rot {
+            out.push(format!("node {index} file transform differs"));
+        }
+        if a.kind != b.kind
+            || a.child != b.child
+            || a.children != b.children
+            || a.models != b.models
+        {
+            out.push(format!("node {index} links differ"));
+        }
+    }
+    if left.models != right.models {
+        out.push("stored model voxels differ".into());
+    }
+    if left.shift != right.shift {
+        out.push(format!(
+            "scene shift: {:?} -> {:?}",
+            left.shift, right.shift
+        ));
+    }
+    out
 }
