@@ -18,6 +18,8 @@ pub fn left(ui: &mut Ui, session: &mut Session) {
 pub fn right(ui: &mut Ui, session: &mut Session) {
     outliner::outliner(ui, session);
     ui.separator();
+    outliner::object(ui, session);
+    ui.separator();
     outliner::bones(ui, session);
     ui.separator();
     outliner::pose(ui, session);
